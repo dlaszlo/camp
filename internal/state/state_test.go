@@ -311,3 +311,77 @@ func TestListShowsPhases(t *testing.T) {
 		}
 	}
 }
+
+// The record is read when something has already gone wrong, and it is the
+// only list of what is mounted. So it is read strictly: a field this
+// build does not know is a field somebody expected it to honour, and a
+// record naming no mounts would be a teardown that succeeds by doing
+// nothing.
+func TestARecordThatCannotMeanWhatItSaysIsRefused(t *testing.T) {
+	scratch(t)
+	record, _ := fixture(t)
+	if err := record.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(state.Path(record.Hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	edit := func(t *testing.T, change func(map[string]any)) []byte {
+		t.Helper()
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatal(err)
+		}
+		change(raw)
+		rewritten, err := json.Marshal(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rewritten
+	}
+
+	for _, probe := range []struct {
+		name   string
+		change func(map[string]any)
+		says   string
+	}{
+		{"a field this build does not know",
+			func(raw map[string]any) { raw["chown_to"] = 0 }, "unknown field"},
+		{"no mounts at all",
+			func(raw map[string]any) { raw["mounts"] = []any{} }, "no mounts"},
+		{"a phase camp does not have",
+			func(raw map[string]any) { raw["phase"] = "halfway" }, "phase"},
+		{"a path that is not resolved",
+			func(raw map[string]any) { raw["live"] = "/tmp/../tmp/live" }, "resolved"},
+		{"the same target twice",
+			func(raw map[string]any) {
+				mounts := raw["mounts"].([]any)
+				raw["mounts"] = append(mounts, mounts[0])
+			}, "recorded twice"},
+	} {
+		t.Run(probe.name, func(t *testing.T) {
+			_, err := state.Decode(edit(t, probe.change))
+			if err == nil {
+				t.Fatalf("%s was accepted", probe.name)
+			}
+			if !strings.Contains(err.Error(), probe.says) {
+				t.Errorf("the refusal should say what is wrong (%q): %v",
+					probe.says, err)
+			}
+		})
+	}
+
+	// And the file's name has to agree with what is inside it: those are
+	// the two things a teardown is addressed by.
+	t.Run("a record under somebody else's name", func(t *testing.T) {
+		other := filepath.Join(state.Dir(), "0000cafe0000.json")
+		if err := os.WriteFile(other, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := state.Load("0000cafe0000"); err == nil {
+			t.Error("a record filed under another composition's name was read")
+		}
+	})
+}

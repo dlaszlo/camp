@@ -26,6 +26,7 @@
 package state
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -221,14 +222,35 @@ func Load(hash string) (Record, bool, error) {
 	if err != nil {
 		return Record{}, true, fmt.Errorf("%s: %w", Path(hash), err)
 	}
+	// The file is named after the composition it describes. A record whose
+	// hash says otherwise was moved or edited, and the two things that
+	// disagree are the two things a teardown is addressed by.
+	if record.Hash != hash {
+		return Record{}, true, fmt.Errorf("%s describes the composition %s. The "+
+			"file is named after the composition it holds, so one of the two "+
+			"has been changed by hand", Path(hash), record.Hash)
+	}
 	return record, true, nil
 }
 
-// Decode parses a record and refuses a version it does not know.
+// Decode parses a record strictly and checks that it says what a record
+// has to say.
+//
+// Strictly, because of what this file is for: it is read when something
+// has already gone wrong, and it is the only list of what is mounted. A
+// field the reader does not understand is a field somebody expected it to
+// honour, and a record that parses while naming no mounts would be a
+// teardown that succeeds by doing nothing.
 func Decode(data []byte) (Record, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
 	var record Record
-	if err := json.Unmarshal(data, &record); err != nil {
+	if err := decoder.Decode(&record); err != nil {
 		return Record{}, fmt.Errorf("the record does not parse: %w", err)
+	}
+	if decoder.More() {
+		return Record{}, fmt.Errorf("the record is followed by more data, and " +
+			"one file is one composition")
 	}
 	if record.Version != Version {
 		return Record{}, fmt.Errorf("the record is version %d and this camp "+
@@ -236,7 +258,79 @@ func Decode(data []byte) (Record, error) {
 			"use that build to take the composition down, rather than letting "+
 			"this one guess at what the fields mean", record.Version, Version)
 	}
-	return record, nil
+	return record, record.check()
+}
+
+// check refuses a record that cannot mean what it says.
+func (r Record) check() error {
+	if r.Hash == "" {
+		return fmt.Errorf("the record names no composition: its hash is empty")
+	}
+	switch r.Phase {
+	case Mounting, Up, Partial, Down:
+	default:
+		return fmt.Errorf("the record's phase is %q, and camp knows %q, %q, %q "+
+			"and %q", r.Phase, Mounting, Up, Partial, Down)
+	}
+	for field, path := range map[string]string{
+		"live": r.Live, "env": r.Env, "config": r.Config,
+		"upper": r.Upper, "workspace": r.Workspace,
+	} {
+		if err := canonical(field, path); err != nil {
+			return err
+		}
+	}
+	if len(r.Mounts) == 0 {
+		return fmt.Errorf("the record names no mounts. A composition always has " +
+			"at least one, and a teardown that finds none would report success " +
+			"for having done nothing")
+	}
+
+	seen := map[string]bool{}
+	for index, mount := range r.Mounts {
+		if mount.Kind == "" {
+			return fmt.Errorf("recorded mount %d has no kind", index+1)
+		}
+		if err := canonical(fmt.Sprintf("recorded mount %d's target", index+1),
+			mount.Target); err != nil {
+			return err
+		}
+		if seen[mount.Target] {
+			return fmt.Errorf("%s is recorded twice, and one path is one mount "+
+				"in a teardown", mount.Target)
+		}
+		seen[mount.Target] = true
+	}
+	for _, path := range r.Detached {
+		if err := canonical("a detached mount point", path); err != nil {
+			return err
+		}
+	}
+	for _, path := range r.Created {
+		if err := canonical("a created path", path); err != nil {
+			return err
+		}
+	}
+	if r.Staging != "" {
+		if err := canonical("staging", r.Staging); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// canonical refuses a path that is not absolute and already normalised.
+// Everything in a record was resolved before it was written, and a path
+// with a ".." in it is a path somebody edited.
+func canonical(field, path string) error {
+	if path == "" {
+		return fmt.Errorf("the record's %s is empty", field)
+	}
+	if !filepath.IsAbs(path) || path != filepath.Clean(path) {
+		return fmt.Errorf("the record's %s is %q, and every path in a record is "+
+			"absolute and already resolved", field, path)
+	}
+	return nil
 }
 
 // Listing is one entry of what list prints. A record that will not parse
@@ -252,7 +346,13 @@ type Listing struct {
 func All() []Listing {
 	entries, err := os.ReadDir(Dir())
 	if err != nil {
-		return nil
+		// No directory means nothing was ever recorded. Anything else is a
+		// state directory camp cannot read, and answering "no compositions"
+		// to that would be the most misleading sentence camp could say.
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return []Listing{{Path: Dir(), Corrupt: err}}
 	}
 	var listings []Listing
 	for _, entry := range entries {
