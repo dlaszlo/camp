@@ -284,12 +284,17 @@ func cmdInit(ctx *context, args []string) error {
 	if err := area.Write(".gitignore", []byte(report.CampIgnore), 0o644); err != nil {
 		return wrap(err, ExitFailure, "")
 	}
+	// And a note in the directory itself saying which of the things in it
+	// is the reader's and which is camp's working material.
+	if err := area.Write("README.md", []byte(report.CampReadme), 0o644); err != nil {
+		return wrap(err, ExitFailure, "")
+	}
 	ctx.printf("wrote %s\n"+
-		"and %s/.gitignore, which keeps camp's scratch, storage and reports "+
-		"out of version control while leaving the configuration and the "+
-		"inventory in.\n"+
-		"Edit the configuration -- every CHANGE-ME has to become a real "+
-		"directory name -- then run 'camp plan' to see what it would do.\n",
-		target, filepath.Dir(target))
+		"and, beside it, a README saying which of the things in %s are "+
+		"yours and which are camp's, and a .gitignore that keeps camp's "+
+		"scratch out of version control.\n"+
+		"config.yml is the one file you edit. Every CHANGE-ME has to become "+
+		"a real directory name; then run 'camp plan' to see what it would "+
+		"do.\n", target, filepath.Dir(target))
 	return nil
 }

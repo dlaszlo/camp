@@ -113,6 +113,14 @@ func TestTheSnapshotIsSortedByBytesAndSurvivesHostileNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	// The header says what kind of file this is; the records start after it.
+	if !strings.HasPrefix(lines[0], "#") {
+		t.Fatal("the snapshot does not open with a header saying it is a " +
+			"record rather than a setting")
+	}
+	for len(lines) > 0 && strings.HasPrefix(lines[0], "#") {
+		lines = lines[1:]
+	}
 	for index := 1; index < len(lines); index++ {
 		if lines[index] < lines[index-1] {
 			t.Fatalf("line %d (%q) comes before line %d (%q)",

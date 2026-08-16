@@ -34,6 +34,43 @@ opposite. `work/` may be swept whenever nothing is mounted. `storage/`
 holds unfinished worktrees and machine-local files and is **never**
 removed by camp.
 
+## What is yours, and what is camp's
+
+Five things live in `.camp`, and exactly one of them is yours to edit.
+`camp init` writes a README saying so into the directory itself, because
+that is the only place a person meets the answer without going looking
+for it.
+
+| | what it is | who writes it | committed? |
+|---|---|---|---|
+| `config.yml` | **yours** — what you want composed | you, by hand | yes |
+| `inventory` | the accepted snapshot of both repositories' root entries | `camp accept`, and nothing else | yes |
+| `work/` | scratch for one composition | camp; swept when nothing is mounted | no |
+| `storage/` | machine-local files and worktrees | camp — and never removed by it | no |
+| `reports/` | what a session found | camp | no |
+
+The distinction that matters is not generated-versus-written; it is
+**whose it is**. `inventory` is generated, and committing it is the point
+of it — but editing it by hand defeats the one job it has. camp compares
+against it at every start, so a name that appeared at a repository's root
+while you were not looking stops the composition instead of passing
+unnoticed. Change it by editing the repositories and running
+`camp accept`, never by editing the file.
+
+`storage/` is camp's and is never removed by camp, which sounds
+contradictory until you look at what is in it: worktrees and
+machine-local files, which are yours and may be unfinished. camp will not
+delete your unfinished work to tidy up. Move or remove what you want from
+there yourself; `camp doctor` lists any storage whose composition no
+longer exists.
+
+One thing in `work/` looks alarming and is not: a directory with no
+permissions at all, owned by you. OverlayFS creates it inside the workdir
+it is given and makes it unreadable so that nothing wanders into it. It
+holds nothing of yours. camp cannot remove it while the composition is
+up — it is in use — and a namespace session has no teardown step of its
+own, so the next run sweeps it.
+
 ## The mount sequence
 
 A run has two halves: a **frame** that always executes in a fixed order,
