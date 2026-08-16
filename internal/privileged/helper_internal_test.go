@@ -1,11 +1,14 @@
 package privileged
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/mountinfo"
 )
@@ -84,5 +87,54 @@ func TestOnlyAMountThatIsNotCampsIsRefused(t *testing.T) {
 				t.Errorf("the refusal does not name the path: %q", mismatch)
 			}
 		})
+	}
+}
+
+// The rename race, at the point where it is decided.
+//
+// Between the front end's validation and the helper's mount, a component
+// the user owns can be replaced -- with a symlink, or with a different
+// directory of the same name. The front end's checks would then have been
+// about one object and the mount about another. The helper re-resolves
+// and compares what it opened against what was checked, and this is that
+// comparison: the real race needs a debugger or a slow filesystem to
+// construct, the decision it turns on does not.
+func TestAnObjectThatIsNotTheOneCampCheckedIsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Open(path, unix.O_PATH, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		t.Fatal(err)
+	}
+	its := fmt.Sprintf("%d:%d", st.Dev, st.Ino)
+
+	if err := checkIdentity(fd, path, its); err != nil {
+		t.Errorf("the object camp checked was refused: %v", err)
+	}
+	// What a swapped component looks like from here: the same path, a
+	// different object.
+	swapped := fmt.Sprintf("%d:%d", st.Dev, st.Ino+1)
+	err = checkIdentity(fd, path, swapped)
+	if err == nil {
+		t.Fatal("an object that is not the one camp checked was accepted")
+	}
+	if !strings.Contains(err.Error(), "is not the object camp checked") {
+		t.Errorf("the refusal should say what happened: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Nothing has been mounted") {
+		t.Errorf("the refusal should say what state the machine is in: %v", err)
+	}
+	// An operand the front end could not identify carries no expectation,
+	// and a comparison against nothing must not invent one.
+	if err := checkIdentity(fd, path, ""); err != nil {
+		t.Errorf("an operand with no recorded identity was refused: %v", err)
 	}
 }
