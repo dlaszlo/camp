@@ -226,8 +226,8 @@ func Unescape(field string) string {
 }
 
 // At returns every mount whose point is exactly this path. There can be
-// several: a mount stacked on another stays listed, and only the last one
-// is reachable.
+// several: a mount stacked on another stays listed, and only the topmost
+// one is reachable. Which one that is, Top answers.
 func At(entries []Entry, path string) []Entry {
 	var found []Entry
 	for _, entry := range entries {
@@ -238,12 +238,36 @@ func At(entries []Entry, path string) []Entry {
 	return found
 }
 
-// Top returns the mount a path would actually resolve to -- the last one
-// listed at that point, since a later mount covers an earlier one.
+// Top returns the mount a path would actually resolve to: of the mounts
+// stacked at that point, the one nothing else stands on.
+//
+// The stack is read from the parent field and never from the order of the
+// lines. Mounts are listed roughly as they were made, and MS_MOVE keeps a
+// mount's identity, so a mount moved onto a point appears *before* the
+// mount it now covers -- which is exactly the privileged mode's shape,
+// where the live path first gets a self-bind to give the move a private
+// parent and then receives the composed tree on top of it. Reading the
+// last line as the top one there returns the bind underneath, whose
+// filesystem is ext4 and whose overlay options are all empty, and every
+// privileged 'camp up' failed its own post-move check with four refusals
+// about a mount that was correct.
+//
+// The parent field says it without ambiguity: a mount stacked on another
+// has that other one as its parent, so the top of the stack is the one
+// that is no other stacked mount's parent.
 func Top(entries []Entry, path string) (Entry, bool) {
 	at := At(entries, path)
 	if len(at) == 0 {
 		return Entry{}, false
+	}
+	covered := map[int]bool{}
+	for _, entry := range at {
+		covered[entry.Parent] = true
+	}
+	for index := len(at) - 1; index >= 0; index-- {
+		if !covered[at[index].ID] {
+			return at[index], true
+		}
 	}
 	return at[len(at)-1], true
 }

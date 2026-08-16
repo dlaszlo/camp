@@ -131,6 +131,39 @@ func TestOverlaysFindsEveryCompositionOnAnUpper(t *testing.T) {
 	}
 }
 
+// The privileged mode's own shape, copied from a real run: the live path
+// carries a self-bind that gives the move a private parent, and the
+// composed tree sits on top of it. The overlay was made first and MS_MOVE
+// kept its identity, so it is listed first while standing highest -- the
+// parent field is the only thing that says so.
+const stacked = `33 1 252:1 / /home rw,relatime - ext4 /dev/sda1 rw
+3575 3711 0:228 / /home/x/live rw,relatime - overlay overlay rw,lowerdir=/home/x/ws,upperdir=/home/x/code,workdir=/home/x/.camp/work/abc/work,nouserxattr
+3711 33 252:1 /home/x/live /home/x/live rw,relatime - ext4 /dev/sda1 rw
+`
+
+func TestTheTopOfAStackIsReadFromTheParentAndNotTheOrder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mountinfo")
+	if err := os.WriteFile(path, []byte(stacked), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := mountinfo.Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	top, ok := mountinfo.Top(entries, "/home/x/live")
+	if !ok {
+		t.Fatal("the live path has no mount")
+	}
+	if top.FSType != "overlay" {
+		t.Fatalf("the live path resolves to a %s mount, and the composed tree "+
+			"is the overlay standing on top of the self-bind", top.FSType)
+	}
+	if got := top.Super["upperdir"]; got != "/home/x/code" {
+		t.Errorf("upperdir came out as %q", got)
+	}
+}
+
 func TestUnderAndContaining(t *testing.T) {
 	entries := read(t)
 
