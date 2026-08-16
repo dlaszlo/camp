@@ -274,6 +274,12 @@ func LockedFlags(entry mountinfo.Entry) uintptr {
 }
 
 // LockedFlagsAt reads them from the mount currently at a path.
+//
+// Only ever a real path. A mount held by descriptor has none -- its
+// /proc/self/fd name is not a mount point, and asking here for one would
+// fall through to the flags of /proc itself, which are not the source's.
+// That is what the descriptor path used to do; it reads them from the
+// descriptor now.
 func LockedFlagsAt(target string) (uintptr, error) {
 	table, err := mountinfo.Read(mountinfo.Self)
 	if err != nil {
@@ -281,9 +287,10 @@ func LockedFlagsAt(target string) (uintptr, error) {
 	}
 	entry, found := mountinfo.Top(table, target)
 	if !found {
-		// The path may be reached through a descriptor, in which case the
-		// mount point is not the string we have. Fall back to the mount the
-		// path sits on, which carries the same locked flags.
+		// Nothing is mounted at the path itself, so the flags that apply to
+		// it are the ones of the filesystem it sits on -- which is the
+		// question being asked whenever this is called about a directory
+		// before anything is bound over it.
 		entry, found = mountinfo.Containing(table, target)
 		if !found {
 			return 0, fmt.Errorf("no mount found at or above %s", target)
