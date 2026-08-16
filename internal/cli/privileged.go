@@ -133,9 +133,13 @@ func cmdDown(ctx *context, args []string) error {
 	}
 
 	removed := 0
+	var mismatched []string
 	for _, result := range reply.Results {
-		if result.Outcome == "unmounted" {
+		switch result.Outcome {
+		case "unmounted":
 			removed++
+		case "mismatch":
+			mismatched = append(mismatched, result.Error)
 		}
 	}
 	ctx.printf("%d of %d mounts removed.\n", removed, len(reply.Results))
@@ -157,6 +161,32 @@ func cmdDown(ctx *context, args []string) error {
 				"would leave the mount alive and still being written through while "+
 				"disappearing from the kernel's table. Deal with the holder above "+
 				"and run 'camp down' again.", len(reply.Stranded))
+	}
+
+	// A mount that is not camp's is left standing, and that is a failure of
+	// the teardown rather than a detail of it: the record still names a
+	// path camp cannot account for, so it stays.
+	if len(mismatched) > 0 {
+		record.Phase = state.Partial
+		_ = record.Save()
+		return failure(ExitFailure, "",
+			"%s\nThe record is kept: it is the only account of what this "+
+				"composition put where. Look at what is mounted there, and run "+
+				"'camp down' again once it is gone -- or 'camp forget %s' if you "+
+				"have decided camp's mount is not coming back.",
+			strings.Join(mismatched, "\n\n"), record.Hash)
+	}
+
+	// The helper's own last step -- clearing the kernel's root-owned work
+	// directory -- can fail after every unmount succeeded. Saying nothing
+	// about it would be a success reported over a teardown that did not
+	// finish.
+	if reply.Error != "" {
+		record.Phase = state.Partial
+		_ = record.Save()
+		return failure(ExitFailure, "",
+			"every mount came down and the teardown did not finish: %s\n"+
+				"The record is kept until it does.", reply.Error)
 	}
 
 	record.Phase = state.Down

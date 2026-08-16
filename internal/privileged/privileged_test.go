@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/dlaszlo/camp/internal/compose"
@@ -74,11 +75,11 @@ func TestTheTeardownJobIsBuiltFromTheRecordAlone(t *testing.T) {
 			"detached points", len(job.Targets), len(record.Mounts),
 			len(record.Detached))
 	}
-	if last := job.Targets[len(job.Targets)-1]; last != record.Live {
+	if last := job.Targets[len(job.Targets)-1]; last.Path != record.Live {
 		t.Errorf("the last thing to come down is %s, and it should be the live "+
-			"path itself: the composition was standing on it", last)
+			"path itself: the composition was standing on it", last.Path)
 	}
-	if job.Targets[0] != record.Mounts[len(record.Mounts)-1].Target {
+	if job.Targets[0].Path != record.Mounts[len(record.Mounts)-1].Target {
 		t.Error("the job's first target is not the last mount made; teardown " +
 			"is the mount order reversed")
 	}
@@ -101,7 +102,7 @@ func TestATeardownIsUnaffectedByASessionSection(t *testing.T) {
 		job := privileged.UnmountJob(record)
 		names := make([]string, 0, len(job.Targets))
 		for _, target := range job.Targets {
-			names = append(names, strings.TrimPrefix(target, record.Env))
+			names = append(names, strings.TrimPrefix(target.Path, record.Env))
 		}
 		return names
 	}
@@ -308,7 +309,7 @@ func TestUnmountingSomethingThatIsNotMountedIsNotAFailure(t *testing.T) {
 		Version: 1,
 		Action:  privileged.ActionUnmount,
 		Base:    directory,
-		Targets: []string{filepath.Join(directory, "nothing-here")},
+		Targets: []privileged.JobTarget{{Path: filepath.Join(directory, "nothing-here")}},
 	}
 	encoded, err := json.Marshal(job)
 	if err != nil {
@@ -342,5 +343,91 @@ func TestRunningTheFrontEndAsRootIsRefused(t *testing.T) {
 	}
 	if err != nil {
 		t.Errorf("an ordinary user was refused: %v", err)
+	}
+}
+
+// A recorded path is not proof that camp's mount is what stands there.
+//
+// If camp's mount went away and something else took the same name, an
+// unmount by path alone would have root remove a stranger's mount on
+// camp's say-so. The identity travels with the job and is compared before
+// the syscall -- so this test runs as an ordinary user, and would fail on
+// the permission rather than on the check if that order ever moved.
+func TestATargetThatIsNotWhatCampMountedIsNotUnmounted(t *testing.T) {
+	asInvoker(t)
+	directory := t.TempDir()
+	target := filepath.Join(directory, "target")
+	if err := os.WriteFile(target, []byte("somebody else's\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	job := privileged.Job{
+		Version: 1,
+		Action:  privileged.ActionUnmount,
+		Base:    directory,
+		Targets: []privileged.JobTarget{{Path: target, Device: 1, Inode: 1}},
+	}
+	encoded, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := ask(t, privileged.ActionUnmount, encoded)
+
+	if len(reply.Results) != 1 {
+		t.Fatalf("%d results came back, wanted 1: %+v", len(reply.Results), reply)
+	}
+	if reply.Results[0].Outcome != "mismatch" {
+		t.Errorf("the outcome is %q; a path holding something that is not "+
+			"camp's mount must never read as absent or unmounted",
+			reply.Results[0].Outcome)
+	}
+	if !strings.Contains(reply.Results[0].Error, target) {
+		t.Errorf("the mismatch does not name the path: %q", reply.Results[0].Error)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("the target was disturbed: %v", err)
+	}
+}
+
+// The identity that does match is passed through to the unmount. What
+// the kernel then says depends on privilege -- this test runs as an
+// ordinary user, so the syscall is refused -- and what is being measured
+// is that the check let it through rather than what came after.
+func TestATargetWhoseIdentityMatchesIsActedOn(t *testing.T) {
+	asInvoker(t)
+	directory := t.TempDir()
+	target := filepath.Join(directory, "target")
+	if err := os.WriteFile(target, []byte("camp's\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("this platform does not report a device and inode")
+	}
+
+	job := privileged.Job{
+		Version: 1,
+		Action:  privileged.ActionUnmount,
+		Base:    directory,
+		Targets: []privileged.JobTarget{
+			{Path: target, Device: uint64(st.Dev), Inode: st.Ino},
+		},
+	}
+	encoded, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := ask(t, privileged.ActionUnmount, encoded)
+
+	if len(reply.Results) != 1 {
+		t.Fatalf("%d results came back, wanted 1: %+v", len(reply.Results), reply)
+	}
+	if reply.Results[0].Outcome == "mismatch" {
+		t.Errorf("the object camp recorded was refused as somebody else's: %q",
+			reply.Results[0].Error)
 	}
 }

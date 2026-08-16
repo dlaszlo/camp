@@ -99,12 +99,12 @@ func (j Job) confine() error {
 	}
 
 	for _, target := range j.Targets {
-		if !beneath(target, base) {
+		if !beneath(target.Path, base) {
 			return refuse("helper-target-outside",
 				"the job asks for %s to be unmounted, and that is not inside %s.\n"+
 					"This helper unmounts what one camp composition put up, and "+
 					"nothing else on the machine. Every path it touches has to lie "+
-					"beneath the environment root the job names.", target, base)
+					"beneath the environment root the job names.", target.Path, base)
 		}
 	}
 	return nil

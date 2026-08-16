@@ -343,6 +343,30 @@ func checkIdentity(fd int, path, expected string) error {
 	return nil
 }
 
+// standsThere reports why a target must not be unmounted, or "" when it
+// may be.
+//
+// Three cases pass: the record carries no identity for this mount, so
+// there is nothing to compare and refusing would wall somebody in behind
+// mounts camp made; the path cannot be looked at, which the unmount
+// itself will answer for; and the identity matches.
+func standsThere(target JobTarget) string {
+	if target.Device == 0 && target.Inode == 0 {
+		return ""
+	}
+	found, err := identityOf(target.Path)
+	if err != nil {
+		return ""
+	}
+	if found.Device == target.Device && found.Inode == target.Inode {
+		return ""
+	}
+	return fmt.Sprintf("%s is %d:%d and camp mounted %d:%d there. Something "+
+		"else stands at that path now, and this helper will not unmount it: "+
+		"camp's own mount is gone, and what is there belongs to somebody else.",
+		target.Path, found.Device, found.Inode, target.Device, target.Inode)
+}
+
 type identity struct {
 	Device uint64
 	Inode  uint64
@@ -384,11 +408,26 @@ func rollback(made []string) []string {
 func unmount(job Job) Reply {
 	reply := Reply{Version: JobVersion}
 	for _, target := range job.Targets {
-		outcome, err := mountx.Unmount(target)
-		result := Result{Target: target, Outcome: string(outcome)}
+		// Identity before the syscall. A recorded path proves nothing on its
+		// own: camp's mount may have gone and somebody else's may stand at
+		// the same name, and removing that one would be root unmounting a
+		// stranger's mount because camp wrote the path down once. The
+		// mismatch is reported and stepped over rather than failing the
+		// whole teardown, because the rest of the composition still has to
+		// come down.
+		if mismatch := standsThere(target); mismatch != "" {
+			reply.Results = append(reply.Results, Result{
+				Target:  target.Path,
+				Outcome: "mismatch",
+				Error:   mismatch,
+			})
+			continue
+		}
+		outcome, err := mountx.Unmount(target.Path)
+		result := Result{Target: target.Path, Outcome: string(outcome)}
 		if err != nil && outcome == mountx.Busy {
 			result.Error = err.Error()
-			reply.Stranded = append(reply.Stranded, target)
+			reply.Stranded = append(reply.Stranded, target.Path)
 		}
 		reply.Results = append(reply.Results, result)
 	}

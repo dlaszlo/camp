@@ -2,8 +2,6 @@ package privileged
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -109,7 +107,8 @@ func Up(in UpInput) (Left, refusal.List) {
 	// The record goes down before anything is mounted, carrying the whole
 	// plan. From here on, whatever happens, something knows what to undo.
 	record := state.FromPlan(built, in.Tool,
-		digest(in.ConfigBytes), digest(in.InventoryBytes), os.Getuid(), os.Getgid())
+		state.Digest(in.ConfigBytes), state.Digest(in.InventoryBytes),
+		os.Getuid(), os.Getgid())
 	record.Staging = staging
 	if err := record.Save(); err != nil {
 		refused.Add("record", "%v", err)
@@ -218,15 +217,23 @@ func Down(record state.Record, sudo []string, stderr *os.File) (Reply, refusal.L
 // which may have been edited, or deleted, while the composition was up.
 // The targets come out in the reverse of the order they were mounted in.
 func UnmountJob(record state.Record) Job {
-	targets := make([]string, 0, len(record.Mounts)+len(record.Detached))
+	targets := make([]JobTarget, 0, len(record.Mounts)+len(record.Detached))
 	for _, mount := range record.Teardown() {
-		targets = append(targets, mount.Target)
+		targets = append(targets, JobTarget{
+			Path:   mount.Target,
+			Device: mount.Device,
+			Inode:  mount.Inode,
+		})
 	}
 	// Last, and after everything that stood on them: the mount points the
 	// helper bound onto themselves so the composition could be moved into
 	// place without propagating. One of them is the live path itself, which
-	// the composition was covering until a moment ago.
-	targets = append(targets, record.Detached...)
+	// the composition was covering until a moment ago. They carry no
+	// identity: each was covered by the composition for its whole life, so
+	// nothing could ever look at one.
+	for _, path := range record.Detached {
+		targets = append(targets, JobTarget{Path: path})
+	}
 
 	job := Job{
 		Version: JobVersion,
@@ -399,12 +406,4 @@ func merge(mounts []state.Mount, results []Result) []state.Mount {
 		mounts[index].Inode = results[index].Inode
 	}
 	return mounts
-}
-
-func digest(data []byte) string {
-	if len(data) == 0 {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }

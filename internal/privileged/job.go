@@ -96,12 +96,29 @@ type Job struct {
 	// composition generates none.
 	Exclude []byte `json:"exclude,omitempty"`
 
-	// Targets are absolute paths to unmount, in teardown order. Unmount
-	// only.
-	Targets []string `json:"targets,omitempty"`
+	// Targets are what to unmount, in teardown order. Unmount only.
+	Targets []JobTarget `json:"targets,omitempty"`
 	// WorkParts is camp's work directory, beneath Base: the kernel leaves
 	// a root-owned directory inside it that only the helper can remove.
 	WorkParts []string `json:"work_parts,omitempty"`
+}
+
+// JobTarget is one mount to remove, with the identity camp's own mount
+// answered as when it was made.
+//
+// The identity travels because a path is not proof of anything: camp's
+// mount may be gone and somebody else's may stand at the same name, and
+// unmounting that one is a stranger's mount removed by root on camp's
+// say-so. The helper compares before it unmounts.
+type JobTarget struct {
+	Path string `json:"path"`
+	// Device and Inode are what the front end recorded for this mount.
+	// Both zero means the record has no identity for it -- a record
+	// written before its mount was made, which a crash can leave behind --
+	// and then the helper unmounts what it was given, because refusing
+	// would leave somebody walled in behind mounts camp made.
+	Device uint64 `json:"device,omitempty"`
+	Inode  uint64 `json:"inode,omitempty"`
 }
 
 // JobMount is one operation, with everything needed to re-check it.

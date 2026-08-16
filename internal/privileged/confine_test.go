@@ -89,14 +89,14 @@ func TestTheHelperRefusesAJobThatIsNotAboutOneCompositionOfYours(t *testing.T) {
 		{
 			name: "an unmount target outside the base",
 			job: privileged.Job{Version: 1, Action: privileged.ActionUnmount, Base: mine,
-				Targets: []string{"/proc"}},
+				Targets: []privileged.JobTarget{{Path: "/proc"}}},
 			rule: "helper-target-outside",
 			says: "/proc",
 		},
 		{
 			name: "an unmount target that only looks like a prefix",
 			job: privileged.Job{Version: 1, Action: privileged.ActionUnmount, Base: mine,
-				Targets: []string{mine + "-elsewhere/x"}},
+				Targets: []privileged.JobTarget{{Path: mine + "-elsewhere/x"}}},
 			rule: "helper-target-outside",
 			says: "not inside",
 		},
