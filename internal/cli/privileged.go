@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -86,11 +87,19 @@ func cmdDown(ctx *context, args []string) error {
 		return failure(ExitUsage, "", "%s", err)
 	}
 
-	cfg, err := resolve(*file)
+	cfg, unreadable, err := resolveForTeardown(*file)
 	if err != nil {
 		return err
 	}
-	record, err := recordFor(*file)
+	if !unreadable.Empty() {
+		fmt.Fprintf(ctx.err, "%s no longer reads as a configuration:\n\n%s\n"+
+			"The teardown goes ahead anyway: it comes from this composition's "+
+			"record, not from this file. What the file cannot say is what "+
+			"changed while the composition was up, so the drift report below "+
+			"is left out.\n\n",
+			cfg.Source, strings.TrimRight(report.Refusals(unreadable), "\n"))
+	}
+	record, err := recordFor(cfg)
 	if err != nil {
 		return err
 	}
@@ -131,10 +140,14 @@ func cmdDown(ctx *context, args []string) error {
 	_ = record.Save()
 
 	// The four read-only scans, while the cause is still fresh. They never
-	// block: down may only report.
-	if built, refused := plan.Prepare(cfg, plan.Privileged); refused.Empty() || built.Live != "" {
-		if found := drift.Refresh(built); !found.Empty() {
-			ctx.printf("\n%s", found.String())
+	// block: down may only report. A configuration that no longer parses
+	// has nothing trustworthy to compare against, so the scans are skipped
+	// rather than run over a half-read file.
+	if unreadable.Empty() {
+		if built, refused := plan.Prepare(cfg, plan.Privileged); refused.Empty() || built.Live != "" {
+			if found := drift.Refresh(built); !found.Empty() {
+				ctx.printf("\n%s", found.String())
+			}
 		}
 	}
 

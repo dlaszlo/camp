@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -51,6 +52,76 @@ func TestExplainDescribesNothingWhileARefusalStands(t *testing.T) {
 		}
 		if !strings.Contains(errOut, "AGENTS.md") {
 			t.Errorf("%v did not name what stops the composition:\n%s", mode, errOut)
+		}
+	}
+}
+
+// A configuration that no longer parses must not stand between the user
+// and a teardown.
+//
+// down tears down from its record and reads the file only to learn which
+// record. A file edited while the composition was up -- and the session:
+// section adds a whole class of ways to get that wrong -- would otherwise
+// leave somebody behind mounts camp made and now refuses to remove, which
+// is the one thing down is never allowed to do.
+func TestATeardownIsNotBlockedByAConfigurationThatWillNotParse(t *testing.T) {
+	env := testenv.NewEnv(t)
+	env.Config(t, "")
+	path := config.Path(env.Path)
+
+	broken, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Everything that names the tree still parses; the session section does
+	// not.
+	testenv.Write(t, path, string(broken)+"\nsession:\n  environment:\n    PORT: 8080\n")
+
+	out, errOut, code := run(t, "down", "-f", path)
+
+	// There is no record here, so the teardown ends by saying so -- which is
+	// exactly the point: it got past the configuration to the record, and
+	// stopped on the record's own terms.
+	if !strings.Contains(errOut, "no record for") {
+		t.Errorf("down stopped on the configuration instead of reaching the "+
+			"record:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+	if !strings.Contains(errOut, "environment-shape") && !strings.Contains(errOut, "PORT") {
+		t.Errorf("down did not say what it could not read in the file:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "goes ahead anyway") {
+		t.Errorf("down did not say that the teardown is unaffected:\n%s", errOut)
+	}
+	if code == 0 {
+		t.Error("down exited 0 with nothing to tear down")
+	}
+}
+
+// The same file stops every command that genuinely needs to understand it.
+// Tolerating a broken configuration is a property of the teardown alone,
+// not a general loosening.
+func TestABrokenSectionStillStopsTheCommandsThatNeedIt(t *testing.T) {
+	env := testenv.NewEnv(t)
+	env.Config(t, "")
+	path := config.Path(env.Path)
+
+	broken, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testenv.Write(t, path, string(broken)+"\nsession:\n  environment:\n    PORT: 8080\n")
+
+	for _, command := range [][]string{
+		{"plan", "-f", path},
+		{"explain", "-f", path},
+		{"status", "-f", path},
+	} {
+		_, errOut, code := run(t, command...)
+		if code == 0 {
+			t.Errorf("%v accepted a configuration it cannot read", command)
+		}
+		if !strings.Contains(errOut, "PORT") {
+			t.Errorf("%v did not name the entry it could not read:\n%s", command, errOut)
 		}
 	}
 }

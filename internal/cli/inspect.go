@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
+	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/report"
 	"github.com/dlaszlo/camp/internal/state"
 	"github.com/dlaszlo/camp/internal/verify"
@@ -217,12 +219,46 @@ func cmdForget(ctx *context, args []string) error {
 	return nil
 }
 
-// recordFor finds the record a teardown should act on.
-func recordFor(file string) (state.Record, error) {
-	cfg, err := resolve(file)
-	if err != nil {
-		return state.Record{}, err
+// resolveForTeardown finds the composition a teardown acts on, and
+// refuses to let a configuration stop it.
+//
+// down tears down from its record; it reads the configuration only to
+// learn which record, and afterwards to report drift. A file edited while
+// the composition was up -- a mistyped step, a session: entry that does
+// not parse -- must therefore not be able to wall the user in behind
+// mounts camp made and now will not remove. So the refusals come back
+// beside the configuration rather than instead of it, and the teardown
+// goes ahead as long as the two fields that name the tree survived the
+// parse. Without those there is nothing to point a teardown at, and the
+// refusal is all there is to say.
+func resolveForTeardown(file string) (config.Config, refusal.List, error) {
+	path := file
+	if path == "" {
+		start, err := os.Getwd()
+		if err != nil {
+			return config.Config{}, nil, wrap(err, ExitFailure, "")
+		}
+		found, err := config.Find(start)
+		if err != nil {
+			return config.Config{}, nil, wrap(err, ExitNotFound, "")
+		}
+		path = found
 	}
+
+	cfg, err := config.Load(path)
+	if err == nil {
+		return cfg, nil, nil
+	}
+	var refused refusal.List
+	if !errors.As(err, &refused) || cfg.Env == "" || cfg.Merged.Empty() {
+		return config.Config{}, nil, failure(ExitUsage, "",
+			"%s cannot be read:\n\n%s", path, report.Refusals(refused))
+	}
+	return cfg, refused, nil
+}
+
+// recordFor finds the record a teardown should act on.
+func recordFor(cfg config.Config) (state.Record, error) {
 	live, hashErr := livePath(cfg)
 	if hashErr != nil {
 		return state.Record{}, hashErr
