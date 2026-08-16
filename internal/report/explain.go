@@ -46,7 +46,7 @@ func Explain(p plan.Plan) string {
 	if len(guarded) > 0 {
 		b.WriteString("What is read-only, and why\n\n")
 		for _, mount := range guarded {
-			fmt.Fprintf(&b, "  %-28s the real file is %s\n",
+			fmt.Fprintf(&b, "  %-28s the real path is %s\n",
 				mount.Rel.String(), mount.Source)
 		}
 		fmt.Fprintf(&b, "\n  These come from %s. Writing one through this tree "+

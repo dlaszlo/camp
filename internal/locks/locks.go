@@ -41,6 +41,8 @@ package locks
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -207,43 +209,100 @@ type Holder struct {
 
 // Holders names the processes holding an flock on a directory.
 //
-// Read from /proc/locks, never from any program's output: each FLOCK row
-// carries the owning pid and the major:minor:inode of what is locked, so
-// matching the directory's own stat identifies the row, and
-// /proc/<pid>/cmdline names the process. Nothing here depends on anybody's
-// language.
+// Two sources, because either one alone gets a session wrong.
+//
+// /proc/locks proves that a lock exists and on what: each FLOCK row
+// carries the major:minor:inode of the locked object, so the directory's
+// own stat identifies the row. But the pid in that row is the pid that
+// *took* the lock, recorded when it was taken -- and camp deliberately
+// hands the open file description to another process. In a namespace
+// session the launcher takes the locks and the init inherits them, so by
+// the time anybody asks, the row names a process that has already
+// exited. It named a pid and then said "unknown", which is precisely the
+// message this is not allowed to be.
+//
+// So the descriptors are scanned as well: a process holding the lock is
+// holding a descriptor for that directory, and /proc/<pid>/fd says so.
+// That finds whoever is really holding it now, under the pid this
+// process can actually see.
+//
+// Nothing here parses any program's output, in any language.
 func Holders(path string) []Holder {
 	var st unix.Stat_t
 	if err := unix.Stat(path, &st); err != nil {
 		return nil
 	}
-	major := unix.Major(uint64(st.Dev))
-	minor := unix.Minor(uint64(st.Dev))
-	want := fmt.Sprintf("%02x:%02x:%d", major, minor, st.Ino)
+	if !locked(st) {
+		return nil
+	}
+	return descriptorHolders(path, st)
+}
+
+// locked reports whether the kernel has an flock on this object.
+func locked(st unix.Stat_t) bool {
+	want := fmt.Sprintf("%02x:%02x:%d",
+		unix.Major(uint64(st.Dev)), unix.Minor(uint64(st.Dev)), st.Ino)
 
 	data, err := os.ReadFile("/proc/locks")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 6 && fields[1] == "FLOCK" && fields[5] == want {
+			return true
+		}
+	}
+	return false
+}
+
+// descriptorHolders finds the processes with the locked directory open.
+func descriptorHolders(path string, st unix.Stat_t) []Holder {
+	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
 	}
 
+	// This process is not excluded. It can never be the answer in a
+	// refusal -- a second flock from the same process succeeds, so the
+	// refusal is only ever reached about somebody else -- and leaving it
+	// in makes the question the function actually answers the honest one:
+	// who has this directory open.
 	var holders []Holder
-	seen := map[int]bool{}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 6 || fields[1] != "FLOCK" {
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
 			continue
 		}
-		if fields[5] != want {
+		if !holdsDescriptorFor(pid, st) {
 			continue
 		}
-		pid, err := strconv.Atoi(fields[4])
-		if err != nil || seen[pid] {
-			continue
-		}
-		seen[pid] = true
 		holders = append(holders, Holder{PID: pid, Command: command(pid)})
 	}
+	sort.Slice(holders, func(i, j int) bool { return holders[i].PID < holders[j].PID })
 	return holders
+}
+
+// holdsDescriptorFor reports whether a process has this exact directory
+// open, compared by device and inode rather than by the descriptor's
+// symlink text -- the same directory is reachable by more than one name,
+// and a lock is on the inode.
+func holdsDescriptorFor(pid int, st unix.Stat_t) bool {
+	directory := fmt.Sprintf("/proc/%d/fd", pid)
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		var open unix.Stat_t
+		if err := unix.Stat(filepath.Join(directory, entry.Name()), &open); err != nil {
+			continue
+		}
+		if open.Dev == st.Dev && open.Ino == st.Ino {
+			return true
+		}
+	}
+	return false
 }
 
 func command(pid int) string {

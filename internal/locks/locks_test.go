@@ -349,3 +349,38 @@ func TestTheBusyMessageSaysHowToGetIn(t *testing.T) {
 		}
 	}
 }
+
+// The refusal has to name the process that is holding the lock *now*,
+// not the one that took it.
+//
+// Those are different processes on purpose: the launcher takes the locks
+// and hands the open file descriptions to the session's init, which is
+// what makes the locks last exactly as long as the composition. By the
+// time anybody asks, the pid recorded in /proc/locks has usually exited
+// -- and a message that names a dead pid and then says "unknown" is
+// exactly the message this is not allowed to be.
+func TestTheHolderIsTheProcessThatHasItNowNotTheOneThatTookIt(t *testing.T) {
+	root, code := env(t)
+
+	// A child that holds the lock and lives, standing in for the init.
+	holder := hold(t, root, "code")
+
+	found := locks.Holders(code)
+	if len(found) == 0 {
+		t.Fatal("no holder was found for a directory a live process is holding")
+	}
+	var named bool
+	for _, candidate := range found {
+		if candidate.PID != holder.Process.Pid {
+			continue
+		}
+		named = true
+		if candidate.Command == "unknown" || candidate.Command == "" {
+			t.Errorf("the holder was found but not named: %q", candidate.Command)
+		}
+	}
+	if !named {
+		t.Errorf("the process actually holding the lock (pid %d) is not among "+
+			"the holders found: %v", holder.Process.Pid, found)
+	}
+}
