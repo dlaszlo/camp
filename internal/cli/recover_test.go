@@ -139,3 +139,36 @@ func TestATiedDirectoryIsRefusedRatherThanGuessedAt(t *testing.T) {
 		t.Errorf("the refusal did not say how to name one:\n%s", errOut)
 	}
 }
+
+// explain has two sources, and which one it uses is decided by what is
+// mounted rather than by which file exists.
+//
+// A record left by a composition that is no longer there describes a tree
+// nobody is standing in. The configuration is then the only honest
+// source -- and in the namespace mode, which leaves no record at all, it
+// is the only source there is.
+func TestExplainDoesNotDescribeARecordedTreeThatIsNotThere(t *testing.T) {
+	record, env := recorded(t)
+
+	// Put the configuration back: with nothing mounted, that is what
+	// explain has to fall back to.
+	cfg := env.Config(t, "")
+	if cfg.Live() != record.Live {
+		t.Fatalf("the fixture moved: %s vs %s", cfg.Live(), record.Live)
+	}
+
+	t.Chdir(env.Path)
+	out, errOut, code := run(t, "explain")
+	if code != 0 {
+		t.Fatalf("explain exited %d:\n%s", code, errOut)
+	}
+	if !strings.Contains(out, "You are in "+record.Live) {
+		t.Errorf("explain did not describe the tree:\n%s", out)
+	}
+	// The record is privileged and nothing is mounted; the description has
+	// to be the one the configuration derives, which is the namespace mode.
+	if strings.Contains(out, "read-only for all of them") {
+		t.Errorf("explain described a machine-wide composition that is not "+
+			"there:\n%s", out)
+	}
+}

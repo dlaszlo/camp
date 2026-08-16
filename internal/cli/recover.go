@@ -192,6 +192,57 @@ func corruptRecords() []state.Listing {
 	return corrupt
 }
 
+// standing reports whether any of a record's mounts is actually there.
+//
+// A record alone is not a composition: one left by a crash names mounts
+// that may all be gone. What decides is the machine.
+func standing(record state.Record, table []mountinfo.Entry) bool {
+	for _, mount := range record.Mounts {
+		if presence, _ := mount.Presence(table); presence != state.Gone {
+			return true
+		}
+	}
+	return false
+}
+
+// treeFromRecord describes the composition that is standing out of what
+// was written down when it was built.
+//
+// Only the privileged mode leaves a record, so the description promises
+// what that mode promises. The two blocks a plan renders -- the ownership
+// note and the session -- are absent here on purpose: the first belongs
+// to the namespace mode, and the privileged mode announces its session
+// rather than applying it (§6).
+func treeFromRecord(record state.Record) report.Tree {
+	tree := report.Tree{
+		Live:       record.Live,
+		Upper:      record.Upper,
+		Lower:      record.Workspace,
+		Privileged: true,
+	}
+	for _, mount := range record.Mounts {
+		if plan.Role(mount.Role) == plan.Artefact {
+			tree.Generated = true
+		}
+		tree.Mounts = append(tree.Mounts, report.TreeMount{
+			Path:   inTree(record.Live, mount.Target),
+			Source: mount.Source,
+			Role:   plan.Role(mount.Role),
+			Kind:   plan.Kind(mount.Kind),
+		})
+	}
+	return tree
+}
+
+// inTree renders a recorded target the way a description shows it:
+// relative to the composed tree, or absolute when it is not in it.
+func inTree(live, target string) string {
+	if under(target, live) && target != live {
+		return strings.TrimPrefix(target, strings.TrimRight(live, "/")+"/")
+	}
+	return target
+}
+
 // describeRecord prints what the machine says about a recorded
 // composition: every recorded mount checked by path and by identity, and
 // then the one line that says where this composition stands.

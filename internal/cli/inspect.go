@@ -17,12 +17,35 @@ import (
 )
 
 // The commands that only look, and the one that records what they see.
+//
+// explain has two sources and the specification names both. §16: generated
+// from the live configuration, so that it cannot go stale. §12: down,
+// status and explain read the recorded plan, never a configuration that
+// may have been edited while the composition was up. Each is right about
+// its own case, and the composition decides which case this is: what the
+// reader is standing in is the one that is mounted, so a record whose
+// mounts are actually there is what gets described. With nothing standing
+// -- and the namespace mode leaves no record at all -- the configuration
+// is the only source there is.
 func cmdExplain(ctx *context, args []string) error {
 	set, file := flagsFor("explain")
 	systemWide := set.Bool("privileged", false, "describe the system-wide mode")
+	live, hash := recoveryFlags(set)
 	if err := set.Parse(args); err != nil {
 		return wrap(err, ExitUsage, "")
 	}
+
+	if record, found, err := selectRecord(*file, *live, *hash); err == nil && found {
+		table, err := mountinfo.Read(mountinfo.Self)
+		if err != nil {
+			return wrap(err, ExitFailure, "")
+		}
+		if standing(record, table) {
+			ctx.printf("%s", report.Describe(treeFromRecord(record)))
+			return nil
+		}
+	}
+
 	cfg, err := resolve(*file)
 	if err != nil {
 		return err

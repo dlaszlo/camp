@@ -7,15 +7,78 @@ import (
 	"github.com/dlaszlo/camp/internal/plan"
 )
 
-// Explain describes the composed tree to whoever is standing in it.
+// Tree is what a description needs, whichever source it came from.
 //
-// Generated from the live configuration rather than written by hand, so
-// it cannot go stale: every path in it is the path this composition
-// actually uses. It answers the four questions somebody working in a
-// composed tree eventually asks -- what is read-only and why, where the
-// real file is, what can never end up in a commit, and what happens to a
-// worktree made in here.
+// Two sources, because the specification names both and they do not
+// always agree. §16 says explain is generated from the live
+// configuration so that it cannot go stale; §12 says down, status and
+// explain read the recorded plan, never a configuration that may have
+// been edited while the composition was up. Both are right about their
+// own case: with a composition standing, what the reader is standing in
+// is the recorded one, and the file may since have become a description
+// of something else; with nothing recorded -- the namespace mode leaves
+// no record at all -- the configuration is the only source there is.
+// This type is what lets one set of sentences serve both.
+type Tree struct {
+	// Live is the composed tree's directory, Upper the code repository,
+	// Lower the workspace.
+	Live  string
+	Upper string
+	Lower string
+	// Mounts are the ones worth describing, in plan order.
+	Mounts []TreeMount
+	// Privileged says which mode composed it, which decides what the
+	// description promises about the rest of the machine.
+	Privileged bool
+	// Generated says the tree carries a generated exclude.
+	Generated bool
+	// Ownership and Session are the blocks only a plan can render. Empty
+	// from a record: the privileged mode announces its session rather than
+	// applying it, and the ownership note belongs to the namespace mode.
+	Ownership string
+	Session   string
+}
+
+// TreeMount is one mount as a description shows it: where it appears, and
+// what is really there.
+type TreeMount struct {
+	// Path is where it appears in the tree, relative to Live.
+	Path   string
+	Source string
+	Role   plan.Role
+	Kind   plan.Kind
+}
+
+// Explain describes the composed tree a plan derives, to whoever is
+// standing in it.
+//
+// It answers the four questions somebody working in a composed tree
+// eventually asks -- what is read-only and why, where the real file is,
+// what can never end up in a commit, and what happens to a worktree made
+// in here.
 func Explain(p plan.Plan) string {
+	tree := Tree{
+		Live:       p.Live,
+		Upper:      p.Config.UpperPath(),
+		Lower:      p.Config.LowerPath(),
+		Privileged: p.Mode == plan.Privileged,
+		Ownership:  Ownership(p),
+		Session:    Session(p, "Session environment"),
+	}
+	_, tree.Generated = p.Config.GenerationStep()
+	for _, mount := range p.Mounts {
+		tree.Mounts = append(tree.Mounts, TreeMount{
+			Path:   mount.Rel.String(),
+			Source: mount.Source,
+			Role:   mount.Role,
+			Kind:   mount.Kind,
+		})
+	}
+	return Describe(tree)
+}
+
+// Describe writes the description itself.
+func Describe(p Tree) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "You are in %s, a tree camp composed out of several "+
@@ -25,9 +88,9 @@ func Explain(p plan.Plan) string {
 	fmt.Fprintf(&b, "  Almost everywhere: into %s, the code repository. That is "+
 		"the product,\n  and it is the only place ordinary writes land. A file "+
 		"you create anywhere\n  camp has not covered is a file in that "+
-		"repository.\n\n", p.Config.UpperPath())
+		"repository.\n\n", p.Upper)
 
-	var guarded, stores, writable []plan.Mount
+	var guarded, stores, writable []TreeMount
 	for _, mount := range p.Mounts {
 		switch mount.Role {
 		case plan.RootGuard, plan.Island:
@@ -47,7 +110,7 @@ func Explain(p plan.Plan) string {
 		b.WriteString("What is read-only, and why\n\n")
 		for _, mount := range guarded {
 			fmt.Fprintf(&b, "  %-28s the real path is %s\n",
-				mount.Rel.String(), mount.Source)
+				mount.Path, mount.Source)
 		}
 		fmt.Fprintf(&b, "\n  These come from %s. Writing one through this tree "+
 			"fails with EROFS,\n  on purpose: without that, the write would copy "+
@@ -55,14 +118,14 @@ func Explain(p plan.Plan) string {
 			"applied while living in the wrong\n  place. Edit the real file "+
 			"instead -- the path above -- and the change\n  appears here "+
 			"immediately, because these are live views and not copies.\n\n",
-			p.Config.LowerPath())
+			p.Lower)
 	}
 
 	if len(writable) > 0 {
 		b.WriteString("What is writable but goes somewhere else\n\n")
 		for _, mount := range writable {
 			fmt.Fprintf(&b, "  %-28s writes land in %s\n",
-				mount.Rel.String(), mount.Source)
+				mount.Path, mount.Source)
 		}
 		b.WriteString("\n")
 	}
@@ -70,7 +133,7 @@ func Explain(p plan.Plan) string {
 	if len(stores) > 0 {
 		b.WriteString("What is machine-local\n\n")
 		for _, mount := range stores {
-			fmt.Fprintf(&b, "  %-28s kept in %s\n", mount.Rel.String(), mount.Source)
+			fmt.Fprintf(&b, "  %-28s kept in %s\n", mount.Path, mount.Source)
 		}
 		b.WriteString("\n  Files here belong to this machine and to no " +
 			"repository. They survive the\n  session and they are never " +
@@ -79,12 +142,12 @@ func Explain(p plan.Plan) string {
 			"stands read-only; everything else is yours to write.\n\n")
 	}
 
-	if _, has := p.Config.GenerationStep(); has {
+	if p.Generated {
 		fmt.Fprintf(&b, "What git sees\n\n")
 		fmt.Fprintf(&b, "  git run in here is %s's git. Its .git/info/exclude "+
 			"carries a generated\n  block listing everything the workspace "+
 			"provides, so 'git status' stays\n  quiet and 'git add .' cannot "+
-			"pick those names up.\n\n", p.Config.UpperPath())
+			"pick those names up.\n\n", p.Upper)
 		b.WriteString("  That is convenience, not a boundary. 'git add -f' " +
 			"still reads a workspace\n  file through this tree and stages its " +
 			"bytes -- the read-only mounts stop\n  writes, and that only reads. " +
@@ -93,7 +156,7 @@ func Explain(p plan.Plan) string {
 			"commit, so a leak caught then is usually still free to undo.\n\n")
 		fmt.Fprintf(&b, "  The generated exclude exists only through this tree. "+
 			"In %s\n  git keeps reading that repository's own file, unchanged.\n\n",
-			p.Config.UpperPath())
+			p.Upper)
 	}
 
 	b.WriteString("Worktrees\n\n")
@@ -104,22 +167,22 @@ func Explain(p plan.Plan) string {
 		"the exact repair command for\n  each one, and after that repair the " +
 		"worktree is independent of the\n  composition.\n\n")
 
-	if p.Mode == plan.Privileged {
+	if p.Privileged {
 		fmt.Fprintf(&b, "This mode\n\n  The composition is visible to every "+
 			"process on this machine, and %s\n  is read-only for all of them "+
 			"until 'camp down' -- your editor included.\n  That is the price of "+
 			"this mode. The namespace mode ('camp run') keeps both\n  promises, "+
-			"and is where normal work happens.\n\n", p.Config.LowerPath())
+			"and is where normal work happens.\n\n", p.Lower)
 	} else {
 		b.WriteString("This mode\n\n  This composition exists only for the " +
 			"processes inside it. Nothing outside\n  can see it, nothing has to " +
 			"be cleaned up, and when the last process here\n  exits the kernel " +
 			"removes every mount with it. There is no 'camp down'.\n\n")
 
-		b.WriteString(Ownership(p))
+		b.WriteString(p.Ownership)
 	}
 
-	if session := Session(p, "Session environment"); session != "" {
+	if session := p.Session; session != "" {
 		b.WriteString(session)
 		b.WriteString("\n")
 	}
