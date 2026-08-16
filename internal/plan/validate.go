@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/dlaszlo/camp/internal/config"
@@ -38,6 +39,9 @@ type checker struct {
 	cfg     config.Config
 	mode    Mode
 	refused refusal.List
+	// warnings are what this pass found that stops nothing. They join the
+	// ones the inventory finds, and the composing commands say them.
+	warnings []string
 
 	lower string
 	upper string
@@ -88,9 +92,13 @@ func (c *checker) run() (Plan, refusal.List) {
 	// be a change somebody decided rather than one that happened.
 	problems, warnings := inventory.Check(c.cfg.CampDir(), inventory.Take(lowerRoot, upperRoot))
 	c.refused.Extend(problems)
-	built.Warnings = warnings
+	built.Warnings = append(c.warnings, warnings...)
 
 	return built, c.refused
+}
+
+func (c *checker) warn(format string, args ...any) {
+	c.warnings = append(c.warnings, fmt.Sprintf(format, args...))
 }
 
 func usable(repositories map[string]pathx.Info, names ...string) bool {
@@ -302,12 +310,28 @@ func (c *checker) checkLive(found map[string]pathx.Info) (string, bool) {
 			"the composed tree's directory %s could not be looked at: %v.", absolute, err)
 		return "", false
 	case !info.Exists():
-		c.refused.Add("live-missing",
-			"the composed tree's directory %s does not exist.\n"+
-				"camp does not create it: it is where your work appears, and its "+
-				"inode is what camp locks to stop a second composition being built "+
-				"on it. Create it yourself:\n  mkdir %s", absolute, absolute)
-		return "", false
+		// Not a refusal, and not created here either: a session creates it,
+		// and planning executes nothing. A clone of an environment cannot
+		// bring an empty directory with it -- git records no such thing --
+		// so every fresh checkout would otherwise meet a refusal for the one
+		// thing camp can safely make itself.
+		//
+		// What is still refused is a path whose parent does not exist. That
+		// is a typo in merged:, and creating a tree of directories to match
+		// one would build the composition somewhere nobody meant.
+		if parent, err := pathx.Real(filepath.Dir(absolute)); err != nil || parent == "" {
+			c.refused.Add("live-parent-missing",
+				"the composed tree's directory %s cannot be created: %s does not "+
+					"exist.\nmerged: names a directory inside the environment root, "+
+					"and camp will not build a path of directories to reach one -- a "+
+					"name that is not there is usually a typo, and the composition "+
+					"would end up somewhere nobody meant. Create the parent, or "+
+					"correct merged:.", absolute, filepath.Dir(absolute))
+			return "", false
+		}
+		c.warn("the composed tree's directory %s does not exist yet; a session "+
+			"creates it", absolute)
+		return absolute, true
 	case info.Type == pathx.Symlink:
 		c.refused.Add("live-symlink",
 			"the composed tree's directory %s is a symbolic link to %q.\n"+

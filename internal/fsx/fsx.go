@@ -56,6 +56,18 @@ func State(root string) Area { return Area{Kind: "state", root: root} }
 // Reports is where a namespace session leaves its end-of-session report.
 func Reports(root string) Area { return Area{Kind: "reports", root: root} }
 
+// Live is the composed tree's own directory, and the only Area that is
+// not somewhere camp keeps files: nothing is ever written inside it --
+// mounts are made onto it -- and the single operation it exists for is
+// creating the empty directory itself, which git cannot record and no
+// clone can therefore bring.
+//
+// It does not weaken what an Area is for. The composed tree can never be
+// inside a repository: the validation refuses that outright, and the one
+// caller checks the same thing again before it creates anything, because
+// it runs before the validation does.
+func Live(root string) Area { return Area{Kind: "live", root: root} }
+
 // Camp is $ENV/.camp itself: the configuration, and the two stores below
 // it. Only 'camp init' writes here, and only the configuration skeleton,
 // which is the one file a person asked camp to create.

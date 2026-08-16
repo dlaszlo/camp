@@ -211,14 +211,46 @@ func TestANonEmptyLiveDirectoryIsRefused(t *testing.T) {
 	}
 }
 
-func TestAMissingLiveDirectoryIsRefused(t *testing.T) {
+// A composed tree's directory that is not there stops nothing: a session
+// creates it. git cannot record an empty directory, so no clone of an
+// environment can bring one, and refusing would meet every fresh checkout
+// with a repair for the one thing camp can safely make itself.
+func TestAMissingLiveDirectoryIsAWarningAndNotARefusal(t *testing.T) {
 	env := testenv.NewEnv(t)
 	if err := os.Remove(env.Live); err != nil {
 		t.Fatal(err)
 	}
-	list := mustRefuse(t, env, "", "live-missing")
-	if !strings.Contains(list.Error(), "mkdir "+env.Live) {
-		t.Error("the refusal should print the exact command that repairs it")
+	cfg := env.Config(t, "")
+	built, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Empty() {
+		t.Fatalf("a missing composed tree refused the composition:\n%v", refused)
+	}
+	if built.Live != env.Live {
+		t.Fatalf("the plan was derived for %q", built.Live)
+	}
+	var said bool
+	for _, warning := range built.Warnings {
+		if strings.Contains(warning, env.Live) {
+			said = true
+		}
+	}
+	if !said {
+		t.Errorf("nothing says the directory is not there yet: %v", built.Warnings)
+	}
+}
+
+// A parent that is not there is a different thing: it is a typo in
+// merged:, and building a path of directories to reach one would put the
+// composition somewhere nobody meant.
+func TestALiveDirectoryWithNoParentIsRefused(t *testing.T) {
+	env := testenv.NewEnv(t)
+	if err := os.Remove(env.Live); err != nil {
+		t.Fatal(err)
+	}
+	yaml := strings.Replace(env.YAML(), "merged: live", "merged: deeper/inside/live", 1)
+	list := mustRefuse(t, env, yaml, "live-parent-missing")
+	if !strings.Contains(list.Error(), "merged:") {
+		t.Error("the refusal should name the setting that is wrong")
 	}
 }
 

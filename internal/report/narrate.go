@@ -230,3 +230,10 @@ func (n *Narrator) Swept(directory string) {
 func (n *Narrator) LeftAlone(note string) {
 	n.Warn("left alone: %s", note)
 }
+
+// Created: a directory camp made because the reader could not have. The
+// composed tree's own is the only one: git cannot record an empty
+// directory, so no clone can bring it.
+func (n *Narrator) Created(path string) {
+	n.say("created: %s, the composed tree's directory", path)
+}

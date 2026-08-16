@@ -2,13 +2,16 @@ package cli
 
 import (
 	"errors"
+	"os"
 	"strings"
 
 	"github.com/dlaszlo/camp/internal/compose"
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/locks"
 	"github.com/dlaszlo/camp/internal/mountinfo"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/refusal"
@@ -59,6 +62,17 @@ func prepare(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, e
 		// The configuration does not name a usable upper; let validation
 		// say so properly rather than failing on a lock.
 		return nil, validationError(cfg, mode)
+	}
+
+	// The one directory camp makes for the reader rather than asking them
+	// to: the composed tree's own. It is named by the configuration, it is
+	// always inside the environment root, and git cannot record an empty
+	// directory -- so a clone of an environment could never bring it, and
+	// every fresh checkout met a refusal for the one thing camp can safely
+	// create itself. A path whose parent does not exist is still refused,
+	// by the validation: that is a typo, not a missing directory.
+	if err := makeLive(cfg, say); err != nil {
+		return nil, err
 	}
 
 	pair, err := locks.TakePair(cfg.Env, upper, cfg.Merged.Components(),
@@ -189,4 +203,37 @@ func requireMachine(mode preflight.Mode) error {
 	}
 	return failure(code, failed[0].Hint,
 		"this machine cannot run camp in %s mode -- %s", mode, strings.Join(details, "; "))
+}
+
+// makeLive creates the composed tree's directory when it is not there.
+//
+// Only the commands that compose call this. Planning executes nothing, so
+// 'camp plan' reports the absence and creates nothing -- which is also
+// why this is a warning in the validation rather than a refusal.
+func makeLive(cfg config.Config, say *report.Narrator) error {
+	live := cfg.Live()
+	if _, err := os.Stat(live); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return wrap(err, ExitFailure, "")
+	}
+	// Checked here and not only in the validation, because this runs
+	// before it: a merged: that points inside a repository would otherwise
+	// have camp create a directory in one, which is the first invariant
+	// and the thing fsx exists to make impossible. The validation refuses
+	// it properly a moment later, with the message that explains it.
+	for _, repo := range cfg.Repositories {
+		if pathx.Under(live, repo.Path.Join(cfg.Env)) {
+			return failure(ExitPrecondition, "",
+				"the composed tree's directory %s is inside the repository %q, so "+
+					"camp will not create it. Point merged: beside the repositories, "+
+					"not into one.", live, repo.Name)
+		}
+	}
+	if err := fsx.Live(live).Ensure(0o755); err != nil {
+		return failure(ExitPrecondition, "",
+			"the composed tree's directory %s could not be created: %v", live, err)
+	}
+	say.Created(live)
+	return nil
 }
