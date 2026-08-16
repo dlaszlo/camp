@@ -35,6 +35,7 @@ func Look(cfg config.Config, built plan.Plan, table []mountinfo.Entry) []Note {
 	notes = append(notes, locale())
 	notes = append(notes, filesystems(cfg, built, table)...)
 	notes = append(notes, orphans(cfg)...)
+	notes = append(notes, leftoverWork(cfg)...)
 	notes = append(notes, worktrees(cfg)...)
 	notes = append(notes, sessionReports(cfg)...)
 	return notes
@@ -137,6 +138,58 @@ func orphans(cfg config.Config) []Note {
 				"camp will not remove it, because storage holds worktrees and " +
 				"machine-local files; move what you want out of it and delete the " +
 				"rest yourself.",
+		})
+	}
+	return notes
+}
+
+// leftoverWork explains the mode-000 directory a finished session leaves
+// behind.
+//
+// OverlayFS creates a directory of its own inside the workdir it is
+// given, and makes it mode 000 so that nothing wanders in. The namespace
+// mode has no teardown step that could remove it -- the kernel discards
+// the mounts when the session ends, but the directory is on the real
+// filesystem and outlives them, and while the overlay is still mounted it
+// is in use and cannot be removed anyway. So the next 'camp run' sweeps
+// it.
+//
+// Somebody looking at their own filesystem meanwhile finds a directory
+// they cannot open, owned by them, inside a tool's scratch space. That is
+// alarming for exactly as long as nobody explains it.
+func leftoverWork(cfg config.Config) []Note {
+	root := filepath.Join(cfg.CampDir(), "work")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+
+	var notes []Note
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		leftover := filepath.Join(root, entry.Name(), "work", "work")
+		info, err := os.Lstat(leftover)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		live, _, markerErr := compose.ReadMarker(filepath.Join(root, entry.Name()))
+		belongs := "a composition camp could not identify"
+		if markerErr == nil {
+			belongs = live
+		}
+		notes = append(notes, Note{
+			Subject: "work directory: " + leftover,
+			Detail: fmt.Sprintf("mode %v, left by the kernel after a session on %s",
+				info.Mode().Perm(), belongs),
+			Action: "This is OverlayFS's own directory inside the workdir camp " +
+				"gave it, and the mode is the kernel's doing, not camp's -- it is " +
+				"made unreadable so that nothing wanders into it. It is empty of " +
+				"anything you own. The next 'camp run' in this environment removes " +
+				"it; camp does not remove it sooner because while the composition " +
+				"is up the directory is in use, and a namespace session has no " +
+				"teardown step of its own.",
 		})
 	}
 	return notes

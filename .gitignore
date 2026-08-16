@@ -6,5 +6,10 @@
 *.test
 *.out
 
-# What camp generates for itself, in case anyone runs it from a checkout
-.camp/
+# An environment's own directory, in case somebody composes from inside a
+# checkout. camp writes the matching rules into .camp/.gitignore itself,
+# which is where they belong: the environment root may belong to a
+# repository, to a different one tomorrow, or to none at all.
+.camp/work/
+.camp/storage/
+.camp/reports/

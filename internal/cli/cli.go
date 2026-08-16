@@ -279,8 +279,17 @@ func cmdInit(ctx *context, args []string) error {
 	if err := area.Write(config.FileName, []byte(report.ConfigTemplate(env)), 0o644); err != nil {
 		return wrap(err, ExitFailure, "")
 	}
+	// The ignore rules live in camp's own directory, so they hold whichever
+	// repository the environment root belongs to -- or none.
+	if err := area.Write(".gitignore", []byte(report.CampIgnore), 0o644); err != nil {
+		return wrap(err, ExitFailure, "")
+	}
 	ctx.printf("wrote %s\n"+
-		"Edit it -- every CHANGE-ME has to become a real directory name -- "+
-		"then run 'camp plan' to see what it would do.\n", target)
+		"and %s/.gitignore, which keeps camp's scratch, storage and reports "+
+		"out of version control while leaving the configuration and the "+
+		"inventory in.\n"+
+		"Edit the configuration -- every CHANGE-ME has to become a real "+
+		"directory name -- then run 'camp plan' to see what it would do.\n",
+		target, filepath.Dir(target))
 	return nil
 }

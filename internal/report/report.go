@@ -256,6 +256,36 @@ steps:
 `, env)
 }
 
+// CampIgnore is what 'camp init' writes into the environment's own
+// directory.
+//
+// It lives inside .camp rather than in any repository's .gitignore,
+// because the environment root may belong to a repository, to a
+// different one tomorrow, or to none at all -- and the rule is the same
+// in every case. Two files there are worth keeping and the rest is not.
+//
+// config.yml is intent, written by a person. inventory is generated, but
+// only by an explicit 'camp accept', and its whole value is that its
+// diff can be reviewed -- which means nothing unless it is under version
+// control. Everything else is scratch, machine-local, or output.
+const CampIgnore = `# What camp keeps in here, and what it only leaves here.
+#
+# Worth versioning:
+#   config.yml   what you want composed. The only file you write.
+#   inventory    the accepted snapshot of both repositories' root entries.
+#                Generated, but only by 'camp accept', and its diff is
+#                meant to be read -- which needs it to be in git.
+#
+# Not worth versioning, and ignored below:
+#   work/        scratch for one composition; swept when nothing is mounted
+#   storage/     machine-local files and worktrees; belongs to this machine
+#   reports/     what a session found, printed once and kept
+
+/work/
+/storage/
+/reports/
+`
+
 // ConfigSummary is the one-line description of what a configuration
 // composes, for the top of a report.
 func ConfigSummary(cfg config.Config) string {

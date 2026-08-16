@@ -97,6 +97,25 @@ the composed tree could resolve a branch to the wrong repository. camp
 does not add it for you; leaving it out is caught before anything is
 mounted.
 
+### Keeping it in git
+
+`.camp/` holds two things worth versioning and three that are not, and
+`camp init` writes a `.gitignore` inside it that says so:
+
+```
+/work/          scratch for one composition
+/storage/       machine-local files and worktrees
+/reports/       what a session found
+```
+
+What stays in is `config.yml` — what you want composed — and `inventory`,
+whose whole value is that its diff can be read.
+
+The rules live inside `.camp` rather than in a repository's own
+`.gitignore` because the environment root may belong to a repository, to
+a different one later, or to none at all, and the answer is the same
+every time.
+
 ## 3. Look before you leap
 
 ```
