@@ -346,12 +346,25 @@ func checkIdentity(fd int, path, expected string) error {
 // standsThere reports why a target must not be unmounted, or "" when it
 // may be.
 //
-// Three cases pass: the record carries no identity for this mount, so
-// there is nothing to compare and refusing would wall somebody in behind
-// mounts camp made; the path cannot be looked at, which the unmount
-// itself will answer for; and the identity matches.
-func standsThere(target JobTarget) string {
+// The first question is whether anything is mounted there at all, and it
+// has to be asked of the mount table rather than of the path. A path
+// whose mount is gone resolves to whatever was underneath it -- for the
+// live directory, the empty directory the composition stood on -- whose
+// device and inode are of course not the composition's. Comparing those
+// reads a finished job as a stranger's mount: measured, after a teardown
+// that unmounted everything and did not get to say so, where 'camp down'
+// then refused to remove eleven mounts that were already gone.
+//
+// Four cases pass: nothing is mounted there, so the unmount will answer
+// "absent"; the record carries no identity, so there is nothing to
+// compare and refusing would wall somebody in behind mounts camp made;
+// the path cannot be looked at, which the unmount itself will answer for;
+// and the identity matches.
+func standsThere(table []mountinfo.Entry, target JobTarget) string {
 	if target.Device == 0 && target.Inode == 0 {
+		return ""
+	}
+	if len(mountinfo.At(table, target.Path)) == 0 {
 		return ""
 	}
 	found, err := identityOf(target.Path)
@@ -415,7 +428,16 @@ func unmount(job Job) Reply {
 		// mismatch is reported and stepped over rather than failing the
 		// whole teardown, because the rest of the composition still has to
 		// come down.
-		if mismatch := standsThere(target); mismatch != "" {
+		//
+		// The table is read again for each target, because every unmount
+		// changes it: a stale one would say a path is still mounted after
+		// this job removed it.
+		table, err := mountinfo.Read(mountinfo.Self)
+		if err != nil {
+			reply.Error = err.Error()
+			return reply
+		}
+		if mismatch := standsThere(table, target); mismatch != "" {
 			reply.Results = append(reply.Results, Result{
 				Target:  target.Path,
 				Outcome: "mismatch",

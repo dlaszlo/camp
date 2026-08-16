@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/dlaszlo/camp/internal/compose"
@@ -346,76 +345,31 @@ func TestRunningTheFrontEndAsRootIsRefused(t *testing.T) {
 	}
 }
 
-// A recorded path is not proof that camp's mount is what stands there.
+// A mount that is simply gone is not a stranger's mount.
 //
-// If camp's mount went away and something else took the same name, an
-// unmount by path alone would have root remove a stranger's mount on
-// camp's say-so. The identity travels with the job and is compared before
-// the syscall -- so this test runs as an ordinary user, and would fail on
-// the permission rather than on the check if that order ever moved.
-func TestATargetThatIsNotWhatCampMountedIsNotUnmounted(t *testing.T) {
+// After a teardown that unmounted everything and died before it could say
+// so, every recorded path resolves to whatever was underneath it -- for
+// the live directory, the empty directory the composition stood on, whose
+// identity is of course not the composition's. Comparing those made 'camp
+// down' refuse to remove eleven mounts that were already gone, and leave
+// the record behind claiming somebody else's mounts were in the way.
+// Whether anything is mounted there is the first question, and only the
+// mount table can answer it.
+func TestAPathWhoseMountIsGoneIsAbsentAndNotAStranger(t *testing.T) {
 	asInvoker(t)
 	directory := t.TempDir()
 	target := filepath.Join(directory, "target")
-	if err := os.WriteFile(target, []byte("somebody else's\n"), 0o600); err != nil {
+	if err := os.Mkdir(target, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
+	// An identity nothing on this machine has, at a path that is a real
+	// directory and not a mount point.
 	job := privileged.Job{
 		Version: 1,
 		Action:  privileged.ActionUnmount,
 		Base:    directory,
-		Targets: []privileged.JobTarget{{Path: target, Device: 1, Inode: 1}},
-	}
-	encoded, err := json.Marshal(job)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reply := ask(t, privileged.ActionUnmount, encoded)
-
-	if len(reply.Results) != 1 {
-		t.Fatalf("%d results came back, wanted 1: %+v", len(reply.Results), reply)
-	}
-	if reply.Results[0].Outcome != "mismatch" {
-		t.Errorf("the outcome is %q; a path holding something that is not "+
-			"camp's mount must never read as absent or unmounted",
-			reply.Results[0].Outcome)
-	}
-	if !strings.Contains(reply.Results[0].Error, target) {
-		t.Errorf("the mismatch does not name the path: %q", reply.Results[0].Error)
-	}
-	if _, err := os.Stat(target); err != nil {
-		t.Errorf("the target was disturbed: %v", err)
-	}
-}
-
-// The identity that does match is passed through to the unmount. What
-// the kernel then says depends on privilege -- this test runs as an
-// ordinary user, so the syscall is refused -- and what is being measured
-// is that the check let it through rather than what came after.
-func TestATargetWhoseIdentityMatchesIsActedOn(t *testing.T) {
-	asInvoker(t)
-	directory := t.TempDir()
-	target := filepath.Join(directory, "target")
-	if err := os.WriteFile(target, []byte("camp's\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatal("this platform does not report a device and inode")
-	}
-
-	job := privileged.Job{
-		Version: 1,
-		Action:  privileged.ActionUnmount,
-		Base:    directory,
-		Targets: []privileged.JobTarget{
-			{Path: target, Device: uint64(st.Dev), Inode: st.Ino},
-		},
+		Targets: []privileged.JobTarget{{Path: target, Device: 222, Inode: 6295166}},
 	}
 	encoded, err := json.Marshal(job)
 	if err != nil {
@@ -427,7 +381,7 @@ func TestATargetWhoseIdentityMatchesIsActedOn(t *testing.T) {
 		t.Fatalf("%d results came back, wanted 1: %+v", len(reply.Results), reply)
 	}
 	if reply.Results[0].Outcome == "mismatch" {
-		t.Errorf("the object camp recorded was refused as somebody else's: %q",
-			reply.Results[0].Error)
+		t.Errorf("a path with no mount on it was read as somebody else's "+
+			"mount: %q", reply.Results[0].Error)
 	}
 }
