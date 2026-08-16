@@ -63,7 +63,7 @@ func sessionBlock(p plan.Plan, heading string) string {
 	b.WriteString(heading + "\n\n")
 	fmt.Fprintf(&b, "  identity: %s.\n", wrap(identity.Describe(), "            "))
 	fmt.Fprintf(&b, "            %s\n\n",
-		wrap("Note "+OwnershipClause+".", "            "))
+		wrap("Note: "+OwnershipClause+".", "            "))
 
 	width := len("CAMP_LIVE")
 	for _, variable := range p.Environment {
