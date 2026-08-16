@@ -165,6 +165,25 @@ finds out by trying rather than by reading switches.
 [docs/install.md](docs/install.md) has the full table, and the other way
 out is always `camp up`, which needs no namespace at all.
 
+### One more step if you use ssh
+
+A `camp run` session maps only your own user id, so every file owned by
+anyone else — root included — appears as `nobody` inside it. ssh refuses
+a system-wide configuration file it cannot attribute to root or to you,
+so `ssh` and `git push` over ssh fail in a session until you point ssh at
+your own configuration, which is also what makes it skip the system-wide
+one:
+
+```
+git config --global core.sshCommand 'ssh -F ~/.ssh/config'
+```
+
+That covers git, and it works even where no shell is started — the case
+for a program `camp run` starts directly. For your own terminals add
+`alias ssh='ssh -F ~/.ssh/config'` to your shell's startup file. Neither
+changes anything outside a session except which ssh configuration git
+reads. `camp up` creates no namespace and is not affected.
+
 ## The configuration
 
 One file, `$ENV/.camp/config.yml`. It states intent; the mount plan, the

@@ -113,6 +113,55 @@ confined, and a profile that pretends to is worse than an honest one.
 If you install camp somewhere else, edit both the attachment path and the
 profile name in the file.
 
+## ssh inside a session
+
+`camp run` maps exactly one user id — yours — into the session. Every
+file on the machine owned by anyone else is then shown with the kernel's
+overflow id, which is to say as `nobody`:
+
+```
+$ stat -c '%U %n' /etc/ssh/ssh_config      # inside a session
+nobody /etc/ssh/ssh_config
+```
+
+Reading and writing are unaffected. What changes is what a program sees
+when it asks who owns a file — and ssh asks, because it refuses a
+system-wide configuration file it cannot attribute to root or to you:
+
+```
+$ ssh nas
+Bad owner or permissions on /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf
+```
+
+**No mapping fixes this, and none is coming.** A user namespace lets an
+unprivileged process map the ids it owns — its own, and any range
+assigned to it in `/etc/subuid`. Host `root` is not one of them, and that
+is the property the whole rootless mode rests on. Rootless podman shows
+the same thing; it is less visible there only because a container brings
+its own `/etc`.
+
+The repair is to point ssh at your own configuration. `-F` does two
+things: it names the file to read, **and it skips the system-wide one**.
+
+```
+git config --global core.sshCommand 'ssh -F ~/.ssh/config'
+```
+
+That is the half that matters, because git runs ssh itself rather than
+through a shell, and because a program `camp run` starts directly reads
+no startup file at all — so an alias would never reach it. For your own
+interactive terminals, add the alias too:
+
+```
+alias ssh='ssh -F ~/.ssh/config'          # in your shell's startup file
+```
+
+`scp` and `sftp` take `-F` as well. Your host aliases, keys and options
+all keep working: only the system-wide file is skipped, and outside a
+session nothing changes except which ssh configuration git reads. If you
+need the system-wide file, `camp up` creates no namespace and none of
+this applies to it.
+
 ## Check that it worked
 
 ```

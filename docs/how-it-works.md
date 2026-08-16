@@ -363,6 +363,22 @@ capability is carried in the ambient set and dropped as soon as the
 mounts are verified. The overlay keeps working afterwards because the
 kernel recorded the mounter's credentials at mount time.
 
+The other cost is that exactly one id is mapped, so every file on the
+machine owned by anyone else — root included — is shown inside with the
+kernel's overflow id, as `nobody`. Reading and writing are unaffected;
+what changes is what a program sees when it asks who owns a file. This is
+not a gap to be closed: an unprivileged process may map the ids it owns,
+its own and any range assigned to it in `/etc/subuid`, and host root's is
+not one of them. That is the property the mode rests on.
+
+Where you meet it is ssh, which refuses a system-wide configuration file
+it cannot attribute to root or to you — so `ssh` and `git push` over ssh
+fail inside a session until ssh is pointed at your own configuration
+with `-F`, which is also what makes it skip the system-wide one.
+`camp explain` prints the two lines that do it, and
+[install.md](install.md) explains why one of them is not enough on its
+own.
+
 **The system-wide mode (`camp up`)** exists for when something started
 *outside* must see the tree — a GUI editor, most often. Here there is one
 mount table for the machine, so two effects are machine-wide for as long
