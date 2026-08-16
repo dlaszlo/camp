@@ -370,3 +370,31 @@ func Move(from, to string) error {
 	}
 	return nil
 }
+
+// Detach makes one mount point its own private mount.
+//
+// It is what the staging tree needs before anything is built in it. The
+// kernel refuses MS_MOVE with EINVAL when the mount being moved has a
+// shared parent, and on a systemd machine / is shared:1 -- so a
+// composition built straight into a directory on / cannot be moved
+// anywhere, which is the whole staging design. Binding the directory onto
+// itself and making that bind private gives everything mounted inside it
+// a private parent, without touching the propagation of / itself: this
+// mode already has exactly two machine-wide effects, and a third one --
+// changing how mounts propagate for every process -- is not available to
+// it.
+//
+// The namespace mode never needed this because it makes its whole
+// namespace private on entry, which is also why nothing caught it.
+func Detach(point string) error {
+	if err := unix.Mount(point, point, "", unix.MS_BIND, ""); err != nil {
+		return fmt.Errorf("binding %s onto itself so that what is built in it "+
+			"can be moved: %w", point, err)
+	}
+	if err := unix.Mount("", point, "", unix.MS_PRIVATE, ""); err != nil {
+		_ = unix.Unmount(point, 0)
+		return fmt.Errorf("making %s private so that what is built in it can be "+
+			"moved: %w", point, err)
+	}
+	return nil
+}

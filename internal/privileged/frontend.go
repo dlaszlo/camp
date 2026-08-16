@@ -242,6 +242,7 @@ func MountJob(built plan.Plan, staging string, exclude []byte) (Job, refusal.Lis
 		StagingParts: stagingParts,
 		LiveParts:    built.Config.Merged.Components(),
 		LowerPath:    built.Config.LowerPath(),
+		WorkParts:    workParts(built),
 		Storage:      built.Storage,
 		Exclude:      exclude,
 	}
@@ -282,6 +283,17 @@ func MountJob(built plan.Plan, staging string, exclude []byte) (Job, refusal.Lis
 		job.Mounts = append(job.Mounts, operation)
 	}
 	return job, refused
+}
+
+// workParts names camp's work directory beneath the environment root, so
+// that a failed mount can clear what the kernel leaves inside it. Only a
+// privileged process can, and this is the only one there is.
+func workParts(built plan.Plan) []string {
+	parts, ok := relativeTo(built.Config.Env, built.Work)
+	if !ok {
+		return nil
+	}
+	return parts
 }
 
 func identityBeneath(base string, parts []string) (string, error) {

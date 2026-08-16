@@ -67,14 +67,20 @@ func cmdUp(ctx *context, args []string) error {
 		Say:         say,
 	})
 	if !refused.Empty() {
+		// Said as plainly as the steps that led here. A run that ends with a
+		// sentence about what is not mounted, in the same shape as seven
+		// lines about what went right, reads as a success.
+		say.Failed("camp up failed. Nothing of this composition is mounted, and "+
+			"%s is writable again.", cfg.LowerPath())
 		return failure(ExitFailure, "", "%s", strings.TrimRight(report.Refusals(refused), "\n"))
 	}
 
 	say.MachineWide(cfg.LowerPath(), up.Plan.Live)
 	say.Announcement(cfg.Session)
 
-	ctx.printf("%s is up: %d mounts, all verified at the live path.\n",
-		up.Plan.Live, len(up.Plan.Mounts))
+	ctx.printf("%s\n", report.Marked(report.MarkOK,
+		fmt.Sprintf("camp up finished: %s is up, %d mounts, all verified at the "+
+			"live path. 'camp down' takes it apart.", up.Plan.Live, len(up.Plan.Mounts))))
 	return nil
 }
 

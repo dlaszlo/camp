@@ -171,23 +171,37 @@ func wrap(text, prefix string) string {
 	const width = 68
 	var out []string
 	for _, paragraph := range strings.Split(text, "\n") {
+		// A line's own indent is kept, and every line it folds onto keeps
+		// it too. That is the same reason the line breaks are kept: an
+		// indented line is a command somebody is meant to copy, and one
+		// flattened into the paragraph around it is one nobody can.
+		own := paragraph[:len(paragraph)-len(strings.TrimLeft(paragraph, " \t"))]
 		var lines []string
 		current := ""
 		for _, word := range strings.Fields(paragraph) {
 			switch {
 			case current == "":
-				current = word
+				current = own + word
 			case len(current)+1+len(word) > width:
 				lines = append(lines, current)
-				current = word
+				current = own + word
 			default:
 				current += " " + word
 			}
 		}
-		lines = append(lines, current)
-		out = append(out, lines...)
+		out = append(out, append(lines, current)...)
 	}
-	return strings.Join(out, "\n"+prefix)
+	joined := strings.Join(out, "\n"+prefix)
+	// A folded blank line would otherwise carry the prefix as trailing
+	// whitespace.
+	return strings.Join(trimRightEach(strings.Split(joined, "\n")), "\n")
+}
+
+func trimRightEach(lines []string) []string {
+	for index, line := range lines {
+		lines[index] = strings.TrimRight(line, " \t")
+	}
+	return lines
 }
 
 // Checks renders a preflight report.

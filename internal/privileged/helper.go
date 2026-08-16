@@ -117,6 +117,47 @@ func finish(out io.Writer, reply Reply, code int) int {
 	return code
 }
 
+// unwind removes what was mounted and clears what the kernel left, so a
+// failed mount leaves the machine as it found it.
+//
+// The second half matters as much as the first. The kernel creates its own
+// directory inside the overlay's workdir, owned by root and unreadable,
+// and only a privileged process can remove it -- so a failure that
+// unmounted everything and left that behind would leave the user with
+// residue they cannot clear, and with no record naming it either, because
+// a rolled-back up forgets its record. That is being walled in by a
+// command that reported a clean machine.
+func unwind(job Job, made []string, reply Reply) Reply {
+	reply.Stranded = rollback(made)
+	reply.RolledBack = len(reply.Stranded) == 0
+	if reply.RolledBack {
+		if err := clearWork(job); err != nil {
+			reply.Error += "\n\nand what the kernel left behind could not be " +
+				"cleared: " + err.Error()
+		}
+	}
+	return reply
+}
+
+// clearWork removes the kernel's leftover inside camp's work directory and
+// gives the directory back to the invoking user.
+func clearWork(job Job) error {
+	if len(job.WorkParts) == 0 {
+		return nil
+	}
+	work := filepath.Join(append([]string{job.Base}, job.WorkParts...)...)
+	if err := campsOwn(work); err != nil {
+		return err
+	}
+	if err := fsx.Work(work).RemoveTree("work"); err != nil {
+		return err
+	}
+	if err := fsx.Work(work).Chown(job.UID, job.GID); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // mount executes the plan, verifies it where it was built, and moves it.
 //
 // All three in one invocation, because sudo is exercised exactly once per
@@ -127,13 +168,23 @@ func mount(job Job) Reply {
 	reply := Reply{Version: JobVersion}
 	var made []string
 
+	// The staging tree gets a private parent before anything is built in
+	// it, or the move at the end cannot happen: MS_MOVE refuses a mount
+	// whose parent is shared, and on a systemd machine everything on / is.
+	// It is the first thing made and the last thing removed, so it is at
+	// the bottom of the rollback list.
+	staging := filepath.Join(append([]string{job.Base}, job.StagingParts...)...)
+	if err := mountx.Detach(staging); err != nil {
+		reply.Error = err.Error()
+		return unwind(job, nil, reply)
+	}
+	made = append(made, staging)
+
 	for _, operation := range job.Mounts {
 		target, sourceFD, targetFD, err := resolve(job, operation)
 		if err != nil {
 			reply.Error = err.Error()
-			reply.Stranded = rollback(made)
-			reply.RolledBack = len(reply.Stranded) == 0
-			return reply
+			return unwind(job, made, reply)
 		}
 
 		mountable := operation.AsMount(target)
@@ -156,9 +207,7 @@ func mount(job Job) Reply {
 		}
 		if err != nil {
 			reply.Error = err.Error()
-			reply.Stranded = rollback(made)
-			reply.RolledBack = len(reply.Stranded) == 0
-			return reply
+			return unwind(job, made, reply)
 		}
 
 		result := Result{Target: target, Outcome: "mounted"}
@@ -171,22 +220,27 @@ func mount(job Job) Reply {
 	// The first verification pass, here rather than in the front end,
 	// because the staging tree is where it has to be checked and the
 	// privilege must not be given back in between.
-	staging := filepath.Join(append([]string{job.Base}, job.StagingParts...)...)
 	if problems := verifyStaging(job, staging); problems != "" {
 		reply.Error = problems
-		reply.Stranded = rollback(made)
-		reply.RolledBack = len(reply.Stranded) == 0
-		return reply
+		return unwind(job, made, reply)
 	}
 
 	live := filepath.Join(append([]string{job.Base}, job.LiveParts...)...)
 	if err := mountx.Move(staging, live); err != nil {
 		reply.Error = err.Error()
-		reply.Stranded = rollback(made)
-		reply.RolledBack = len(reply.Stranded) == 0
-		return reply
+		return unwind(job, made, reply)
 	}
 	reply.Moved = true
+
+	// The tree is at the live path now; what is left at the staging point
+	// is the self-bind that made the move possible, over an empty
+	// directory. It exists for the length of this one call and no record
+	// mentions it, so it goes here.
+	if outcome, err := mountx.Unmount(staging); outcome == mountx.Busy {
+		reply.Stranded = append(reply.Stranded, staging)
+		reply.Error = fmt.Sprintf("the composition is at %s, and the staging "+
+			"mount point %s could not be removed: %v", live, staging, err)
+	}
 	return reply
 }
 
@@ -329,22 +383,13 @@ func unmount(job Job) Reply {
 	// work directory, mode 000. It is removed here, while there is still
 	// the privilege to do it, so that the user is never left with a
 	// directory of camp's that they cannot clear.
-	if len(job.WorkParts) > 0 && len(reply.Stranded) == 0 {
-		work := filepath.Join(append([]string{job.Base}, job.WorkParts...)...)
-		// One directory, and only if camp made it. This is the single place
-		// the helper removes anything or changes what it belongs to, and the
-		// marker is what says the directory is camp's rather than whatever
-		// the job's components happened to spell.
-		if err := campsOwn(work); err != nil {
+	if len(reply.Stranded) == 0 {
+		if err := clearWork(job); err != nil {
 			reply.Error = err.Error()
-			reply.Rule = err.(ruled).rule
-			return reply
-		}
-		if err := fsx.Work(work).RemoveTree("work"); err != nil {
-			reply.Error = err.Error()
-		}
-		if err := fsx.Work(work).Chown(job.UID, job.GID); err != nil && !os.IsNotExist(err) {
-			reply.Error = err.Error()
+			var named ruled
+			if errors.As(err, &named) {
+				reply.Rule = named.rule
+			}
 		}
 	}
 	return reply

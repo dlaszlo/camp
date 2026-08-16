@@ -26,15 +26,57 @@ import (
 // pipeable.
 type Narrator struct{ out io.Writer }
 
+// Every line begins with what it is. Without that, a run reads as one
+// undifferentiated block in which the step that failed looks exactly like
+// the seven that did not -- and a line saying nothing is mounted, which is
+// the aftermath of a failure, reads as a success. The marker is the first
+// thing on the line because that is the column an eye runs down.
+const (
+	MarkOK    = "[OK]"
+	MarkNote  = "[NOTE]"
+	MarkError = "[ERROR]"
+	MarkHint  = "[HINT]"
+	// markWidth aligns the text, so the prose starts in one column
+	// whichever marker precedes it.
+	markWidth = len(MarkError) + 1
+)
+
+// Marked renders one marked line, folded and aligned.
+//
+// Exported so that a command's ending reads in the same column as the
+// steps that led to it: a failure rendered in some other shape is a
+// failure the eye has to hunt for.
+func Marked(marker, text string) string {
+	return fmt.Sprintf("%-*s%s", markWidth, marker,
+		wrap(text, strings.Repeat(" ", markWidth)))
+}
+
 // Narrate returns a narrator writing to a stream. A nil writer -- or a nil
 // narrator -- says nothing, so callers never have to ask whether to speak.
 func Narrate(out io.Writer) *Narrator { return &Narrator{out: out} }
 
+// say is one completed step.
 func (n *Narrator) say(format string, args ...any) {
+	n.mark(MarkOK, fmt.Sprintf(format, args...))
+}
+
+// Note is something true that is not a step: what a mode does not do,
+// what a section does not apply to.
+func (n *Narrator) Note(format string, args ...any) {
+	n.mark(MarkNote, fmt.Sprintf(format, args...))
+}
+
+// Failed is what stopped the command, said as plainly as the steps that
+// led to it.
+func (n *Narrator) Failed(format string, args ...any) {
+	n.mark(MarkError, fmt.Sprintf(format, args...))
+}
+
+func (n *Narrator) mark(marker, text string) {
 	if n == nil || n.out == nil {
 		return
 	}
-	fmt.Fprintf(n.out, "%s\n", wrap(fmt.Sprintf(format, args...), "  "))
+	fmt.Fprintf(n.out, "%s\n", Marked(marker, text))
 }
 
 // Locks: taken first, so that two camps racing can only refuse each other.
@@ -124,5 +166,5 @@ func (n *Narrator) Announcement(session config.Session) {
 	if !session.Present {
 		return
 	}
-	n.say("%s", Announcement())
+	n.Note("%s", Announcement())
 }

@@ -10,6 +10,8 @@ package cli
 import (
 	"errors"
 	"fmt"
+
+	"github.com/dlaszlo/camp/internal/report"
 )
 
 // Exit codes, stable enough for a CI job to branch on.
@@ -39,10 +41,14 @@ func (e *Error) Error() string { return e.Message }
 func (e *Error) Unwrap() error { return e.Cause }
 
 // Render formats the error the way a person should read it.
+//
+// In the same marked column as everything a command says on its way here.
+// A failure that renders in a shape of its own is a failure somebody has
+// to find; this one is the line whose marker is not [OK].
 func (e *Error) Render() string {
-	out := "error: " + e.Message
+	out := report.Marked(report.MarkError, e.Message)
 	if e.Hint != "" {
-		out += "\nhint: " + e.Hint
+		out += "\n" + report.Marked(report.MarkHint, e.Hint)
 	}
 	return out
 }
@@ -82,5 +88,5 @@ func render(err error) string {
 	if errors.As(err, &classified) {
 		return classified.Render()
 	}
-	return "error: " + err.Error()
+	return report.Marked(report.MarkError, err.Error())
 }

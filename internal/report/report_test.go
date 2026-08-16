@@ -262,6 +262,56 @@ func TestTheNarrationSaysWhatHappenedAndPrintsNoValues(t *testing.T) {
 		t.Errorf("a narration line carries a name=value pair, and these lines "+
 			"name variables without printing what they hold:\n%s", text)
 	}
+
+	// Every line says what it is, in the first column. Without that a run
+	// is one block in which the step that failed looks like the ones that
+	// did not.
+	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		if strings.HasPrefix(line, " ") {
+			continue // a folded continuation, aligned under its own text
+		}
+		if !strings.HasPrefix(line, report.MarkOK) {
+			t.Errorf("a line begins with something other than a marker: %q", line)
+		}
+	}
+}
+
+// A failure is marked as one, and a note as a note. The three read in the
+// same column so the eye finds the one that is not [OK].
+func TestWhatIsWrongIsMarkedAsWrong(t *testing.T) {
+	var out strings.Builder
+	say := report.Narrate(&out)
+
+	say.Checked(3)
+	say.Note("this mode starts no session")
+	say.Failed("camp up failed. Nothing of this composition is mounted.")
+
+	text := out.String()
+	for marker, want := range map[string]string{
+		report.MarkOK:    "checked:",
+		report.MarkNote:  "starts no session",
+		report.MarkError: "camp up failed",
+	} {
+		var found bool
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, marker) && strings.Contains(line, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no line begins %s and carries %q:\n%s", marker, want, text)
+		}
+	}
+
+	// And the prose starts in one column whichever marker precedes it, so
+	// the text reads as one paragraph down the page rather than stepping
+	// left and right with the width of the word in brackets.
+	width := len(report.Marked(report.MarkOK, "x")) - 1
+	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		if len(line) <= width || line[width] == ' ' {
+			t.Errorf("the text of %q does not start in the shared column", line)
+		}
+	}
 }
 
 // unwrapped folds a narrated paragraph back into one line, so a test can
