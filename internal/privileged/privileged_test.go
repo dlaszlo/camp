@@ -19,11 +19,16 @@ import (
 // it. The privileged mode neither applies nor refuses one, so everything
 // this package does has to behave exactly as it did before the section
 // existed.
+//
+// The name it reads is deliberately not a CAMP_ one. Those are refused as
+// interpolation inputs by definition, so a sentinel behind one could never
+// be copied into anything however wrong the code was -- a guard that
+// cannot fail is not a guard.
 const sessionYAML = `
 session:
   identity: uidmap
   environment:
-    SESSION_TOKEN: "$CAMP_TEST_SENTINEL"
+    SESSION_TOKEN: "$TEST_SENTINEL"
     PATH: "$CAMP_LIVE/.workspace/bin:$PATH"
 `
 
@@ -114,7 +119,7 @@ func TestATeardownIsUnaffectedByASessionSection(t *testing.T) {
 // to carry one, and both of which outlive the session.
 func TestNoDeclaredValueReachesTheRecordOrTheHelpersJob(t *testing.T) {
 	const sentinel = "s3cret-inherited-value"
-	t.Setenv("CAMP_TEST_SENTINEL", sentinel)
+	t.Setenv("TEST_SENTINEL", sentinel)
 
 	record := recordFor(t, sessionYAML)
 	encoded, err := json.Marshal(record)
@@ -146,7 +151,7 @@ func TestNoDeclaredValueReachesTheRecordOrTheHelpersJob(t *testing.T) {
 // paths, identities and options, and no environment ever enters it.
 func TestTheMountJobCarriesPathsAndNoEnvironment(t *testing.T) {
 	const sentinel = "s3cret-inherited-value"
-	t.Setenv("CAMP_TEST_SENTINEL", sentinel)
+	t.Setenv("TEST_SENTINEL", sentinel)
 
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	env := testenv.NewEnv(t)

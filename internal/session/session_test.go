@@ -519,8 +519,11 @@ func TestABareCommandIsFoundThroughTheDeclaredPathInASession(t *testing.T) {
 
 // Nothing declared survives the session, and neither does the tree.
 func TestNothingDeclaredLeaksOutOfTheSession(t *testing.T) {
-	before := strings.Join(os.Environ(), "\n")
+	// The snapshot is taken after the fixture is built, not before: the
+	// fixture sets the variable the declaration reads, and comparing across
+	// that would fail on the test's own doing rather than on camp's.
 	session := declaringSentinel(t, "sentinel-value-9c1f")
+	before := strings.Join(os.Environ(), "\n")
 
 	_, status, err := session.output(t, []string{"/bin/sh", "-c", "true"})
 	skipUnlessNamespaced(t, err)
