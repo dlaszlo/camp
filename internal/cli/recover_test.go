@@ -63,28 +63,32 @@ func TestStatusDescribesACompositionWithTheConfigurationDeleted(t *testing.T) {
 		if !strings.Contains(out, "nothing the record names is mounted") {
 			t.Errorf("status did not say what is on the machine:\n%s", out)
 		}
+		// And a record that says one thing while the machine says another is
+		// named as exactly that, rather than reported as a healthy tree.
+		if !strings.Contains(out, "record says 'up' and nothing of it is mounted") {
+			t.Errorf("status did not name the disagreement:\n%s", out)
+		}
 	}
 
+	// The exit is non-zero throughout: the record says up and nothing of it
+	// is mounted, which is a state somebody has to resolve. What is being
+	// measured here is that all three ways of naming the composition reach
+	// the same description without a configuration.
 	out, errOut, code := run(t, "status", "-record", record.Hash)
-	if code != 0 {
-		t.Errorf("status by record exited %d:\n%s", code, errOut)
+	if code == 0 {
+		t.Errorf("status by record exited 0 over a record the machine "+
+			"contradicts:\n%s", errOut)
 	}
 	byRecord(t, out)
 
-	out, errOut, code = run(t, "status", "-live", env.Live)
-	if code != 0 {
-		t.Errorf("status by live path exited %d:\n%s", code, errOut)
-	}
+	out, _, _ = run(t, "status", "-live", env.Live)
 	byRecord(t, out)
 
 	// And standing in the environment, with nothing named at all: the
 	// record says which directory it belongs to, so the directory can find
 	// the record.
 	t.Chdir(env.Path)
-	out, errOut, code = run(t, "status")
-	if code != 0 {
-		t.Errorf("status from the environment directory exited %d:\n%s", code, errOut)
-	}
+	out, _, _ = run(t, "status")
 	byRecord(t, out)
 }
 

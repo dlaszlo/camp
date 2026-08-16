@@ -284,11 +284,39 @@ func describeRecord(ctx *context, record state.Record, table []mountinfo.Entry) 
 	ctx.printf("\n%s", verdict(record, counts))
 	ctx.printf("%s", configDrift(record))
 
-	if counts[state.Same]+counts[state.Unverified]+counts[state.Different] > 0 &&
-		record.Phase != state.Up {
+	if problem := disagreement(record, counts); problem != "" {
+		ctx.printf("\n%s", problem)
 		return failure(ExitPrecondition, "", "run 'camp down' to take it apart")
 	}
 	return nil
+}
+
+// disagreement names what the record and the machine say differently.
+//
+// This is the most useful thing status can say after a crash, because the
+// phase says which boundary the run reached and the mounts say what it
+// got done -- and the two together name the moment it stopped.
+func disagreement(record state.Record, counts map[state.Presence]int) string {
+	standing := counts[state.Same] + counts[state.Unverified] + counts[state.Different]
+	switch {
+	case counts[state.Different] > 0:
+		return "camp will not take this apart on its own: some of what stands " +
+			"at these paths is not what camp mounted.\n"
+	case standing > 0 && record.Phase == state.Mounting:
+		return "the record says 'mounting' and the composition is standing, so " +
+			"the run stopped between the helper's work and the check that " +
+			"follows it. Nothing is lost: the record names every mount that was " +
+			"made.\n"
+	case standing > 0 && record.Phase == state.Partial:
+		return "the record says 'partial': a teardown or a rollback did not " +
+			"finish, and what it could not remove is above.\n"
+	case standing == 0 && record.Phase == state.Up:
+		return "the record says 'up' and nothing of it is mounted: a teardown " +
+			"took the composition apart and did not get as far as saying so, or " +
+			"the machine was restarted, or something outside camp removed the " +
+			"mounts. 'camp down' finishes the bookkeeping either way.\n"
+	}
+	return ""
 }
 
 func presenceOf(path string, table []mountinfo.Entry) state.Presence {
@@ -309,9 +337,17 @@ func verdict(record state.Record, counts map[state.Presence]int) string {
 		return fmt.Sprintf("partly up, and %d mount(s) are not what camp mounted. "+
 			"camp will not remove those: whatever is standing there now belongs to "+
 			"somebody else.\n", counts[state.Different])
-	case standing == len(record.Mounts):
+	case standing == len(record.Mounts) && counts[state.Unverified] == 0:
 		return "up: every recorded mount is present, and each is the object camp " +
 			"mounted.\n"
+	case standing == len(record.Mounts):
+		// Said rather than glossed over. "Present" and "the object camp
+		// mounted" are two different claims, and a record written before its
+		// mounts were made can only support the first.
+		return fmt.Sprintf("up: every recorded mount is present. %d of them "+
+			"carry no recorded identity, so camp cannot say whether what stands "+
+			"there is what it mounted: the record was written before those "+
+			"mounts were made.\n", counts[state.Unverified])
 	default:
 		return fmt.Sprintf("partly up: %d of %d recorded mounts are present. "+
 			"'camp down' removes what is left.\n", standing, len(record.Mounts))
