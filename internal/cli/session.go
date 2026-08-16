@@ -12,6 +12,7 @@ import (
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/refusal"
+	"github.com/dlaszlo/camp/internal/report"
 	"github.com/dlaszlo/camp/internal/session"
 )
 
@@ -48,7 +49,12 @@ func enter(ctx *context, file string, argv []string) error {
 
 	sweep(ctx, cfg)
 
-	composition, err := prepare(cfg, plan.Namespace, nil)
+	// The launcher's own steps, said as they finish. The rest of the
+	// sequence -- the identity route, the mounts, their verification and
+	// the environment -- is narrated by the init, which is where those
+	// things happen and which is one sequential process, so the lines
+	// arrive in the order the steps did.
+	composition, err := prepare(cfg, plan.Namespace, report.Narrate(ctx.err))
 	if err != nil {
 		return err
 	}

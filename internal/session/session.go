@@ -52,11 +52,13 @@ import (
 	"github.com/dlaszlo/camp/internal/compose"
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/drift"
+	"github.com/dlaszlo/camp/internal/envx"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/locks"
 	"github.com/dlaszlo/camp/internal/nsx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
+	"github.com/dlaszlo/camp/internal/report"
 	"github.com/dlaszlo/camp/internal/reports"
 )
 
@@ -133,7 +135,6 @@ func Launch(options Options) (int, error) {
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = options.Stdin, options.Stdout, options.Stderr
 	cmd.SysProcAttr = attrs
 	cmd.ExtraFiles = append([]*os.File{write}, options.Locks.Files()...)
-	cmd.Env = append(os.Environ(), "CAMP_SESSION="+options.Plan.Hash)
 
 	if err := cmd.Start(); err != nil {
 		write.Close()
@@ -219,7 +220,7 @@ func InitMain(args []string) {
 // Inside is the init: camp as pid 1 of the namespace.
 func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	pipe := os.NewFile(pipeFD, "handshake")
-	report := func(note message) {
+	send := func(note message) {
 		encoded, err := json.Marshal(note)
 		if err != nil {
 			return
@@ -227,7 +228,7 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 		pipe.Write(append(encoded, '\n'))
 	}
 	refuse := func(format string, args ...any) {
-		report(message{Kind: kindRefused, Text: fmt.Sprintf(format, args...)})
+		send(message{Kind: kindRefused, Text: fmt.Sprintf(format, args...)})
 		os.Exit(1)
 	}
 
@@ -242,6 +243,23 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	built, exclude, problems := rebuild(configPath)
 	if !problems.Empty() {
 		refuse("%s", problems.Error())
+	}
+
+	// The steps say what they did, in order, on this process's stderr --
+	// which is the user's terminal. They come from here rather than from
+	// the launcher because this is one sequential process, so the order
+	// they appear in is the order things happened in.
+	say := report.Narrate(os.Stderr)
+	say.Identity(built.Config.Session)
+
+	// Resolved here, before anything is mounted, so that a reference the
+	// configuration cannot satisfy stops the session while there is still
+	// nothing to take apart. What it produces is inert text: nothing
+	// declared is installed on this process, whose capability is exactly
+	// what must never meet a configured PATH.
+	environment, err := Resolve(built.Config, built.Live, os.Environ())
+	if err != nil {
+		refuse("%v", err)
 	}
 
 	if err := nsx.Detach(); err != nil {
@@ -262,6 +280,8 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	if !result.OK() {
 		refuse("%s", describeFailure(result))
 	}
+	say.Mounted(len(result.Mounted), built.Live)
+	say.Verified(built.Live)
 
 	// Everything is mounted and verified. The capability goes back before
 	// anything the user asked for runs.
@@ -269,19 +289,28 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 		refuse("giving the mount capability back: %v", err)
 	}
 
-	workload, err := startWorkload(built.Live, argv)
+	// And only now is anything the configuration declared attached to a
+	// process, or used to choose one. A failed drop starts no workload at
+	// all, and the command lookup needs the composed tree standing anyway:
+	// the launcher directory a declared PATH prepends lives inside it.
+	say.Environment(environment.Applied)
+	workload, err := environment.Workload(built.Live, argv)
 	if err != nil {
 		refuse("%v", err)
 	}
-	report(message{Kind: kindUp})
+	started, err := startWorkload(workload)
+	if err != nil {
+		refuse("%v", err)
+	}
+	send(message{Kind: kindUp})
 
 	// The workload's status goes back the moment the workload exits, not
 	// when the session ends. Those are different moments whenever
 	// something daemonised: the launching command is finished and its
 	// caller should get its shell back, while the server that reparented
 	// to this process keeps the composition open.
-	supervise(workload, func(status int) {
-		report(message{Kind: kindExit, Code: status})
+	supervise(started, func(status int) {
+		send(message{Kind: kindExit, Code: status})
 	})
 
 	// The last thing this process does before the kernel takes the
@@ -357,20 +386,91 @@ func describeFailure(result compose.Result) string {
 	return text
 }
 
-// startWorkload runs what the user asked for, inside the composed tree.
-func startWorkload(live string, argv []string) (*exec.Cmd, error) {
-	if len(argv) == 0 {
-		argv = []string{shell()}
-	}
-	binary, err := exec.LookPath(argv[0])
-	if err != nil {
-		return nil, fmt.Errorf("cannot run %q: %w", argv[0], err)
+// Environment is what a session's workload will run with: the effective
+// list, and the names the configuration declared.
+//
+// It is built while the init still holds the mount capability, which is
+// safe precisely because building it does nothing but concatenate bytes:
+// no file is read, no process is changed, no lookup is performed. It is
+// inert until Workload turns it into a command, and Workload runs only
+// after the capability has gone back.
+type Environment struct {
+	// Env is the effective environment: one duplicate-free list.
+	Env []string
+	// Applied names the declared variables, in the order a report shows
+	// them. Never their values.
+	Applied []string
+}
+
+// Workload is the command a session will start: the executable that was
+// selected, its arguments, and the environment it receives.
+type Workload struct {
+	Path string
+	Argv []string
+	Env  []string
+	// Dir is the composed tree, which is where the workload starts.
+	Dir string
+}
+
+// Resolve builds the effective environment from an explicit base.
+//
+// Explicit, never os.Environ() reached for inside: the base is the
+// snapshot the launcher was started with, both halves of the session
+// resolve against the same one, and nothing here mutates the process it
+// runs in. There is no os.Setenv anywhere in this path -- a declared PATH
+// installed on camp's own init would be a configured value steering a
+// process that holds CAP_SYS_ADMIN.
+func Resolve(cfg config.Config, live string, base []string) (Environment, error) {
+	declared := make([]envx.Setting, 0, len(cfg.Session.Environment))
+	applied := make([]string, 0, len(cfg.Session.Environment))
+	resolution := envx.NewBase(base, live)
+	for _, declaration := range cfg.Session.Environment {
+		value, err := declaration.Expr.Resolve(resolution)
+		if err != nil {
+			return Environment{}, err
+		}
+		declared = append(declared, envx.Setting{Name: declaration.Name, Value: value})
+		applied = append(applied, declaration.Name)
 	}
 
-	cmd := exec.Command(binary, argv[1:]...)
-	cmd.Dir = live
+	// The two camp-owned names, and the whole of the camp-owned contract.
+	// There is deliberately no session identifier among them: an exported
+	// marker invites host-side wrappers that switch on it, which is wiring
+	// the host through another door.
+	effective := envx.Effective(base, declared, []envx.Setting{
+		{Name: envx.Live, Value: live},
+		{Name: envx.Cwd, Value: live},
+	})
+	return Environment{Env: effective, Applied: applied}, nil
+}
+
+// Workload selects the command, against the environment the workload will
+// actually have.
+//
+// This is the part that has to be right, and the part that has to happen
+// last. A bare command name is resolved against the *effective* PATH, so
+// that the workspace-owned launcher directory a composition prepends is
+// really reached -- and it can only be reached once the composition is
+// mounted, because that directory lives inside the composed tree.
+// Resolving against camp's own path while the plan prints the declared one
+// would run the host's command under a plan that says otherwise.
+func (e Environment) Workload(live string, argv []string) (Workload, error) {
+	if len(argv) == 0 {
+		argv = []string{shell(envx.Value(e.Env, "SHELL"))}
+	}
+	path, err := envx.Command(argv[0], envx.Value(e.Env, "PATH"))
+	if err != nil {
+		return Workload{}, err
+	}
+	return Workload{Path: path, Argv: argv, Env: e.Env, Dir: live}, nil
+}
+
+// startWorkload runs what the user asked for, inside the composed tree.
+func startWorkload(workload Workload) (*exec.Cmd, error) {
+	cmd := exec.Command(workload.Path, workload.Argv[1:]...)
+	cmd.Dir = workload.Dir
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = append(os.Environ(), "CAMP_LIVE="+live, "PWD="+live)
+	cmd.Env = workload.Env
 
 	// The workload gets its own process group, and where there is a
 	// terminal it becomes the foreground group on it. That is what makes
@@ -383,7 +483,7 @@ func startWorkload(live string, argv []string) (*exec.Cmd, error) {
 	}
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("starting %q: %w", argv[0], err)
+		return nil, fmt.Errorf("starting %q: %w", workload.Argv[0], err)
 	}
 	return cmd, nil
 }
@@ -393,8 +493,12 @@ func terminal(file *os.File) bool {
 	return err == nil
 }
 
-func shell() string {
-	if configured := os.Getenv("SHELL"); configured != "" {
+// shell picks the interactive shell from the effective SHELL, not from
+// camp's own: a session that declares one has said which shell it means,
+// and starting a different one would be the plan describing something
+// other than what happened.
+func shell(configured string) string {
+	if configured != "" {
 		return configured
 	}
 	return "/bin/sh"
