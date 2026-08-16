@@ -281,7 +281,7 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 		refuse("%s", describeFailure(result))
 	}
 	say.Mounted(len(result.Mounted), built.Live)
-	say.Verified(built.Live)
+	say.Verified(len(result.Mounted), built.Live)
 
 	// Everything is mounted and verified. The capability goes back before
 	// anything the user asked for runs.

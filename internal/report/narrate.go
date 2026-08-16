@@ -41,14 +41,26 @@ const (
 	markWidth = len(MarkError) + 1
 )
 
-// Marked renders one marked line, folded and aligned.
+// Marked renders one marked line, aligned.
 //
-// Exported so that a command's ending reads in the same column as the
-// steps that led to it: a failure rendered in some other shape is a
-// failure the eye has to hunt for.
+// Everything starts in one of two columns: the marker in the first, the
+// text in the second, and every line a message runs onto in the second as
+// well. Nothing is indented relative to anything else -- a block whose
+// lines start in three different places is harder to read than a long
+// one, and the eye running down the marker column is the whole point of
+// having markers.
+//
+// Exported so a command's ending reads in the same columns as the steps
+// that led to it: a failure rendered in some other shape is a failure
+// somebody has to hunt for.
 func Marked(marker, text string) string {
+	indent := strings.Repeat(" ", markWidth)
+	lines := strings.Split(text, "\n")
+	for index, line := range lines {
+		lines[index] = strings.TrimSpace(line)
+	}
 	return fmt.Sprintf("%-*s%s", markWidth, marker,
-		wrap(text, strings.Repeat(" ", markWidth)))
+		wrap(strings.Join(lines, "\n"), indent))
 }
 
 // Narrate returns a narrator writing to a stream. A nil writer -- or a nil
@@ -81,33 +93,30 @@ func (n *Narrator) mark(marker, text string) {
 
 // Locks: taken first, so that two camps racing can only refuse each other.
 func (n *Narrator) Locks(upper, live string) {
-	n.say("locks: held on %s and on %s, for as long as this composition lasts",
-		upper, live)
+	n.say("locks: %s, %s", upper, live)
 }
 
 // Checked: everything a composition can be refused for while nothing is
 // mounted -- the moment when a repair by hand is still safe.
 func (n *Narrator) Checked(mounts int) {
-	n.say("checked: %d mounts derived and validated, the two repository roots "+
-		"gated against each other, nothing refused", mounts)
+	n.say("checked: %d mounts, gate clean, nothing refused", mounts)
 }
 
 // Generated: the artefacts, produced as the invoking user and before
 // anything is mounted.
 func (n *Narrator) Generated(has bool) {
 	if !has {
-		n.say("generation: this composition declares no generation step, so it " +
-			"has no exclude")
+		n.say("generation: none declared, so this composition has no exclude")
 		return
 	}
-	n.say("generated: the exclude and the islands lists, as you, before any " +
-		"mount exists")
+	n.say("generated: the exclude and the islands lists")
 }
 
 // Identity: which uid route the namespace takes, and the one fact about
 // this run that surprises somebody later.
 func (n *Narrator) Identity(session config.Session) {
-	n.say("identity: %s -- %s", nsx.For(session.Identity).Describe(), OwnershipClause)
+	n.say("identity: %s; files owned by anyone else show as nobody",
+		nsx.For(session.Identity).Short())
 }
 
 // Environment: the names applied, never their values. What a variable
@@ -117,48 +126,41 @@ func (n *Narrator) Environment(names []string) {
 	if len(names) == 0 {
 		return
 	}
-	n.say("environment: %s -- applied to the workload after the mount "+
-		"capability was given back, and to nothing else", strings.Join(names, ", "))
+	n.say("environment: %s", strings.Join(names, ", "))
 }
 
 // Mounted: the sequence, and the verification that decides.
 func (n *Narrator) Mounted(count int, where string) {
-	n.say("mounted: %d, in order, at %s", count, where)
+	n.say("mounted: %d at %s", count, where)
 }
 
 // Verified: what the checks found by asking the kernel through paths,
 // rather than by trusting the calls that were made.
-func (n *Narrator) Verified(where string) {
-	n.say("verified: every mount present, reachable and the right way round "+
-		"at %s", where)
+func (n *Narrator) Verified(count int, where string) {
+	n.say("verified: %d mounts at %s", count, where)
 }
 
 // Record: the privileged mode's teardown list, written before anything is
 // mounted so that whatever happens next, something knows what to undo.
 func (n *Narrator) Record(path string) {
-	n.say("record: %s carries the whole plan, so a teardown never needs the "+
-		"configuration", path)
+	n.say("record: %s", path)
 }
 
 // Helper: the one elevated step, and the only one.
 func (n *Narrator) Helper() {
-	n.say("helper: the mounts run through one sudo'd 'camp helper-mount' -- " +
-		"the front end you are talking to stays unprivileged from start to " +
-		"finish")
+	n.say("helper: sudo camp helper-mount")
 }
 
 // Moved: the moment the tree becomes visible to the machine.
-func (n *Narrator) Moved(live string) {
-	n.say("moved: the staged tree onto %s, and checked again there -- only a "+
-		"check at the final path can prove what an outside process now sees", live)
+func (n *Narrator) Moved(staging, live string) {
+	n.say("moved: %s -> %s", staging, live)
 }
 
 // MachineWide: the two effects this mode has outside the composition,
 // stated as facts now in force.
 func (n *Narrator) MachineWide(workspace, live string) {
-	n.say("machine-wide: %s is read-only for every process on this machine, "+
-		"your editor included, until 'camp down'", workspace)
-	n.say("machine-wide: %s is visible to every process on this machine", live)
+	n.Note("machine-wide: %s is read-only until 'camp down'", workspace)
+	n.Note("machine-wide: %s is visible to every process", live)
 }
 
 // Announcement: the session section this mode does not apply.
@@ -166,5 +168,5 @@ func (n *Narrator) Announcement(session config.Session) {
 	if !session.Present {
 		return
 	}
-	n.Note("%s", Announcement())
+	n.Note("session: not applied here; 'camp run' and 'camp shell' apply it")
 }

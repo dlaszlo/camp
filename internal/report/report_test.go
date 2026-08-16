@@ -239,7 +239,7 @@ func TestTheNarrationSaysWhatHappenedAndPrintsNoValues(t *testing.T) {
 	say.Identity(config.Session{})
 	say.Environment([]string{"GIT_SSH_COMMAND", "PATH"})
 	say.Mounted(14, "/env/live")
-	say.Verified("/env/live")
+	say.Verified(14, "/env/live")
 
 	text := out.String()
 	order := []string{"locks:", "checked:", "generated:", "identity:",
@@ -252,7 +252,9 @@ func TestTheNarrationSaysWhatHappenedAndPrintsNoValues(t *testing.T) {
 		}
 		at += index + len(label)
 	}
-	if !strings.Contains(unwrapped(text), report.OwnershipClause) {
+	// The one fact of this run that surprises somebody later rides on the
+	// identity line, in the few words a progress line has room for.
+	if !strings.Contains(unwrapped(text), "show as nobody") {
 		t.Errorf("the identity line does not carry the ownership fact:\n%s", text)
 	}
 	if !strings.Contains(text, "GIT_SSH_COMMAND, PATH") {

@@ -103,6 +103,16 @@ func (i Identity) Describe() string {
 	}
 }
 
+// Short says which route this is, in the few words a progress line has
+// room for. Describe is the long form, for a report somebody is reading
+// rather than watching.
+func (i Identity) Short() string {
+	if i.Route == config.UIDMap {
+		return fmt.Sprintf("uid %d and gid %d through newuidmap", i.InsideUID, i.InsideGID)
+	}
+	return fmt.Sprintf("uid %d and gid %d map to themselves", i.InsideUID, i.InsideGID)
+}
+
 // Attrs returns the process attributes that create the namespace.
 //
 // CLONE_NEWUSER for the capability, CLONE_NEWNS so the mounts are the

@@ -162,8 +162,8 @@ func Up(in UpInput) refusal.List {
 		return problems
 	}
 
-	in.Say.Moved(built.Live)
-	in.Say.Verified(built.Live)
+	in.Say.Moved(staging, built.Live)
+	in.Say.Verified(len(built.Mounts), built.Live)
 
 	record.Phase = state.Up
 	if err := record.Save(); err != nil {
