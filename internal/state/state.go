@@ -112,6 +112,12 @@ type Record struct {
 	// privileged mode.
 	Staging string `json:"staging,omitempty"`
 
+	// Detached are the mount points the privileged helper bound onto
+	// themselves so that what was moved onto them could not propagate.
+	// They sit underneath the composition and come off after it, so a
+	// teardown removes them last.
+	Detached []string `json:"detached,omitempty"`
+
 	Phase Phase `json:"phase"`
 
 	Tool      string `json:"tool_version"`
@@ -152,8 +158,13 @@ func FromPlan(built plan.Plan, tool, configDigest, inventoryDigest string, uid, 
 		InventoryDigest: inventoryDigest,
 		Phase:           Mounting,
 		Tool:            tool,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		// The live path is bound onto itself before the composition is moved
+		// onto it, so that the move cannot propagate. It is written down
+		// here rather than inferred at teardown, because a teardown works
+		// from this record and from nothing else.
+		Detached:  []string{built.Live},
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	for _, mount := range built.Mounts {
 		recorded := Mount{

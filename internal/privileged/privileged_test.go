@@ -67,9 +67,16 @@ func TestTheTeardownJobIsBuiltFromTheRecordAlone(t *testing.T) {
 	if job.Action != privileged.ActionUnmount {
 		t.Errorf("the job's action is %q", job.Action)
 	}
-	if len(job.Targets) != len(record.Mounts) {
-		t.Fatalf("the job has %d targets and the record %d mounts",
-			len(job.Targets), len(record.Mounts))
+	// Every recorded mount, and after them the points the helper bound onto
+	// themselves so the composition could be moved into place.
+	if len(job.Targets) != len(record.Mounts)+len(record.Detached) {
+		t.Fatalf("the job has %d targets, and the record %d mounts and %d "+
+			"detached points", len(job.Targets), len(record.Mounts),
+			len(record.Detached))
+	}
+	if last := job.Targets[len(job.Targets)-1]; last != record.Live {
+		t.Errorf("the last thing to come down is %s, and it should be the live "+
+			"path itself: the composition was standing on it", last)
 	}
 	if job.Targets[0] != record.Mounts[len(record.Mounts)-1].Target {
 		t.Error("the job's first target is not the last mount made; teardown " +
@@ -107,7 +114,8 @@ func TestATeardownIsUnaffectedByASessionSection(t *testing.T) {
 	if err := os.Remove(withSection.Config); err != nil {
 		t.Fatal(err)
 	}
-	if job := privileged.UnmountJob(withSection); len(job.Targets) != len(withSection.Mounts) {
+	if job := privileged.UnmountJob(withSection); len(job.Targets) !=
+		len(withSection.Mounts)+len(withSection.Detached) {
 		t.Errorf("the teardown job has %d targets and the record %d mounts",
 			len(job.Targets), len(withSection.Mounts))
 	}

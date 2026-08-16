@@ -225,7 +225,21 @@ func mount(job Job) Reply {
 		return unwind(job, made, reply)
 	}
 
+	// And the destination needs one too, for the other half of the same
+	// kernel rule. Attaching a mount tree under a shared parent does not
+	// merely propagate the attachment to that parent's peers -- it marks
+	// the moved mounts themselves shared. Measured: a tree built private in
+	// staging comes out shared at the live path, and making it private
+	// afterwards is too late, because the copies in the peers were already
+	// made and are not camp's to remove. A private parent means no
+	// propagation happens at all.
 	live := filepath.Join(append([]string{job.Base}, job.LiveParts...)...)
+	if err := mountx.Detach(live); err != nil {
+		reply.Error = err.Error()
+		return unwind(job, made, reply)
+	}
+	made = append(made, live)
+
 	if err := mountx.Move(staging, live); err != nil {
 		reply.Error = err.Error()
 		return unwind(job, made, reply)

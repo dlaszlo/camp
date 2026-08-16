@@ -195,10 +195,15 @@ func Down(record state.Record, sudo []string, stderr *os.File) (Reply, refusal.L
 // which may have been edited, or deleted, while the composition was up.
 // The targets come out in the reverse of the order they were mounted in.
 func UnmountJob(record state.Record) Job {
-	targets := make([]string, 0, len(record.Mounts))
+	targets := make([]string, 0, len(record.Mounts)+len(record.Detached))
 	for _, mount := range record.Teardown() {
 		targets = append(targets, mount.Target)
 	}
+	// Last, and after everything that stood on them: the mount points the
+	// helper bound onto themselves so the composition could be moved into
+	// place without propagating. One of them is the live path itself, which
+	// the composition was covering until a moment ago.
+	targets = append(targets, record.Detached...)
 
 	job := Job{
 		Version: JobVersion,
