@@ -58,23 +58,33 @@ const (
 )
 
 // Mount performs one operation and leaves it private.
-func Mount(m plan.Mount) error {
+//
+// It reports whether a mount now exists at the target, which is a
+// different question from whether the operation succeeded. A read-only
+// bind is two calls and the propagation change is a third, so a failure
+// after the first one leaves a mount standing that the caller has to
+// unwind. Returning only an error would let a caller report a clean
+// machine while something is still mounted -- which is the one thing
+// camp's failure handling may never do.
+func Mount(m plan.Mount) (bool, error) {
 	switch m.Kind {
 	case plan.Overlay:
 		if err := unix.Mount("overlay", m.Target, "overlay", 0, Options(m)); err != nil {
-			return fmt.Errorf("mounting the overlay at %s: %w", m.Target, err)
+			return false, fmt.Errorf("mounting the overlay at %s: %w", m.Target, err)
 		}
 	case plan.BindRO, plan.BindRW:
 		if err := unix.Mount(m.Source, m.Target, "", unix.MS_BIND, ""); err != nil {
-			return fmt.Errorf("binding %s onto %s: %w", m.Source, m.Target, err)
-		}
-		if m.Kind == plan.BindRO {
-			if err := remountReadOnly(m.Target); err != nil {
-				return err
-			}
+			return false, fmt.Errorf("binding %s onto %s: %w", m.Source, m.Target, err)
 		}
 	default:
-		return fmt.Errorf("unknown mount kind %q for %s", m.Kind, m.Target)
+		return false, fmt.Errorf("unknown mount kind %q for %s", m.Kind, m.Target)
+	}
+
+	// Everything from here acts on a mount that exists.
+	if m.Kind == plan.BindRO {
+		if err := remountReadOnly(m.Target); err != nil {
+			return true, err
+		}
 	}
 
 	// Mounts propagate by default on a systemd machine. Without this every
@@ -82,9 +92,9 @@ func Mount(m plan.Mount) error {
 	// store's own path, which once turned eight planned mounts into
 	// twelve, four of them on the workspace's path.
 	if err := unix.Mount("", m.Target, "", unix.MS_PRIVATE, ""); err != nil {
-		return fmt.Errorf("detaching %s from mount propagation: %w", m.Target, err)
+		return true, fmt.Errorf("detaching %s from mount propagation: %w", m.Target, err)
 	}
-	return nil
+	return true, nil
 }
 
 // MountByDescriptor performs one operation with both ends already opened,
@@ -96,30 +106,98 @@ func Mount(m plan.Mount) error {
 // object than the mount. Referring to the endpoints through
 // /proc/self/fd/N closes that: a descriptor names the object it was
 // opened on, whatever happens to the name afterwards.
-func MountByDescriptor(m plan.Mount, sourceFD, targetFD int) error {
+// Reopen names the target again, after something has been mounted on it.
+//
+// It exists because of what a descriptor is. An O_PATH descriptor holds
+// the mount and dentry it was opened on, and stacking a mount on that
+// dentry does not change it -- so once the bind is made, the descriptor
+// that was used to make it still refers to the object *underneath*.
+// Every further call about the new mount has to be made through a handle
+// opened after it existed. The caller supplies that, because only the
+// caller knows the components to resolve and the root to resolve them
+// beneath.
+type Reopen func() (int, error)
+
+func MountByDescriptor(m plan.Mount, sourceFD, targetFD int, reopen Reopen) (bool, error) {
 	target := fmt.Sprintf("/proc/self/fd/%d", targetFD)
 	switch m.Kind {
 	case plan.Overlay:
 		if err := unix.Mount("overlay", target, "overlay", 0, Options(m)); err != nil {
-			return fmt.Errorf("mounting the overlay at %s: %w", m.Target, err)
+			return false, fmt.Errorf("mounting the overlay at %s: %w", m.Target, err)
 		}
 	case plan.BindRO, plan.BindRW:
 		source := fmt.Sprintf("/proc/self/fd/%d", sourceFD)
 		if err := unix.Mount(source, target, "", unix.MS_BIND, ""); err != nil {
-			return fmt.Errorf("binding %s onto %s: %w", m.Source, m.Target, err)
-		}
-		if m.Kind == plan.BindRO {
-			if err := remountReadOnly(target); err != nil {
-				return err
-			}
+			return false, fmt.Errorf("binding %s onto %s: %w", m.Source, m.Target, err)
 		}
 	default:
-		return fmt.Errorf("unknown mount kind %q for %s", m.Kind, m.Target)
+		return false, fmt.Errorf("unknown mount kind %q for %s", m.Kind, m.Target)
 	}
-	if err := unix.Mount("", target, "", unix.MS_PRIVATE, ""); err != nil {
-		return fmt.Errorf("detaching %s from mount propagation: %w", m.Target, err)
+
+	// The mount exists now, and the descriptor above no longer names it.
+	placed, err := reopen()
+	if err != nil {
+		return true, fmt.Errorf("opening %s again after mounting it: %w", m.Target, err)
 	}
-	return nil
+	defer unix.Close(placed)
+	handle := fmt.Sprintf("/proc/self/fd/%d", placed)
+
+	if m.Kind == plan.BindRO {
+		locked, err := lockedFlagsOf(placed)
+		if err != nil {
+			return true, fmt.Errorf("reading the flags the kernel locked on %s: %w",
+				m.Target, err)
+		}
+		if err := remount(handle, m.Target, locked); err != nil {
+			return true, err
+		}
+	}
+	if err := unix.Mount("", handle, "", unix.MS_PRIVATE, ""); err != nil {
+		return true, fmt.Errorf("detaching %s from mount propagation: %w", m.Target, err)
+	}
+	return true, nil
+}
+
+// stFlags maps what statfs reports to what a remount has to ask for.
+var stFlags = []struct {
+	reported int64
+	remount  uintptr
+}{
+	{unix.ST_NOSUID, unix.MS_NOSUID},
+	{unix.ST_NODEV, unix.MS_NODEV},
+	{unix.ST_NOEXEC, unix.MS_NOEXEC},
+	{unix.ST_NOATIME, unix.MS_NOATIME},
+	{unix.ST_NODIRATIME, unix.MS_NODIRATIME},
+	{unix.ST_RELATIME, unix.MS_RELATIME},
+}
+
+// lockedFlagsOf reads the locked flags from the mount a descriptor names.
+//
+// Asked of the kernel through the descriptor rather than looked up in
+// mountinfo by path, for two reasons. A descriptor-held mount has no name
+// to look up -- its /proc/self/fd path is not a mount point, and a
+// lookup by that string silently falls through to the flags of /proc
+// itself, which are not the source's. And a path lookup would reopen the
+// window the descriptor exists to close. Measured: statfs and mountinfo
+// agree on exactly this flag set, on ext4, tmpfs and procfs alike.
+func lockedFlagsOf(fd int) (uintptr, error) {
+	var st unix.Statfs_t
+	if err := unix.Fstatfs(fd, &st); err != nil {
+		return 0, err
+	}
+	var flags uintptr
+	for _, pair := range stFlags {
+		if st.Flags&pair.reported != 0 {
+			flags |= pair.remount
+		}
+	}
+	// With no atime flag at all the mount is strictatime, and saying so
+	// explicitly is what keeps the remount from being read as a request to
+	// change it.
+	if flags&(unix.MS_NOATIME|unix.MS_RELATIME) == 0 {
+		flags |= unix.MS_STRICTATIME
+	}
+	return flags, nil
 }
 
 // remountReadOnly turns a fresh bind read-only, replicating whatever the
@@ -129,10 +207,20 @@ func remountReadOnly(target string) error {
 	if err != nil {
 		return err
 	}
+	return remount(target, target, locked)
+}
+
+// remount is the second of the two calls a read-only bind takes.
+//
+// handle is what the kernel is addressed through -- a path, or a
+// descriptor's /proc/self/fd name -- and named is what a person should
+// read in the message, which are not the same string when the mount is
+// held by descriptor.
+func remount(handle, named string, locked uintptr) error {
 	flags := uintptr(unix.MS_REMOUNT|unix.MS_BIND|unix.MS_RDONLY) | locked
-	if err := unix.Mount("", target, "", flags, ""); err != nil {
+	if err := unix.Mount("", handle, "", flags, ""); err != nil {
 		return fmt.Errorf("making %s read-only (with the locked flags %s "+
-			"replicated): %w", target, DescribeFlags(locked), err)
+			"replicated): %w", named, DescribeFlags(locked), err)
 	}
 	return nil
 }

@@ -104,8 +104,23 @@ func mount(job Job) Reply {
 		}
 
 		mountable := operation.AsMount(target)
-		err = mountx.MountByDescriptor(mountable, sourceFD, targetFD)
+		// The reopen: once the bind is made, the descriptor that made it
+		// names what is underneath it, so the read-only remount and the
+		// propagation change need the target opened again -- beneath the
+		// same root, following nothing, as it was opened the first time.
+		parts := operation.TargetParts
+		placed, err := mountx.MountByDescriptor(mountable, sourceFD, targetFD,
+			func() (int, error) {
+				return pathx.OpenBeneath(job.Base, parts, unix.O_PATH)
+			})
 		closeAll(sourceFD, targetFD)
+		// Recorded the moment the mount exists, not when the whole
+		// operation finishes: a bind that succeeded and a remount that did
+		// not leaves a mount standing, and a rollback that skipped it would
+		// report a clean machine that is not clean.
+		if placed {
+			made = append(made, target)
+		}
 		if err != nil {
 			reply.Error = err.Error()
 			reply.Stranded = rollback(made)
@@ -118,7 +133,6 @@ func mount(job Job) Reply {
 			result.Device, result.Inode = identity.Device, identity.Inode
 		}
 		reply.Results = append(reply.Results, result)
-		made = append(made, target)
 	}
 
 	// The first verification pass, here rather than in the front end,
@@ -160,11 +174,14 @@ func verifyStaging(job Job, staging string) string {
 	}
 
 	problems := verify.Run(verify.Input{
-		Plan:   built,
-		Prefix: staging,
-		Table:  table,
-		UID:    job.UID,
-		GID:    job.GID,
+		Plan:      built,
+		Prefix:    staging,
+		Table:     table,
+		LowerPath: job.LowerPath,
+		Storage:   job.Storage,
+		Exclude:   job.Exclude,
+		UID:       job.UID,
+		GID:       job.GID,
 	})
 	if problems.Empty() {
 		return ""

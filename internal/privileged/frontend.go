@@ -94,7 +94,7 @@ func Up(in UpInput) refusal.List {
 	}
 	in.Say.Record(state.Path(built.Hash))
 
-	job, problems := MountJob(built, staging)
+	job, problems := MountJob(built, staging, in.Exclude)
 	if !problems.Empty() {
 		_ = state.Forget(built.Hash)
 		return problems
@@ -143,12 +143,14 @@ func Up(in UpInput) refusal.List {
 		return refused
 	}
 	problems = verify.Run(verify.Input{
-		Plan:    built,
-		Prefix:  built.Live,
-		Table:   table,
-		Exclude: in.Exclude,
-		UID:     os.Getuid(),
-		GID:     os.Getgid(),
+		Plan:      built,
+		Prefix:    built.Live,
+		LowerPath: built.Config.LowerPath(),
+		Storage:   built.Storage,
+		Table:     table,
+		Exclude:   in.Exclude,
+		UID:       os.Getuid(),
+		GID:       os.Getgid(),
 	})
 	if !problems.Empty() {
 		record.Phase = state.Partial
@@ -220,7 +222,7 @@ func UnmountJob(record state.Record) Job {
 // can be inspected without elevating anything: it is a plain value, and a
 // test asserting what is *not* in it is worth more than a comment saying
 // the same.
-func MountJob(built plan.Plan, staging string) (Job, refusal.List) {
+func MountJob(built plan.Plan, staging string, exclude []byte) (Job, refusal.List) {
 	var refused refusal.List
 
 	stagingParts, ok := relativeTo(built.Config.Env, staging)
@@ -239,6 +241,9 @@ func MountJob(built plan.Plan, staging string) (Job, refusal.List) {
 		GID:          os.Getgid(),
 		StagingParts: stagingParts,
 		LiveParts:    built.Config.Merged.Components(),
+		LowerPath:    built.Config.LowerPath(),
+		Storage:      built.Storage,
+		Exclude:      exclude,
 	}
 
 	for _, mount := range built.Mounts {

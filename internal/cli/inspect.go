@@ -137,11 +137,13 @@ func cmdStatus(ctx *context, args []string) error {
 	}
 
 	problems := verify.Run(verify.Input{
-		Plan:   built,
-		Prefix: built.Live,
-		Table:  table,
-		UID:    os.Getuid(),
-		GID:    os.Getgid(),
+		Plan:      built,
+		Prefix:    built.Live,
+		LowerPath: built.Config.LowerPath(),
+		Storage:   built.Storage,
+		Table:     table,
+		UID:       os.Getuid(),
+		GID:       os.Getgid(),
 	})
 	if problems.Empty() {
 		ctx.printf("\nup: every planned mount is present, reachable and the right " +

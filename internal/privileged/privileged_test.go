@@ -167,7 +167,7 @@ func TestTheMountJobCarriesPathsAndNoEnvironment(t *testing.T) {
 	}
 	testenv.Write(t, built.ExcludeFile(), "")
 
-	job, problems := privileged.MountJob(built, filepath.Join(built.Work, "staging"))
+	job, problems := privileged.MountJob(built, filepath.Join(built.Work, "staging"), nil)
 	if !problems.Empty() {
 		t.Fatalf("the mount job was refused:\n%v", problems)
 	}
@@ -187,6 +187,59 @@ func TestTheMountJobCarriesPathsAndNoEnvironment(t *testing.T) {
 	if !bytes.Contains(encoded, []byte(built.Config.Env)) {
 		t.Error("the helper's job does not carry the environment root, which it " +
 			"resolves every operand beneath")
+	}
+}
+
+// The job carries everything the helper's verification needs, because the
+// helper has nothing else.
+//
+// It reads no configuration by design, so anything the pass reaches for
+// through a configuration is the zero value there. That is not a partial
+// check but a silent one: an empty lower path matches no mount, so the
+// frame's first mount -- the workspace bound read-only onto itself, which
+// every plan has -- read as missing, and every honest privileged
+// composition was rolled back before it could be moved into place.
+func TestTheMountJobCarriesWhatTheVerificationNeeds(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	env := testenv.NewEnv(t)
+	built, refused := plan.Prepare(env.Config(t, ""), plan.Privileged)
+	if !refused.Empty() {
+		t.Fatalf("the fixture was refused:\n%v", refused)
+	}
+	if err := compose.Directories(built); err != nil {
+		t.Fatal(err)
+	}
+	testenv.Write(t, built.ExcludeFile(), "")
+
+	payload := []byte("# the validated exclude\n")
+	job, problems := privileged.MountJob(built, filepath.Join(built.Work, "staging"), payload)
+	if !problems.Empty() {
+		t.Fatalf("the mount job was refused:\n%v", problems)
+	}
+
+	if job.LowerPath != built.Config.LowerPath() || job.LowerPath == "" {
+		t.Errorf("the job's lower path is %q and the composition's is %q",
+			job.LowerPath, built.Config.LowerPath())
+	}
+	if job.Storage != built.Storage || job.Storage == "" {
+		t.Errorf("the job's storage is %q and the composition's is %q",
+			job.Storage, built.Storage)
+	}
+	if string(job.Exclude) != string(payload) {
+		t.Errorf("the job carries %q as the exclude payload", job.Exclude)
+	}
+
+	// And the mount the whole thing turned on is in there, at its own path
+	// rather than remapped into the staging tree: it is not in the tree.
+	var found bool
+	for _, mount := range job.Mounts {
+		if mount.Target == built.Config.LowerPath() {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the job has no mount at the workspace's own path, so the " +
+			"check this test is about could not fire either way")
 	}
 }
 

@@ -187,14 +187,25 @@ func Build(s Setup) Result {
 	for _, mount := range s.Plan.Mounts {
 		operation := mount
 		operation.Target = s.Target(mount)
-		if err := mountx.Mount(operation); err != nil {
-			result.Refused.Add("mount-failed",
-				"%v\n  (%s)\nNothing is left mounted: the mounts made before this "+
-					"one have been removed.", err, mount.Why)
+		placed, err := mountx.Mount(operation)
+		// Recorded as soon as the mount exists rather than when the whole
+		// operation finishes. A read-only bind is two calls and the
+		// propagation change a third, so a failure after the first leaves a
+		// mount standing -- and unwinding a list that did not include it
+		// would report a clean machine that is not clean.
+		if placed {
+			result.Mounted = append(result.Mounted, mount)
+		}
+		if err != nil {
 			result.Stranded = unwind(s, result.Mounted)
+			left := "Nothing is left mounted: the mounts made before this one " +
+				"have been removed."
+			if len(result.Stranded) > 0 {
+				left = "What could not be removed is listed above."
+			}
+			result.Refused.Add("mount-failed", "%v\n  (%s)\n%s", err, mount.Why, left)
 			return result
 		}
-		result.Mounted = append(result.Mounted, mount)
 	}
 
 	table, err := mountinfo.Read(mountinfo.Self)
@@ -205,12 +216,14 @@ func Build(s Setup) Result {
 	}
 
 	result.Refused = verify.Run(verify.Input{
-		Plan:    s.Plan,
-		Prefix:  s.Prefix,
-		Table:   table,
-		Exclude: s.Exclude,
-		UID:     s.UID,
-		GID:     s.GID,
+		Plan:      s.Plan,
+		Prefix:    s.Prefix,
+		LowerPath: s.Plan.Config.LowerPath(),
+		Storage:   s.Plan.Storage,
+		Table:     table,
+		Exclude:   s.Exclude,
+		UID:       s.UID,
+		GID:       s.GID,
 	})
 	if !result.Refused.Empty() {
 		result.Stranded = unwind(s, result.Mounted)
@@ -233,12 +246,14 @@ func Check(s Setup) refusal.List {
 		return refused
 	}
 	return verify.Run(verify.Input{
-		Plan:    s.Plan,
-		Prefix:  s.Prefix,
-		Table:   table,
-		Exclude: s.Exclude,
-		UID:     s.UID,
-		GID:     s.GID,
+		Plan:      s.Plan,
+		Prefix:    s.Prefix,
+		LowerPath: s.Plan.Config.LowerPath(),
+		Storage:   s.Plan.Storage,
+		Table:     table,
+		Exclude:   s.Exclude,
+		UID:       s.UID,
+		GID:       s.GID,
 	})
 }
 

@@ -75,6 +75,20 @@ type Job struct {
 	// LiveParts is where it is moved to. Mount only.
 	LiveParts []string `json:"live_parts,omitempty"`
 
+	// LowerPath is the workspace's own path, and Storage camp's persistent
+	// store. Mount only.
+	//
+	// The helper reads no configuration, so everything its verification
+	// needs has to travel with the job. When these did not, the pass ran
+	// against a zero value and reported the frame's first mount missing on
+	// every honest composition.
+	LowerPath string `json:"lower_path,omitempty"`
+	Storage   string `json:"storage,omitempty"`
+	// Exclude is the payload the generated exclude must equal, byte for
+	// byte, in the staging tree. Mount only, and empty when the
+	// composition generates none.
+	Exclude []byte `json:"exclude,omitempty"`
+
 	// Targets are absolute paths to unmount, in teardown order. Unmount
 	// only.
 	Targets []string `json:"targets,omitempty"`

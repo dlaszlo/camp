@@ -15,8 +15,10 @@ import (
 	"github.com/dlaszlo/camp/internal/compose"
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/gen"
+	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/mountx"
 	"github.com/dlaszlo/camp/internal/nsx"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/testenv"
 )
@@ -78,6 +80,13 @@ type outcome struct {
 	Stuck    []string `json:"stuck"`
 	Residue  []string `json:"residue"`
 
+	// The descriptor scenario: the privileged helper's own mount path.
+	DescriptorErr      string `json:"descriptor_err"`
+	DescriptorReadOnly bool   `json:"descriptor_read_only"`
+	DescriptorPrivate  bool   `json:"descriptor_private"`
+	DescriptorSame     bool   `json:"descriptor_same"`
+	DescriptorStale    string `json:"descriptor_stale"`
+
 	// The locked-flags scenario.
 	OnTmpfs         bool   `json:"on_tmpfs"`
 	LockedFlags     string `json:"locked_flags"`
@@ -137,6 +146,8 @@ func inside() int {
 		return repeat(out, setup, built, cfg)
 	case "held":
 		return held(out, setup, built)
+	case "descriptor":
+		return descriptor(out, built)
 	}
 
 	result := compose.Build(setup)
@@ -366,6 +377,77 @@ func held(out outcome, setup compose.Setup, built plan.Plan) int {
 	return report(out)
 }
 
+// descriptor exercises the mount path the privileged helper uses, which
+// no mounting test ever ran.
+//
+// The helper mounts by descriptor so that the object it checked is the
+// object it mounts. What that costs is subtle: an O_PATH descriptor holds
+// the mount and dentry it was opened on, so once a bind is stacked on
+// that dentry the descriptor still names what is underneath -- and the
+// read-only remount and the propagation change, made through it, are
+// about the wrong mount. This measures the whole operation through the
+// same entry point the helper uses, and then proves the mechanism
+// directly: the same MS_PRIVATE call through the pre-bind descriptor is
+// the one that fails.
+func descriptor(out outcome, built plan.Plan) int {
+	source := built.Config.LowerPath()
+	target := filepath.Join(built.Config.Env, "descriptor-target")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		out.Problems = append(out.Problems, err.Error())
+		return report(out)
+	}
+	parts := []string{"descriptor-target"}
+
+	open := func(path string) (int, error) {
+		return pathx.OpenBeneath(built.Config.Env, strings.Split(
+			strings.TrimPrefix(path, built.Config.Env+"/"), "/"), unix.O_PATH)
+	}
+	sourceFD, err := open(source)
+	if err != nil {
+		out.Problems = append(out.Problems, err.Error())
+		return report(out)
+	}
+	targetFD, err := open(target)
+	if err != nil {
+		out.Problems = append(out.Problems, err.Error())
+		return report(out)
+	}
+
+	mount := plan.Mount{Kind: plan.BindRO, Source: source, Target: target}
+	placed, err := mountx.MountByDescriptor(mount, sourceFD, targetFD, func() (int, error) {
+		return pathx.OpenBeneath(built.Config.Env, parts, unix.O_PATH)
+	})
+	unix.Close(sourceFD)
+	if err != nil {
+		out.DescriptorErr = err.Error()
+	}
+	if placed {
+		var st unix.Statfs_t
+		if err := unix.Statfs(target, &st); err == nil {
+			out.DescriptorReadOnly = st.Flags&unix.ST_RDONLY != 0
+		}
+		if table, err := mountinfo.Read(mountinfo.Self); err == nil {
+			if entry, found := mountinfo.Top(table, target); found {
+				out.DescriptorPrivate = entry.Private()
+			}
+		}
+		var here, there unix.Stat_t
+		if unix.Stat(source, &here) == nil && unix.Stat(target, &there) == nil {
+			out.DescriptorSame = here.Dev == there.Dev && here.Ino == there.Ino
+		}
+
+		// The mechanism, shown rather than argued: the same call through the
+		// descriptor opened before the bind is the one that cannot work.
+		if err := unix.Mount("", fmt.Sprintf("/proc/self/fd/%d", targetFD),
+			"", unix.MS_PRIVATE, ""); err != nil {
+			out.DescriptorStale = err.Error()
+		}
+		_, _ = mountx.Unmount(target)
+	}
+	unix.Close(targetFD)
+	return report(out)
+}
+
 // lockedFlags is the C34 scenario: a read-only remount inside a user
 // namespace must replicate the source mount's locked flags or the kernel
 // refuses it. The test asserts the fix, and reproduces the old bug only
@@ -388,7 +470,7 @@ func lockedFlags(out outcome, built plan.Plan) int {
 
 	// The correct call.
 	correct := plan.Mount{Kind: plan.BindRO, Source: source, Target: target}
-	if err := mountx.Mount(correct); err != nil {
+	if _, err := mountx.Mount(correct); err != nil {
 		out.Problems = append(out.Problems,
 			fmt.Sprintf("the read-only bind with the locked flags replicated "+
 				"failed: %v", err))
@@ -658,5 +740,42 @@ func TestANonEmptyLiveDirectoryStopsTheCompositionBeforeAnythingMounts(t *testin
 	if !refused.Has("live-not-empty") {
 		t.Fatalf("expected the composition to be refused for a non-empty live "+
 			"directory; the rules that fired were %v", refused.Rules())
+	}
+}
+
+// The privileged helper's own mount path, run for real.
+//
+// It had never been run by any test, and it could not work: the read-only
+// remount and the propagation change were made through the descriptor
+// that was opened before the bind, which still names the object the bind
+// was stacked on. Every privileged composition failed on its first mount
+// and then reported a clean machine, because a mount was recorded for
+// rollback only after the whole operation finished.
+func TestTheHelpersDescriptorMountCompletes(t *testing.T) {
+	env := testenv.NewEnv(t)
+	got := run(t, env, "descriptor")
+
+	for _, problem := range got.Problems {
+		t.Errorf("%s", problem)
+	}
+	if got.DescriptorErr != "" {
+		t.Fatalf("the helper's mount path failed: %s", got.DescriptorErr)
+	}
+	if !got.DescriptorSame {
+		t.Error("the target does not show the source after the bind")
+	}
+	if !got.DescriptorReadOnly {
+		t.Error("the bind is not read-only: the remount through the reopened " +
+			"descriptor did not take")
+	}
+	if !got.DescriptorPrivate {
+		t.Error("the mount still propagates: the MS_PRIVATE call through the " +
+			"reopened descriptor did not take")
+	}
+	if got.DescriptorStale == "" {
+		t.Error("the same call through the descriptor opened before the bind " +
+			"succeeded. That descriptor names the object underneath the mount, " +
+			"so if it works here the reopen this test exists for is not what " +
+			"made the difference")
 	}
 }

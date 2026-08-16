@@ -53,6 +53,31 @@ type Input struct {
 	// UID and GID are who storage has to belong to.
 	UID int
 	GID int
+
+	// LowerPath is the workspace's own path, where the frame's first mount
+	// stands. Storage is camp's persistent store.
+	//
+	// Both are given here rather than read out of Plan.Config, because one
+	// caller does not have a configuration: the privileged helper is handed
+	// a concrete plan on a pipe and reads no file at all. When these were
+	// reached for through Plan.Config, that caller silently passed the zero
+	// value -- an empty lower path matches no mount, so the frame's first
+	// mount read as missing and every honest privileged composition was
+	// rolled back before it could be moved into place. A field that some
+	// callers cannot fill is a check that quietly does not run.
+	LowerPath string
+	Storage   string
+}
+
+// InputFor fills the fields a caller holding a whole plan already knows,
+// so that the two halves of a check cannot drift apart.
+func InputFor(p plan.Plan) Input {
+	return Input{
+		Plan:      p,
+		Prefix:    p.Live,
+		LowerPath: p.Config.LowerPath(),
+		Storage:   p.Storage,
+	}
 }
 
 // Run performs the whole pass and returns everything that is wrong.
@@ -291,7 +316,7 @@ func completeness(in Input) refusal.List {
 	for _, entry := range mountinfo.Under(in.Table, in.Prefix) {
 		present[entry.Point] = true
 	}
-	for _, entry := range mountinfo.At(in.Table, in.Plan.Config.LowerPath()) {
+	for _, entry := range mountinfo.At(in.Table, in.LowerPath) {
 		present[entry.Point] = true
 	}
 
@@ -336,11 +361,11 @@ func completeness(in Input) refusal.List {
 // proves it.
 func ownership(in Input) refusal.List {
 	var refused refusal.List
-	if in.Plan.Storage == "" {
+	if in.Storage == "" {
 		return refused
 	}
 	var st unix.Stat_t
-	if err := unix.Stat(in.Plan.Storage, &st); err != nil {
+	if err := unix.Stat(in.Storage, &st); err != nil {
 		return refused // it need not exist; a composition may use no storage
 	}
 	if int(st.Uid) != in.UID || int(st.Gid) != in.GID {
@@ -349,7 +374,7 @@ func ownership(in Input) refusal.List {
 				"uid %d gid %d.\nThat directory holds worktrees and machine-local "+
 				"files you have to be able to write. The privileged helper creates "+
 				"nothing there for exactly this reason.",
-			in.Plan.Storage, st.Uid, st.Gid, in.UID, in.GID)
+			in.Storage, st.Uid, st.Gid, in.UID, in.GID)
 	}
 	return refused
 }
