@@ -278,7 +278,9 @@ func TestTheHelperRefusesAJobItDoesNotUnderstand(t *testing.T) {
 // An empty teardown is not an error: the helper unmounts what it was
 // given, and being given nothing is a job with nothing to do.
 func TestTheHelperUnmountsNothingQuietly(t *testing.T) {
-	job := privileged.Job{Version: 1, Action: privileged.ActionUnmount}
+	asInvoker(t)
+	job := privileged.Job{Version: 1, Action: privileged.ActionUnmount,
+		Base: t.TempDir()}
 	encoded, err := json.Marshal(job)
 	if err != nil {
 		t.Fatal(err)
@@ -292,10 +294,12 @@ func TestTheHelperUnmountsNothingQuietly(t *testing.T) {
 // A path that is not a mount point is "absent", which is the job already
 // done however it came about -- and never a reason to detach anything.
 func TestUnmountingSomethingThatIsNotMountedIsNotAFailure(t *testing.T) {
+	asInvoker(t)
 	directory := t.TempDir()
 	job := privileged.Job{
 		Version: 1,
 		Action:  privileged.ActionUnmount,
+		Base:    directory,
 		Targets: []string{filepath.Join(directory, "nothing-here")},
 	}
 	encoded, err := json.Marshal(job)

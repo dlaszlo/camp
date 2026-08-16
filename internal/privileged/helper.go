@@ -1,7 +1,9 @@
 package privileged
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,27 +36,58 @@ const (
 // operands itself before touching anything.
 func Helper(action Action, in io.Reader, out io.Writer) int {
 	reply := Reply{Version: JobVersion}
+	refuse := func(rule, format string, args ...any) int {
+		reply.Rule = rule
+		reply.Error = fmt.Sprintf(format, args...)
+		return finish(out, reply, 1)
+	}
 
 	data, err := io.ReadAll(in)
 	if err != nil {
-		reply.Error = fmt.Sprintf("reading the job: %v", err)
-		return finish(out, reply, 1)
+		return refuse("helper-job-unreadable", "reading the job: %v", err)
 	}
+
+	// Strictly, and with nothing after it. This process is root, and a
+	// field it does not understand is a field somebody expected it to
+	// honour -- there is no version of that worth guessing at.
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
 	var job Job
-	if err := json.Unmarshal(data, &job); err != nil {
-		reply.Error = fmt.Sprintf("the job does not parse: %v", err)
-		return finish(out, reply, 1)
+	if err := decoder.Decode(&job); err != nil {
+		return refuse("helper-job-invalid", "the job does not parse: %v", err)
 	}
+	if decoder.More() {
+		return refuse("helper-job-invalid",
+			"the job is followed by more data, and this helper executes one job.")
+	}
+
 	if job.Version != JobVersion {
-		reply.Error = fmt.Sprintf("the job is version %d and this helper "+
-			"speaks version %d; the front end and the helper are different "+
-			"builds of camp", job.Version, JobVersion)
-		return finish(out, reply, 1)
+		return refuse("helper-job-version",
+			"the job is version %d and this helper speaks version %d; the front "+
+				"end and the helper are different builds of camp",
+			job.Version, JobVersion)
 	}
 	if job.Action != action {
-		reply.Error = fmt.Sprintf("this helper was started for %q and the job "+
-			"asks for %q", action, job.Action)
-		return finish(out, reply, 1)
+		return refuse("helper-job-action",
+			"this helper was started for %q and the job asks for %q", action, job.Action)
+	}
+
+	// Who this is being done for. Taken from sudo rather than from the
+	// job: the job arrives from an unprivileged process, and a uid in it
+	// is a request for root to hand something to somebody, which is not a
+	// request this program answers.
+	uid, gid, err := invoker()
+	if err != nil {
+		return refuse("helper-no-invoker", "%v", err)
+	}
+	job.UID, job.GID = uid, gid
+
+	if err := job.confine(); err != nil {
+		var named ruled
+		if errors.As(err, &named) {
+			return refuse(named.rule, "%s", named.message)
+		}
+		return refuse("helper-job-invalid", "%v", err)
 	}
 
 	switch action {
@@ -298,6 +331,15 @@ func unmount(job Job) Reply {
 	// directory of camp's that they cannot clear.
 	if len(job.WorkParts) > 0 && len(reply.Stranded) == 0 {
 		work := filepath.Join(append([]string{job.Base}, job.WorkParts...)...)
+		// One directory, and only if camp made it. This is the single place
+		// the helper removes anything or changes what it belongs to, and the
+		// marker is what says the directory is camp's rather than whatever
+		// the job's components happened to spell.
+		if err := campsOwn(work); err != nil {
+			reply.Error = err.Error()
+			reply.Rule = err.(ruled).rule
+			return reply
+		}
 		if err := fsx.Work(work).RemoveTree("work"); err != nil {
 			reply.Error = err.Error()
 		}

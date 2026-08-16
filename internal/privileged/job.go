@@ -64,6 +64,13 @@ type Job struct {
 
 	// UID and GID are the invoking user's. Everything the helper touches
 	// that has to stay writable ends up theirs.
+	//
+	// The helper overwrites both from SUDO_UID and SUDO_GID and never
+	// honours what arrives here: a uid in a job is a request for root to
+	// hand something to somebody, and the job comes from an unprivileged
+	// process. They stay in the shape because the front end fills the
+	// record from the same two numbers and a job that disagreed with its
+	// record would be worth noticing.
 	UID int `json:"uid"`
 	GID int `json:"gid"`
 
@@ -136,6 +143,9 @@ type Reply struct {
 	Results []Result `json:"results"`
 	// Error is why the whole job stopped, empty when it did not.
 	Error string `json:"error,omitempty"`
+	// Rule is the short, stable identifier of what refused, so that the
+	// tests hold to something that does not move when the prose does.
+	Rule string `json:"rule,omitempty"`
 	// RolledBack is true when a failure was unwound completely, so the
 	// front end knows the machine is clean.
 	RolledBack bool `json:"rolled_back,omitempty"`
