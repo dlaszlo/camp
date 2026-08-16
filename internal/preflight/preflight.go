@@ -12,12 +12,17 @@
 package preflight
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/dlaszlo/camp/internal/capsx"
 )
 
 // Mode is the way a composition is going to be built, because the two
@@ -166,8 +171,29 @@ func privilege() Check {
 }
 
 // ProbeArg is the hidden argument the capability probe is started with.
-// The child does nothing but exist and exit.
+//
+// The child does one thing: it tries to make mount propagation private
+// inside its own namespace, which changes nothing anywhere and is the
+// smallest mount the composition would make. Existing was not enough.
+// On this machine the restriction on unprivileged user namespaces lets
+// the namespace be *created* and then confines the process to a profile
+// that denies mounting, so a probe that only checked whether the clone
+// succeeded reported "permitted" for a namespace nothing can be built
+// in. The probe has to attempt the thing the answer is about.
 const ProbeArg = "__probe"
+
+// Probe is the body of that child. It reports through its exit status: 0
+// if a mount succeeded inside the namespace, 1 if it was refused.
+func Probe() int {
+	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		if profile, readErr := os.ReadFile("/proc/self/attr/apparmor/current"); readErr == nil {
+			fmt.Fprintf(os.Stderr, "confined to %s\n", strings.TrimSpace(string(profile)))
+		}
+		return 1
+	}
+	return 0
+}
 
 // userNamespaces reports whether this process may create a user namespace,
 // by creating one.
@@ -188,40 +214,83 @@ func userNamespaces() Check {
 		return Check{Name: "user namespaces", OK: true, Detail: "running as root", Fatal: true}
 	}
 
-	if err := probeUserNamespace(); err == nil {
-		return Check{Name: "user namespaces", OK: true, Detail: "permitted", Fatal: true}
+	created, detail := probeUserNamespace()
+	if created {
+		return Check{Name: "user namespaces", OK: true,
+			Detail: "permitted, and a mount inside one succeeds", Fatal: true}
 	}
 
 	// Only now, having established that it does not work, is it worth
 	// looking at the switches -- to say which one to change.
 	return Check{
 		Name:   "user namespaces",
-		Detail: "this kernel refused to create one",
+		Detail: detail,
 		Fatal:  true,
-		Hint:   restrictionHint(),
+		Hint:   restrictionHint(detail),
 	}
 }
 
-// probeUserNamespace starts a child in a new user namespace and waits for
-// it. The child is this same binary, which exits immediately.
-func probeUserNamespace() error {
-	cmd := exec.Command("/proc/self/exe", ProbeArg)
+// probeUserNamespace starts a child in a new user namespace, with the
+// same identity mapping and the same carried capabilities a real session
+// would use, and asks it to mount something.
+//
+// Not by reading the switches that could forbid it. There are at least
+// three, they interact, and one of them stays switched on system-wide
+// even when a profile grants this particular binary an exception -- a
+// check that reads that sysctl and concludes reports a confident FAIL on
+// a machine where the thing works perfectly. Attempting it answers for
+// whatever combination of kernel, LSM and policy this machine actually
+// has, including combinations that did not exist when this was written.
+func probeUserNamespace() (bool, string) {
+	// The real path, not /proc/self/exe: a process already inside the new
+	// namespace is the one doing the execve, and where the namespace is
+	// restricted that process is confined to a profile which refuses the
+	// magic symlink. Probing through it turns "confined" into "refused to
+	// create one", which is a different diagnosis with a different repair.
+	self, err := os.Executable()
+	if err != nil {
+		self = "/proc/self/exe"
+	}
+	cmd := exec.Command(self, ProbeArg)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS,
 		UidMappings: []syscall.SysProcIDMap{
-			{ContainerID: 0, HostID: os.Getuid(), Size: 1},
+			{ContainerID: os.Getuid(), HostID: os.Getuid(), Size: 1},
 		},
 		GidMappings: []syscall.SysProcIDMap{
-			{ContainerID: 0, HostID: os.Getgid(), Size: 1},
+			{ContainerID: os.Getgid(), HostID: os.Getgid(), Size: 1},
 		},
 		GidMappingsEnableSetgroups: false,
+		AmbientCaps:                capsx.ForMounting,
 	}
-	return cmd.Run()
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, ""
+	}
+	if strings.Contains(string(output), "unprivileged_userns") {
+		return false, "the namespace can be created, but this machine confines " +
+			"it to the unprivileged_userns profile, which refuses every mount"
+	}
+	if len(output) > 0 {
+		return false, "refused: " + strings.TrimSpace(strings.ReplaceAll(string(output), "\n", "; "))
+	}
+	return false, "this kernel refused to create one"
 }
 
 // restrictionHint names the switch most likely responsible, for a machine
 // where the probe has already failed.
-func restrictionHint() string {
+func restrictionHint(detail string) string {
+	if strings.Contains(detail, "unprivileged_userns") {
+		return "The permission is granted by an AppArmor profile to one binary " +
+			"path, and this binary is not at that path. Install camp and its " +
+			"profile:\n" +
+			"  sudo install -m 755 camp /usr/local/bin/camp\n" +
+			"  sudo install -m 644 packaging/apparmor/camp /etc/apparmor.d/camp\n" +
+			"  sudo apparmor_parser -r /etc/apparmor.d/camp\n" +
+			"A copy of the binary anywhere else is not covered by the profile. " +
+			"The system-wide restriction stays on, which is the point of doing " +
+			"it this way."
+	}
 	if maximum, ok := readInt("/proc/sys/user/max_user_namespaces"); ok && maximum == 0 {
 		return "sudo sysctl -w user.max_user_namespaces=15000"
 	}

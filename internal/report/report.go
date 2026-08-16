@@ -104,27 +104,31 @@ func origin(mount plan.Mount) string {
 
 // wrap folds a sentence at a sensible width with a continuation indent,
 // so a long reason stays readable in a terminal.
+//
+// Line breaks that are already in the text are kept. They are there
+// because somebody put a command on a line of its own, and a command
+// folded into a paragraph is a command nobody can copy.
 func wrap(text, prefix string) string {
 	const width = 68
-	words := strings.Fields(text)
-	var lines []string
-	current := ""
-	for _, word := range words {
-		if current == "" {
-			current = word
-			continue
+	var out []string
+	for _, paragraph := range strings.Split(text, "\n") {
+		var lines []string
+		current := ""
+		for _, word := range strings.Fields(paragraph) {
+			switch {
+			case current == "":
+				current = word
+			case len(current)+1+len(word) > width:
+				lines = append(lines, current)
+				current = word
+			default:
+				current += " " + word
+			}
 		}
-		if len(current)+1+len(word) > width {
-			lines = append(lines, current)
-			current = word
-			continue
-		}
-		current += " " + word
-	}
-	if current != "" {
 		lines = append(lines, current)
+		out = append(out, lines...)
 	}
-	return strings.Join(lines, "\n"+prefix)
+	return strings.Join(out, "\n"+prefix)
 }
 
 // Checks renders a preflight report.
