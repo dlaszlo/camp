@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/refusal"
@@ -37,11 +38,12 @@ func (c *context) printf(format string, args ...any) {
 }
 
 func commands() []command {
-	return []command{
-		{"plan", "print what would be mounted, and why", cmdPlan},
-		{"doctor", "what this machine and this configuration lack", cmdDoctor},
-		{"init", "write a " + config.Dir + "/" + config.FileName + " to start from", cmdInit},
-	}
+	listed := composeCommands()
+	return append(listed,
+		command{"plan", "print what would be mounted, and why", cmdPlan},
+		command{"doctor", "what this machine and this configuration lack", cmdDoctor},
+		command{"init", "write a " + config.Dir + "/" + config.FileName + " to start from", cmdInit},
+	)
 }
 
 // Main parses arguments, runs one command and returns an exit code.
@@ -137,7 +139,7 @@ func parseMode(privileged bool) plan.Mode {
 
 func cmdPlan(ctx *context, args []string) error {
 	set, file := flagsFor("plan")
-	privileged := set.Bool("privileged", false,
+	systemWide := set.Bool("privileged", false,
 		"plan for the system-wide mode instead of the namespace mode")
 	if err := set.Parse(args); err != nil {
 		return wrap(err, ExitUsage, "")
@@ -147,7 +149,7 @@ func cmdPlan(ctx *context, args []string) error {
 		return err
 	}
 
-	built, refused := plan.Prepare(cfg, parseMode(*privileged))
+	built, refused := plan.Prepare(cfg, parseMode(*systemWide))
 	if len(built.Mounts) > 0 {
 		ctx.printf("%s", report.Plan(built))
 	}
@@ -238,10 +240,11 @@ func cmdInit(ctx *context, args []string) error {
 				"configuration somebody wrote",
 			"%s already exists", target)
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	area := fsx.Camp(filepath.Dir(target))
+	if err := area.Ensure(0o755); err != nil {
 		return wrap(err, ExitFailure, "")
 	}
-	if err := os.WriteFile(target, []byte(report.ConfigTemplate(env)), 0o644); err != nil {
+	if err := area.Write(config.FileName, []byte(report.ConfigTemplate(env)), 0o644); err != nil {
 		return wrap(err, ExitFailure, "")
 	}
 	ctx.printf("wrote %s\n"+

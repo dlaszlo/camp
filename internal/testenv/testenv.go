@@ -134,14 +134,22 @@ steps:
 `
 }
 
-// Config parses a configuration for this environment, failing the test if
-// it does not parse. Pass an empty string for the default shape.
+// Config writes a configuration into the environment and parses it,
+// failing the test if it does not parse. Pass an empty string for the
+// default shape.
+//
+// Written to disk, not only parsed in memory: the tests that mount
+// something run in a second process, which finds the composition the way
+// every camp command does -- by reading the file.
 func (e *Env) Config(t *testing.T, yaml string) config.Config {
 	t.Helper()
 	if yaml == "" {
 		yaml = e.YAML()
 	}
-	cfg, err := config.Parse([]byte(yaml), config.Path(e.Path))
+	path := config.Path(e.Path)
+	Write(t, path, yaml)
+
+	cfg, err := config.Parse([]byte(yaml), path)
 	if err != nil {
 		t.Fatalf("the fixture configuration did not parse:\n%v", err)
 	}

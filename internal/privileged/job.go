@@ -1,0 +1,157 @@
+// Package privileged is the fallback mode: one mount table, visible to
+// every process on the machine.
+//
+// Its shape is an unprivileged front end and one narrow privileged
+// helper, and the reason is not tidiness. A process that is root from its
+// first instruction has no "before sudo" in which the generation step
+// could run as the user -- and configured code must never run with
+// privilege, because whoever can edit the configuration would then be
+// able to gain root through it.
+//
+// So 'camp up' runs as the invoking user from start to finish: it locks,
+// validates, gates, generates, validates what was generated, writes the
+// record -- and then invokes the helper as 'sudo camp helper-mount', an
+// internal subcommand that does exactly one thing: execute the validated
+// concrete plan handed to it on **stdin**. Never argv: /proc exposes argv
+// machine-wide. The helper reads no configuration, runs no generator and
+// consults no state.
+//
+// The helper trusts nothing it was handed. The user owns every parent
+// directory of every operand, so a component can become a symlink between
+// the front end's check and the helper's mount(2) -- and the check would
+// then have been about a different object than the mount. The helper
+// re-resolves every operand itself, descriptor-relative, following no
+// symlink and never leaving the recorded base, verifies each endpoint's
+// device and inode against the plan, and mounts by descriptor. Any
+// mismatch fails closed.
+//
+// sudo is exercised exactly once per command. That is why the helper also
+// runs the first verification pass and performs the move: the sequence
+// mount, verify, move has to happen without giving the privilege back and
+// asking for it again in the middle.
+package privileged
+
+import (
+	"github.com/dlaszlo/camp/internal/plan"
+)
+
+// JobVersion is the wire format between the front end and the helper.
+// Both halves are the same binary, so a mismatch means someone is running
+// two builds; the helper refuses rather than reading fields that moved.
+const JobVersion = 1
+
+// Action is what the helper was asked to do.
+type Action string
+
+const (
+	// ActionMount executes a plan, verifies it in staging and moves it
+	// onto the live directory.
+	ActionMount Action = "mount"
+	// ActionUnmount removes a recorded list of targets, in the order
+	// given.
+	ActionUnmount Action = "unmount"
+)
+
+// Job is the whole instruction, and the only thing the helper reads.
+type Job struct {
+	Version int    `json:"version"`
+	Action  Action `json:"action"`
+
+	// Base is the environment root, already resolved. Every operand is
+	// addressed as components beneath it, and the helper opens them one
+	// component at a time without following anything.
+	Base string `json:"base"`
+
+	// UID and GID are the invoking user's. Everything the helper touches
+	// that has to stay writable ends up theirs.
+	UID int `json:"uid"`
+	GID int `json:"gid"`
+
+	// Mounts is the concrete plan, in order. Mount only.
+	Mounts []JobMount `json:"mounts,omitempty"`
+
+	// StagingParts is where the tree is built, beneath Base. Mount only.
+	StagingParts []string `json:"staging_parts,omitempty"`
+	// LiveParts is where it is moved to. Mount only.
+	LiveParts []string `json:"live_parts,omitempty"`
+
+	// Targets are absolute paths to unmount, in teardown order. Unmount
+	// only.
+	Targets []string `json:"targets,omitempty"`
+	// WorkParts is camp's work directory, beneath Base: the kernel leaves
+	// a root-owned directory inside it that only the helper can remove.
+	WorkParts []string `json:"work_parts,omitempty"`
+}
+
+// JobMount is one operation, with everything needed to re-check it.
+type JobMount struct {
+	Kind string `json:"kind"`
+	Role string `json:"role"`
+
+	// Source and Target are absolute, for messages and for the overlay's
+	// option string.
+	Source string `json:"source,omitempty"`
+	Target string `json:"target"`
+
+	// SourceParts and TargetParts are the same two paths as components
+	// beneath the job's base. These are what the helper resolves.
+	SourceParts []string `json:"source_parts,omitempty"`
+	TargetParts []string `json:"target_parts"`
+
+	// SourceIdent and TargetIdent are the device and inode the front end
+	// saw. The helper compares what it opened against them, and refuses
+	// when they differ -- that is the rename-and-symlink race, closed.
+	SourceIdent string `json:"source_ident,omitempty"`
+	TargetIdent string `json:"target_ident,omitempty"`
+
+	// The overlay's operands.
+	Lower []string `json:"lower,omitempty"`
+	Upper string   `json:"upper,omitempty"`
+	Work  string   `json:"work,omitempty"`
+	Xattr string   `json:"xattr,omitempty"`
+
+	// SourceType is what the source has to be: a directory binds onto a
+	// directory, a file onto a file.
+	SourceType string `json:"source_type,omitempty"`
+}
+
+// Reply is what the helper reports back on stdout.
+type Reply struct {
+	Version int `json:"version"`
+	// Results is one entry per operation attempted, in order.
+	Results []Result `json:"results"`
+	// Error is why the whole job stopped, empty when it did not.
+	Error string `json:"error,omitempty"`
+	// RolledBack is true when a failure was unwound completely, so the
+	// front end knows the machine is clean.
+	RolledBack bool `json:"rolled_back,omitempty"`
+	// Stranded is what a failed rollback could not remove.
+	Stranded []string `json:"stranded,omitempty"`
+	// Moved is true once the verified tree stands at the live path.
+	Moved bool `json:"moved,omitempty"`
+}
+
+// Result is what happened to one operation.
+type Result struct {
+	Target string `json:"target"`
+	Device uint64 `json:"device,omitempty"`
+	Inode  uint64 `json:"inode,omitempty"`
+	// Outcome is "mounted", "unmounted", "absent" or "busy".
+	Outcome string `json:"outcome"`
+	Error   string `json:"error,omitempty"`
+}
+
+// AsMount rebuilds the plan mount a helper operation describes, so that
+// mountx can execute it without knowing about the wire format.
+func (m JobMount) AsMount(target string) plan.Mount {
+	return plan.Mount{
+		Kind:   plan.Kind(m.Kind),
+		Role:   plan.Role(m.Role),
+		Source: m.Source,
+		Target: target,
+		Lower:  m.Lower,
+		Upper:  m.Upper,
+		Work:   m.Work,
+		Xattr:  m.Xattr,
+	}
+}

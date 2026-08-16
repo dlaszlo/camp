@@ -1,17 +1,31 @@
-// Package state records what is mounted, and reads what actually is.
+// Package state records what the privileged mode mounted, so that a run
+// which died halfway can still be undone.
 //
-// Two things are kept apart on purpose. The configuration says what you
-// *want*; this package records what *happened*. "down" undoes what the
-// record says was mounted, not what the current configuration would
-// produce -- otherwise editing camp.yaml while a composition is up would
-// leave mounts that nothing knows how to remove.
+// The record is what crash recovery stands on, and everything about it
+// follows from that.
 //
-// The record is generated, machine-local and never edited by hand, so it
-// lives under the user's state directory rather than beside the code.
+// It carries the **complete concrete plan, in order**, not a reference to
+// the configuration. down, status and explain read the record and never
+// the configuration, because the configuration may have been edited while
+// the composition was up -- and then the file that says what to unmount
+// would describe a composition nobody built.
+//
+// It is written **before** the helper mounts anything, in phase
+// "mounting", and moves to "up" only after the verification at the live
+// path passes. A failure with a clean rollback removes it; a failed
+// rollback leaves "partial" with the plan intact. So there is no moment
+// at which something is mounted and nothing knows what.
+//
+// It is written and read **only by the unprivileged front end**. sudo
+// wraps the helper alone, so XDG_STATE_HOME and the home directory always
+// resolve in the invoking user's environment, and the
+// root-home-versus-user-home ambiguity cannot arise.
+//
+// The namespace mode has no record at all and needs none: the namespace
+// is the state, and it vanishes with its last process.
 package state
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -19,34 +33,93 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/dlaszlo/camp/internal/fsx"
+	"github.com/dlaszlo/camp/internal/plan"
 )
 
-// Status is what a record says about a composition.
-type Status string
+// Version is the schema this build writes. A reader refuses a version it
+// does not know rather than guessing at a field that moved.
+const Version = 1
+
+// Phase is how far a composition got, and what has to happen next.
+type Phase string
 
 const (
-	Up   Status = "up"
-	Down Status = "down"
+	// Mounting means the plan is written and the helper is working, or
+	// died while working. Something may be mounted.
+	Mounting Phase = "mounting"
+	// Up means every mount is made and the verification at the live path
+	// passed.
+	Up Phase = "up"
+	// Partial means a teardown or a rollback could not finish. Mounts
+	// remain, and the plan that names them is still here.
+	Partial Phase = "partial"
+	// Down means everything the plan named is gone.
+	Down Phase = "down"
 )
 
-// Record is one composition, as last acted on.
-type Record struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Config     string   `json:"config"`
-	Live       string   `json:"live"`
-	Code       string   `json:"code"`
-	Workspaces []string `json:"workspaces"`
-	Private    string   `json:"private"`
-	WorkDir    string   `json:"workdir"`
-	Status     Status   `json:"status"`
-	Mounts     []string `json:"mounts"`
-	Created    []string `json:"created"`
-	UpdatedAt  string   `json:"updated_at"`
-	Version    string   `json:"tool_version"`
+// Active reports whether a phase means something may still be mounted.
+func (p Phase) Active() bool { return p == Mounting || p == Up || p == Partial }
+
+// Mount is one operation as it was planned, and as it turned out.
+type Mount struct {
+	Kind   string `json:"kind"`
+	Role   string `json:"role"`
+	Source string `json:"source"`
+	Target string `json:"target"`
+	// Options is the overlay's option string, empty for a bind.
+	Options string `json:"options,omitempty"`
+	// FSType is what the mount should answer as.
+	FSType string `json:"fstype,omitempty"`
+	// Device and Inode are the target's identity once it is mounted. Zero
+	// until then, which is itself information: this mount had not happened
+	// when the record was last written.
+	Device uint64 `json:"device,omitempty"`
+	Inode  uint64 `json:"inode,omitempty"`
 }
 
-// Dir is where records live.
+// Record is one composition.
+type Record struct {
+	Version int `json:"version"`
+
+	UID int `json:"uid"`
+	GID int `json:"gid"`
+
+	Config    string `json:"config"`
+	Env       string `json:"env"`
+	Live      string `json:"live"`
+	Upper     string `json:"upper"`
+	Workspace string `json:"workspace"`
+	Hash      string `json:"hash"`
+
+	// ConfigDigest and InventoryDigest are SHA-256 over the bytes of each
+	// file as they were at up. They are what lets down report drift
+	// without trusting the current file.
+	ConfigDigest    string `json:"config_digest"`
+	InventoryDigest string `json:"inventory_digest"`
+
+	// Mounts is the complete concrete plan, in the order it was made. Its
+	// reverse is the teardown order.
+	Mounts []Mount `json:"mounts"`
+
+	// Created is every path camp made: the work directory, the scaffold
+	// entries. It is the entire list camp is allowed to remove.
+	Created []string `json:"created"`
+
+	// Staging is where the tree was built before the move, in the
+	// privileged mode.
+	Staging string `json:"staging,omitempty"`
+
+	Phase Phase `json:"phase"`
+
+	Tool      string `json:"tool_version"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// Dir is where records live: the invoking user's state directory, always
+// resolved in the invoking user's environment.
 func Dir() string {
 	if base := os.Getenv("XDG_STATE_HOME"); base != "" {
 		return filepath.Join(base, "camp")
@@ -58,107 +131,167 @@ func Dir() string {
 	return filepath.Join(home, ".local", "state", "camp")
 }
 
-func path(id string) string { return filepath.Join(Dir(), id+".json") }
+// Path is one record's file.
+func Path(hash string) string { return filepath.Join(Dir(), hash+".json") }
 
-// Save writes the record, replacing any previous one.
+// FromPlan builds the record for a composition about to be mounted.
+func FromPlan(built plan.Plan, tool, configDigest, inventoryDigest string, uid, gid int) Record {
+	now := time.Now().UTC().Format(time.RFC3339)
+	record := Record{
+		Version:         Version,
+		UID:             uid,
+		GID:             gid,
+		Config:          built.Config.Source,
+		Env:             built.Config.Env,
+		Live:            built.Live,
+		Upper:           built.Config.UpperPath(),
+		Workspace:       built.Config.LowerPath(),
+		Hash:            built.Hash,
+		ConfigDigest:    configDigest,
+		InventoryDigest: inventoryDigest,
+		Phase:           Mounting,
+		Tool:            tool,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	for _, mount := range built.Mounts {
+		recorded := Mount{
+			Kind:   string(mount.Kind),
+			Role:   string(mount.Role),
+			Source: mount.Source,
+			Target: mount.Target,
+		}
+		if mount.Kind == plan.Overlay {
+			recorded.FSType = "overlay"
+		}
+		record.Mounts = append(record.Mounts, recorded)
+	}
+	return record
+}
+
+// Save writes the record.
 //
-// Written to a temporary file and renamed, so that an interrupted save
-// cannot leave a record that parses cleanly and describes half a
-// composition.
+// Temp file, rename, both file and directory synced. The directory is
+// 0700 and the file 0600: it names every path of a composition, and it is
+// nobody else's business.
 func (r Record) Save() error {
 	r.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := os.MkdirAll(Dir(), 0o755); err != nil {
-		return fmt.Errorf("creating the state directory: %w", err)
+	area := fsx.State(Dir())
+	if err := area.Ensure(0o700); err != nil {
+		return err
 	}
+
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding the record: %w", err)
 	}
-
-	target := path(r.ID)
-	temporary := target + ".tmp"
-	if err := os.WriteFile(temporary, append(data, '\n'), 0o644); err != nil {
-		return fmt.Errorf("writing the record: %w", err)
-	}
-	if err := os.Rename(temporary, target); err != nil {
-		return fmt.Errorf("replacing the record: %w", err)
-	}
-	return nil
+	return area.Write(r.Hash+".json", append(data, '\n'), 0o600)
 }
 
-// Forget removes the record and nothing else. Repositories, the
-// configuration and every piece of content stay where they are.
-func Forget(id string) error {
-	err := os.Remove(path(id))
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing the record: %w", err)
-	}
-	return nil
-}
-
-// Load reads one record, or reports that there is none.
-func Load(id string) (Record, bool) {
-	data, err := os.ReadFile(path(id))
+// Load reads one record.
+//
+// A record it cannot parse is an error rather than an absence: silently
+// treating a corrupt record as "no composition here" would lose the only
+// list of what is mounted.
+func Load(hash string) (Record, bool, error) {
+	data, err := os.ReadFile(Path(hash))
 	if err != nil {
-		return Record{}, false
+		if os.IsNotExist(err) {
+			return Record{}, false, nil
+		}
+		return Record{}, false, fmt.Errorf("reading %s: %w", Path(hash), err)
 	}
+	record, err := Decode(data)
+	if err != nil {
+		return Record{}, true, fmt.Errorf("%s: %w", Path(hash), err)
+	}
+	return record, true, nil
+}
+
+// Decode parses a record and refuses a version it does not know.
+func Decode(data []byte) (Record, error) {
 	var record Record
 	if err := json.Unmarshal(data, &record); err != nil {
-		return Record{}, false
+		return Record{}, fmt.Errorf("the record does not parse: %w", err)
 	}
-	return record, true
+	if record.Version != Version {
+		return Record{}, fmt.Errorf("the record is version %d and this camp "+
+			"writes and reads version %d. It was written by a different build; "+
+			"use that build to take the composition down, rather than letting "+
+			"this one guess at what the fields mean", record.Version, Version)
+	}
+	return record, nil
 }
 
-// All returns every record, oldest identifier first.
-func All() []Record {
+// Listing is one entry of what list prints. A record that will not parse
+// appears here too, marked, because a corrupt record is a thing to be
+// told about and never something to skip.
+type Listing struct {
+	Path    string
+	Record  Record
+	Corrupt error
+}
+
+// All returns every record, newest first.
+func All() []Listing {
 	entries, err := os.ReadDir(Dir())
 	if err != nil {
 		return nil
 	}
-	var records []Record
+	var listings []Listing
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		if record, ok := Load(strings.TrimSuffix(entry.Name(), ".json")); ok {
-			records = append(records, record)
+		path := filepath.Join(Dir(), entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			listings = append(listings, Listing{Path: path, Corrupt: err})
+			continue
 		}
+		record, err := Decode(data)
+		if err != nil {
+			listings = append(listings, Listing{Path: path, Corrupt: err})
+			continue
+		}
+		listings = append(listings, Listing{Path: path, Record: record})
 	}
-	sort.Slice(records, func(i, j int) bool { return records[i].ID < records[j].ID })
-	return records
+	sort.Slice(listings, func(i, j int) bool {
+		return listings[i].Record.UpdatedAt > listings[j].Record.UpdatedAt
+	})
+	return listings
 }
 
-// MountedTargets returns every mount point on this machine.
-//
-// Read from /proc/self/mountinfo rather than /proc/mounts: mountinfo
-// lists each mount separately even when several share a source, which is
-// exactly the case here, since a bind of a directory reports the whole
-// device as its source.
-func MountedTargets() map[string]bool {
-	targets := map[string]bool{}
-	file, err := os.Open("/proc/self/mountinfo")
+// Forget removes one record and nothing else. Not a repository, not the
+// storage, not the composed tree -- one file.
+func Forget(hash string) error {
+	return fsx.State(Dir()).Remove(hash + ".json")
+}
+
+// Teardown returns the recorded mounts in the order they come down.
+func (r Record) Teardown() []Mount {
+	reversed := make([]Mount, 0, len(r.Mounts))
+	for i := len(r.Mounts) - 1; i >= 0; i-- {
+		reversed = append(reversed, r.Mounts[i])
+	}
+	return reversed
+}
+
+// Age renders how long ago the record was last written.
+func (r Record) Age() string {
+	updated, err := time.Parse(time.RFC3339, r.UpdatedAt)
 	if err != nil {
-		return targets
+		return "unknown"
 	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) > 4 {
-			targets[unescape(fields[4])] = true
-		}
+	elapsed := time.Since(updated).Round(time.Second)
+	switch {
+	case elapsed < time.Minute:
+		return fmt.Sprintf("%ds ago", int(elapsed.Seconds()))
+	case elapsed < time.Hour:
+		return fmt.Sprintf("%dm ago", int(elapsed.Minutes()))
+	case elapsed < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(elapsed.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(elapsed.Hours()/24))
 	}
-	return targets
-}
-
-// IsMounted reports whether one path is a mount point.
-func IsMounted(target string) bool { return MountedTargets()[target] }
-
-// unescape undoes mountinfo's octal escaping of space, tab, newline and
-// backslash.
-func unescape(field string) string {
-	return strings.NewReplacer(
-		`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`,
-	).Replace(field)
 }
