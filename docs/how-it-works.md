@@ -233,6 +233,15 @@ and they survive the session. Editing a contributed entry is `EROFS`.
 the directory happens to contain — the raw listing would hand islands to
 the source's own runtime junk.
 
+The source need not be a repository root. It may sit inside a larger
+repository — one that holds the whole environment, with the workspace as
+a subdirectory — and camp asks git in that repository's own frame, so the
+answer is the same either way. How the repositories are arranged is your
+decision, not something camp gets to require. A source in no repository
+at all falls back to the directory listing, and camp says so where the
+difference is decided: every entry the directory happens to hold becomes
+an island, the source's own runtime files included.
+
 This shape is not a preference. A machine-local file exists in no
 repository, so a plain writable hole has nothing to bind onto — a bind
 cannot create its own mount point — and creating the attachment point

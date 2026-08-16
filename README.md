@@ -135,9 +135,11 @@ narrow helper that executes the already-validated plan. Running
 
 ## Requirements and install
 
-Linux with OverlayFS, `git`, and Go 1.25+ to build. Nothing else — camp
-makes its mounts by syscall and asks `/proc` for state, so there is no
-`mount(8)`, `fuser` or similar to install.
+Linux with OverlayFS, and Go 1.25+ to build. `git` as well when the
+composition is git-based, because camp reads it to work out what each
+repository contributes; two plain directories need none of it. Nothing
+else — camp makes its mounts by syscall and asks `/proc` for state, so
+there is no `mount(8)`, `fuser` or similar to install.
 
 ```
 go build -o camp ./cmd/camp

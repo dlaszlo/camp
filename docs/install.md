@@ -19,9 +19,9 @@ grep overlay /proc/filesystems        # should print: nodev  overlay
 
 If it is missing, `sudo modprobe overlay` usually loads it.
 
-**git**, for a git-based composition. camp reads git — `ls-files`,
-`ls-tree`, `worktree list` — to work out what each repository contributes
-and to report what a session changed. It never writes git.
+**git**, for a git-based composition. camp reads git — `rev-parse`,
+`ls-files`, `worktree list` — to work out what each repository
+contributes and to report what a session changed. It never writes git.
 
 ```
 sudo apt install git                  # Debian/Ubuntu

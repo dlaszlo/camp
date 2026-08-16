@@ -118,7 +118,7 @@ The ignore rules live inside `.camp` rather than in a repository's own
 a different one later, or to none at all — and the answer is the same
 every time.
 
-## 3. Look before you leap
+## 3. Record the starting point, and read the plan
 
 ```
 cd ~/work
