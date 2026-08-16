@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/dlaszlo/camp/internal/mountinfo"
@@ -86,6 +87,55 @@ func TestDownConvergesFromTheRecordWithTheConfigurationDeleted(t *testing.T) {
 			t.Fatalf("teardown entry %d is %q, wanted %q", index, mount.Target, want)
 		}
 	}
+}
+
+// A recorded mount is checked by path and by identity, because the path
+// alone cannot tell camp's mount from a stranger's at the same name.
+func TestARecordedMountIsCheckedByIdentityAndNotOnlyByPath(t *testing.T) {
+	scratch(t)
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, inode := deviceAndInode(t, identity)
+
+	mounted := []mountinfo.Entry{{Point: target}}
+	mount := state.Mount{Target: target, Device: device, Inode: inode}
+
+	if presence, err := mount.Presence(mounted); presence != state.Same || err != nil {
+		t.Errorf("the recorded object is there and read as %q (%v)", presence, err)
+	}
+	if presence, _ := mount.Presence(nil); presence != state.Gone {
+		t.Errorf("nothing is mounted there and it read as %q", presence)
+	}
+
+	// The dangerous one: camp's mount went away and something else now
+	// stands at the same path. A scan by name would call this present and
+	// unmount a stranger's mount.
+	stranger := state.Mount{Target: target, Device: device, Inode: inode + 1}
+	if presence, _ := stranger.Presence(mounted); presence != state.Different {
+		t.Errorf("a different object at the recorded path read as %q", presence)
+	}
+
+	// A record written before its mount was made carries no identity, and
+	// says so rather than claiming a match it cannot make.
+	unmade := state.Mount{Target: target}
+	if presence, _ := unmade.Presence(mounted); presence != state.Unverified {
+		t.Errorf("a mount with no recorded identity read as %q", presence)
+	}
+}
+
+func deviceAndInode(t *testing.T, info os.FileInfo) (uint64, uint64) {
+	t.Helper()
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("this platform does not report a device and inode")
+	}
+	return uint64(st.Dev), st.Ino
 }
 
 func TestEveryPhaseThatMayHaveMountsIsActive(t *testing.T) {

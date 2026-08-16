@@ -26,6 +26,8 @@
 package state
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -33,6 +35,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/mountinfo"
@@ -278,6 +282,57 @@ func All() []Listing {
 // storage, not the composed tree -- one file.
 func Forget(hash string) error {
 	return fsx.State(Dir()).Remove(hash + ".json")
+}
+
+// Presence is what the machine says about one recorded mount.
+//
+// Path and identity, never the path alone: a mount that went away and a
+// mount somebody else made at the same path look identical to a scan by
+// name, and unmounting the second one because the first is written down
+// here would remove a stranger's mount.
+type Presence string
+
+const (
+	// Gone: nothing is mounted at that path.
+	Gone Presence = "gone"
+	// Same: what is mounted there is the object camp mounted.
+	Same Presence = "same"
+	// Different: something is mounted there and it is not camp's.
+	Different Presence = "different"
+	// Unverified: something is mounted there and the record cannot say
+	// whether it is the same object -- either the identity was never
+	// written down, because the record predates the mount, or the path
+	// cannot be looked at now.
+	Unverified Presence = "unverified"
+)
+
+// Presence answers for one recorded mount.
+func (m Mount) Presence(table []mountinfo.Entry) (Presence, error) {
+	if len(mountinfo.At(table, m.Target)) == 0 {
+		return Gone, nil
+	}
+	if m.Device == 0 && m.Inode == 0 {
+		return Unverified, nil
+	}
+	var st unix.Stat_t
+	if err := unix.Stat(m.Target, &st); err != nil {
+		return Unverified, fmt.Errorf("looking at %s: %w", m.Target, err)
+	}
+	if uint64(st.Dev) != m.Device || st.Ino != m.Inode {
+		return Different, nil
+	}
+	return Same, nil
+}
+
+// Digest is how the record fingerprints a file it wants to notice the
+// editing of. Empty bytes have no digest: a file that was not read is not
+// a file that was empty.
+func Digest(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // StillMounted returns the recorded mounts that are still present.
