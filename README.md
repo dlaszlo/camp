@@ -170,19 +170,31 @@ out is always `camp up`, which needs no namespace at all.
 A `camp run` session maps only your own user id, so every file owned by
 anyone else — root included — appears as `nobody` inside it. ssh refuses
 a system-wide configuration file it cannot attribute to root or to you,
-so `ssh` and `git push` over ssh fail in a session until you point ssh at
-your own configuration, which is also what makes it skip the system-wide
-one:
+so `ssh` and `git push` over ssh fail in a session until ssh is pointed
+at your own configuration with `-F`, which is also what makes it skip the
+system-wide one.
 
-```
-git config --global core.sshCommand 'ssh -F ~/.ssh/config'
+The repair belongs to the composition, not to your machine. camp changes
+nothing outside a session — not your shell's startup file, not your
+global git configuration — so the setting goes in the `session:` section
+of the configuration, where it is versioned and diffable:
+
+```yaml
+session:
+  environment:
+    GIT_SSH_COMMAND: "ssh -F ${HOME}/.ssh/config"
 ```
 
-That covers git, and it works even where no shell is started — the case
-for a program `camp run` starts directly. For your own terminals add
-`alias ssh='ssh -F ~/.ssh/config'` to your shell's startup file. Neither
-changes anything outside a session except which ssh configuration git
-reads. `camp up` creates no namespace and is not affected.
+That is git covered, including where no shell is started — the case for a
+program `camp run` starts directly. `ssh`, `scp` and `sftp` typed by hand
+have no option variable of their own, so they are reached the other way:
+a directory in your workspace repository, prepended to the session's
+`PATH`, holding a small launcher for each. [docs/install.md](docs/install.md)
+has the complete arrangement, including how a launcher finds the real
+program without naming a distribution path.
+
+`camp up` creates no namespace, so none of this applies there — and it
+says so when it meets a `session:` section.
 
 ## The configuration
 

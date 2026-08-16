@@ -375,9 +375,25 @@ Where you meet it is ssh, which refuses a system-wide configuration file
 it cannot attribute to root or to you — so `ssh` and `git push` over ssh
 fail inside a session until ssh is pointed at your own configuration
 with `-F`, which is also what makes it skip the system-wide one.
-`camp explain` prints the two lines that do it, and
-[install.md](install.md) explains why one of them is not enough on its
-own.
+
+That repair belongs to the composition rather than to the machine, and
+the `session:` section of the configuration is where it goes: a
+`GIT_SSH_COMMAND` declaration covers git, and a launcher directory in the
+workspace repository, prepended to the session's `PATH`, covers `ssh`,
+`scp` and `sftp` typed by hand. camp carries no program's name and writes
+no launcher; it applies what the configuration declares, and the next
+program that breaks the same way is fixed by the same key.
+[install.md](install.md) has the complete arrangement.
+
+Two other members of the same class need saying, because they are not
+repaired by any variable. Rootless mode has no elevation at all — a
+setuid binary owned by an unmapped id confers nothing, so `sudo` and
+`pkexec` cannot work inside a session. And a program that *records*
+ownership into what it builds — `tar`, `rsync -a`, an image build — will
+write `65534` for a file that is root's outside, with nothing failing and
+nothing warning. Build such an artefact outside a session, or with `camp
+up`, which creates no user namespace and so sees every owner as it really
+is. `camp explain` says all of this in its "Ownership view" section.
 
 **The system-wide mode (`camp up`)** exists for when something started
 *outside* must see the tree — a GUI editor, most often. Here there is one

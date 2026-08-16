@@ -142,25 +142,91 @@ its own `/etc`.
 
 The repair is to point ssh at your own configuration. `-F` does two
 things: it names the file to read, **and it skips the system-wide one**.
+Your host aliases, keys and options all keep working; only the file that
+cannot be attributed is left unread.
 
-```
-git config --global core.sshCommand 'ssh -F ~/.ssh/config'
+The question is how `-F` gets there, and the answer camp takes is that it
+belongs to the composition. Nothing here touches your machine: not your
+shell's startup file, not your global git configuration, not
+`~/.local/bin`. A session is something you are inside, and wiring the
+outside to repair the inside breaks things in places that have nothing to
+do with camp. So the setting lives in the configuration's `session:`
+section, where it is versioned, diffable, and travels with the
+environment it serves.
+
+### git
+
+One line, and git is covered — including where no shell is started, which
+is the case for a program `camp run` starts directly:
+
+```yaml
+session:
+  environment:
+    GIT_SSH_COMMAND: "ssh -F ${HOME}/.ssh/config"
 ```
 
-That is the half that matters, because git runs ssh itself rather than
-through a shell, and because a program `camp run` starts directly reads
-no startup file at all — so an alias would never reach it. For your own
-interactive terminals, add the alias too:
+`${HOME}` is read from the environment you started camp in. camp knows
+nothing about ssh or git here: it sets what the configuration says, and
+the next program that breaks the same way is fixed by the same key.
 
-```
-alias ssh='ssh -F ~/.ssh/config'          # in your shell's startup file
+### ssh, scp and sftp typed by hand
+
+These have no option variable of their own — ssh's own manual lists only
+the variables it *sets* — so the only control left is which program the
+name resolves to. Prepend a directory your workspace repository owns, and
+put a launcher in it for each entry point. `scp` and `sftp` need their
+own: they start ssh from a compiled-in absolute path, so wrapping `ssh`
+alone does not reach them.
+
+```yaml
+session:
+  environment:
+    GIT_SSH_COMMAND: "ssh -F ${HOME}/.ssh/config"
+    PATH: "$CAMP_LIVE/.workspace/bin:$PATH"
+    # The path as it was outside, saved under a name of this
+    # composition's choosing. The launchers find the real programs
+    # through it -- see below.
+    OUTER_PATH: "$PATH"
 ```
 
-`scp` and `sftp` take `-F` as well. Your host aliases, keys and options
-all keep working: only the system-wide file is skipped, and outside a
-session nothing changes except which ssh configuration git reads. If you
-need the system-wide file, `camp up` creates no namespace and none of
-this applies to it.
+`$CAMP_LIVE` is the composed tree, so the directory is
+`.workspace/bin/` in your workspace repository, reached through the
+tree. Three files go in it, committed like anything else there:
+
+```sh
+#!/bin/sh
+# .workspace/bin/ssh -- and the same file as scp and sftp, with the
+# program name changed in both places.
+original=$(PATH="$OUTER_PATH" command -v ssh) || exit 127
+exec "$original" -F "$HOME/.ssh/config" "$@"
+```
+
+Three things about that script are deliberate:
+
+- **It finds the original through `$OUTER_PATH`**, the path as it was
+  before the launcher directory was prepended. Not a fixed directory such
+  as `/usr/bin`: whichever one you pick is right on your distribution and
+  wrong on the next, and nothing in this arrangement should assume a
+  filesystem layout it does not have to.
+- **It tests nothing about camp.** There is no `if inside a session`
+  switch, because a launcher that changes behaviour depending on an
+  exported marker changes it for reasons nobody can see. It is reached
+  only when the session's `PATH` puts it first, and that is the whole
+  condition.
+- **It fails loudly.** If the original is not found it exits 127 rather
+  than doing something approximate, and if the launcher itself is missing
+  the command is simply not found — camp never reports a success that did
+  not happen.
+
+camp neither writes these files nor blesses them. They are ordinary
+content of your workspace repository, reviewed and versioned by you,
+because the moment camp generated a program-specific wrapper it would be
+carrying ssh knowledge in a tool that has none.
+
+`camp up` creates no namespace, so none of this applies there — and `camp
+up` says so when the configuration has a `session:` section, rather than
+leaving you to wonder whether it took effect. If you need the system-wide
+ssh configuration read as itself, that is the mode for it.
 
 ## Check that it worked
 

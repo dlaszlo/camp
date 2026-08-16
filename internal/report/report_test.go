@@ -1,11 +1,15 @@
 package report_test
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/plan"
+	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/report"
 	"github.com/dlaszlo/camp/internal/testenv"
 )
@@ -146,6 +150,80 @@ func TestNothingIsAnnouncedWithoutASection(t *testing.T) {
 	built := prepared(t, env, "", plan.Privileged)
 	if strings.Contains(report.Plan(built), "starts no session") {
 		t.Error("a configuration with no session: section was announced anyway")
+	}
+}
+
+// The skeleton and the example teach the grammar, so what they teach has
+// to be true: the block has to uncomment into something camp reads. A
+// commented example nobody ever parses is exactly where a stale one hides.
+func TestTheCommentedSessionBlocksUncommentIntoSomethingCampReads(t *testing.T) {
+	root := testenv.RepoRoot(t)
+	example, err := os.ReadFile(filepath.Join(root, "examples", "config.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, text := range map[string]string{
+		"the camp init skeleton": report.ConfigTemplate("/home/you/work"),
+		"examples/config.yml":    string(example),
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The four things A5 and the build plan ask every introduction
+			// of the key to carry: the grammar, the distinction from env:,
+			// what the other mode does with the section, and where the
+			// worked recipe is.
+			for _, want := range []string{
+				"session:", "environment:", "$CAMP_LIVE",
+				"root directory", "process environment",
+				"camp up", "docs/install.md",
+			} {
+				if !strings.Contains(unwrapped(text), want) {
+					t.Errorf("%s does not carry %q", name, want)
+				}
+			}
+
+			// As shipped: comments, and a file that parses.
+			if _, err := config.Parse([]byte(text), "config.yml"); err != nil {
+				assertNoSessionRule(t, err, "as shipped")
+			}
+			// And with the block uncommented, exactly as the file tells the
+			// reader to do it.
+			if _, err := config.Parse([]byte(uncomment(t, text)), "config.yml"); err != nil {
+				assertNoSessionRule(t, err, "with the block uncommented")
+			}
+		})
+	}
+}
+
+// uncomment strips one leading '# ' from everything after the '# session:'
+// line, which is what "uncomment from here down" means.
+func uncomment(t *testing.T, text string) string {
+	t.Helper()
+	head, block, found := strings.Cut(text, "# session:\n")
+	if !found {
+		t.Fatal("there is no commented session: block to uncomment")
+	}
+	lines := []string{head + "session:"}
+	for _, line := range strings.Split(block, "\n") {
+		lines = append(lines, strings.TrimPrefix(strings.TrimPrefix(line, "#"), " "))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// assertNoSessionRule fails on any refusal about the section. The
+// skeletons name directories that do not exist, so path refusals are
+// expected and are not what this is about.
+func assertNoSessionRule(t *testing.T, err error, when string) {
+	t.Helper()
+	var list refusal.List
+	if !errors.As(err, &list) {
+		t.Fatalf("%s: %v", when, err)
+	}
+	for _, rule := range list.Rules() {
+		if strings.HasPrefix(rule, "environment-") || strings.HasPrefix(rule, "identity-") ||
+			rule == "config-syntax" {
+			t.Errorf("%s, the session block was refused (%s):\n%v", when, rule, err)
+		}
 	}
 }
 

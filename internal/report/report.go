@@ -258,6 +258,41 @@ steps:
   # islands expansions, and binds the exclude over the composed tree's
   # copy. Without it this composition has no exclude at all.
   - git_exclude
+
+# Everything below configures the session 'camp run' and 'camp shell'
+# start, and nothing about the tree, which is the same in both modes.
+# 'camp up' starts no session: it applies none of this and prints one line
+# saying so, rather than leaving you to wonder whether it took effect.
+#
+# session.environment is not env: at the top of this file. env: names the
+# environment *root directory*; this declares the *process environment*
+# the session's workload receives, and through ordinary inheritance
+# everything descended from it.
+#
+# In a value, $NAME and ${NAME} insert what a name held in the environment
+# you started camp in, $$ is one literal dollar, and $CAMP_LIVE is the
+# composed tree. There is no shell in any of it: nothing else is expanded,
+# and a name that is not set refuses rather than quietly becoming empty
+# text. Names beginning CAMP_ are camp's own, and so is PWD.
+#
+# Why you might want this: a session maps only your own uid, so files
+# owned by anyone else appear as 'nobody', and a program that validates
+# the owner of a configuration file refuses it. ssh is the one most people
+# meet. docs/install.md, under "ssh inside a session", has the complete
+# worked arrangement for OpenSSH -- including the launcher directory that
+# a prepended PATH reaches.
+#
+# Uncomment from here down and edit:
+#
+# session:
+#   # How you are mapped inside. Leave it out for the default: your own
+#   # uid mapped to itself, with the mount capability dropped before
+#   # anything you asked for runs.
+#   identity: uidmap
+#
+#   environment:
+#     SOME_TOOL_OPTIONS: "--config ${HOME}/.config/some-tool"
+#     PATH: "$CAMP_LIVE/.workspace/bin:$PATH"
 `, env)
 }
 

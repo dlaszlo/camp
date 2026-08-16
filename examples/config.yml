@@ -77,3 +77,57 @@ steps:
   # It comes after the .git bind on purpose: its target lies inside .git,
   # and the other order would be refused.
   - git_exclude
+
+# The session -- what 'camp run' and 'camp shell' start. Everything here
+# configures that session and nothing configures the tree, which is why it
+# has a section of its own: 'camp up' mounts the tree and exits, so it
+# starts no session, applies none of this, and prints one line saying so
+# rather than leaving you to guess.
+#
+# camp writes none of the launchers named below and knows nothing about
+# ssh: it applies what this file declares, and the next program that
+# disagrees with a session the same way is adapted by the same key. The
+# complete OpenSSH arrangement, launchers included, is in docs/install.md
+# under "ssh inside a session".
+#
+# Uncomment from here down and edit:
+#
+# session:
+#   # Which uid route the namespace takes. Left out, your own uid maps to
+#   # itself and the mount capability is dropped before anything runs.
+#   # 'uidmap' uses newuidmap and your subuid range instead, podman's
+#   # keep-id shape. camp never switches between them on its own: they
+#   # present different uid worlds to whatever runs inside.
+#   identity: uidmap
+#
+#   # The environment the workload receives, and through ordinary
+#   # inheritance everything descended from it. This is not env: at the
+#   # top of the file -- that names the environment *root directory*;
+#   # this declares the *process environment*.
+#   #
+#   # $NAME and ${NAME} insert what a name held in the environment camp
+#   # was started with; $$ is one literal dollar; $CAMP_LIVE is the
+#   # composed tree, always camp's own value for it. There is no shell in
+#   # any of this: no command substitution, no ~, no word splitting, and
+#   # inserted bytes are never scanned again. A name that is not set
+#   # refuses -- an absent value silently becoming empty text is how a
+#   # typo comes to look applied.
+#   #
+#   # Names beginning CAMP_ are camp's own, and PWD is too: camp sets the
+#   # workload's directory and that value together.
+#   environment:
+#     # git runs ssh itself, so one variable covers it -- including where
+#     # no shell is started, which is the case for a program 'camp run'
+#     # starts directly.
+#     GIT_SSH_COMMAND: "ssh -F ${HOME}/.ssh/config"
+#
+#     # ssh, scp and sftp typed by hand have no option variable of their
+#     # own, so the only control left is which program the name resolves
+#     # to: a launcher directory this workspace owns, versioned with the
+#     # environment it serves, put first on the session's PATH.
+#     PATH: "$CAMP_LIVE/.workspace/bin:$PATH"
+#
+#     # The path as it was outside, under a name this composition chose.
+#     # The launchers read it to find the real programs, so that none of
+#     # them has to name a distribution's directory.
+#     OUTER_PATH: "$PATH"
