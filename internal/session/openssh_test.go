@@ -229,37 +229,26 @@ func TestNoDistributionBinaryPathIsWrittenDown(t *testing.T) {
 	// .workspace/bin/ssh is the arrangement, not a violation of it.
 	forbidden := regexp.MustCompile(`(^|[\s"'` + "`" + `=(])/(usr/)?(local/)?bin/(ssh|scp|sftp)\b`)
 
+	self := filepath.Join(root, "internal", "session", "openssh_test.go")
+
 	var offenders []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			if info.Name() == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
+	for _, path := range testenv.Tracked(t) {
+		if path == self {
+			continue // this test names them in order to forbid them
 		}
 		switch filepath.Ext(path) {
 		case ".go", ".md", ".yml", ".yaml":
 		default:
-			return nil
-		}
-		relative, _ := filepath.Rel(root, path)
-		if relative == filepath.Join("internal", "session", "openssh_test.go") {
-			return nil // this test names them in order to forbid them
+			continue
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			t.Fatal(err)
 		}
 		if found := forbidden.FindString(string(data)); found != "" {
+			relative, _ := filepath.Rel(root, path)
 			offenders = append(offenders, relative+" ("+strings.TrimSpace(found)+")")
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 	if len(offenders) > 0 {
 		t.Errorf("a distribution's own path is written down in %v", offenders)

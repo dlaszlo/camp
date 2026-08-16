@@ -309,37 +309,26 @@ func TestTheShellComesFromTheEffectiveEnvironment(t *testing.T) {
 // already be using for something of their own.
 func TestCampSessionAppearsNowhereInTheSource(t *testing.T) {
 	root := testenv.RepoRoot(t)
+	self := filepath.Join(root, "internal", "session", "session_test.go")
+
 	var offenders []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			if info.Name() == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
+	for _, path := range testenv.Tracked(t) {
+		if path == self {
+			continue // this test names it in order to forbid it
 		}
 		switch filepath.Ext(path) {
 		case ".go", ".md", ".yml", ".yaml":
 		default:
-			return nil
-		}
-		if path == filepath.Join(root, "internal", "session", "session_test.go") {
-			return nil // this test names it in order to forbid it
+			continue
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			t.Fatal(err)
 		}
 		if strings.Contains(string(data), "CAMP_SESSION") {
 			relative, _ := filepath.Rel(root, path)
 			offenders = append(offenders, relative)
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 	if len(offenders) > 0 {
 		t.Errorf("CAMP_SESSION still appears in %v", offenders)

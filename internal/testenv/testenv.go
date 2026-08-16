@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dlaszlo/camp/internal/config"
@@ -42,6 +43,43 @@ func RepoRoot(t *testing.T) string {
 		}
 		directory = parent
 	}
+}
+
+// Tracked returns the absolute path of every file this repository tracks.
+//
+// The guards that keep a rule true by failing the build walk this rather
+// than the directory tree beneath the module root. Run inside a camp
+// composition, that root also carries whatever the composition mounts
+// there -- another repository's documents among them, which are free to
+// quote the very strings the guards forbid -- and a guard whose answer
+// depends on where it was run from is not a guard.
+//
+// It asks git rather than guessing at which directories are camp's own,
+// because "what this repository contains" is a question git answers
+// exactly. A file that has not been added yet is not in the repository
+// yet, and is not scanned.
+func Tracked(t *testing.T) []string {
+	t.Helper()
+	root := RepoRoot(t)
+
+	cmd := exec.Command("git", "-C", root, "ls-files", "-z")
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("listing what %s tracks: %v", root, err)
+	}
+
+	var paths []string
+	for _, name := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		if name != "" {
+			paths = append(paths, filepath.Join(root, name))
+		}
+	}
+	if len(paths) == 0 {
+		t.Fatalf("%s tracks no files, so a guard walking them would pass "+
+			"without looking at anything", root)
+	}
+	return paths
 }
 
 // Root returns a scratch directory that is removed when the test ends.
