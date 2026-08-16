@@ -8,17 +8,39 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dlaszlo/camp/internal/compose"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/privileged"
 	"github.com/dlaszlo/camp/internal/state"
 	"github.com/dlaszlo/camp/internal/testenv"
 )
 
+// sessionYAML is the fixture's configuration with a session: section on
+// it. The privileged mode neither applies nor refuses one, so everything
+// this package does has to behave exactly as it did before the section
+// existed.
+const sessionYAML = `
+session:
+  identity: uidmap
+  environment:
+    SESSION_TOKEN: "$CAMP_TEST_SENTINEL"
+    PATH: "$CAMP_LIVE/.workspace/bin:$PATH"
+`
+
 func fixture(t *testing.T) state.Record {
+	t.Helper()
+	return recordFor(t, "")
+}
+
+func recordFor(t *testing.T, tail string) state.Record {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	env := testenv.NewEnv(t)
-	cfg := env.Config(t, "")
+	yaml := ""
+	if tail != "" {
+		yaml = env.YAML() + tail
+	}
+	cfg := env.Config(t, yaml)
 	built, refused := plan.Prepare(cfg, plan.Privileged)
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
@@ -51,6 +73,115 @@ func TestTheTeardownJobIsBuiltFromTheRecordAlone(t *testing.T) {
 	if len(job.WorkParts) == 0 {
 		t.Error("the job does not name camp's work directory; the kernel's " +
 			"leftover there is root-owned and only the helper can remove it")
+	}
+}
+
+// A configuration that gains a session: section changes nothing about a
+// teardown. The record is the authority, the section describes something
+// this mode never started, and down must not become sensitive to it: a
+// composition that could be brought up and then not taken down would wall
+// the user in.
+func TestATeardownIsUnaffectedByASessionSection(t *testing.T) {
+	plain := fixture(t)
+	withSection := recordFor(t, sessionYAML)
+
+	targets := func(record state.Record) []string {
+		job := privileged.UnmountJob(record)
+		names := make([]string, 0, len(job.Targets))
+		for _, target := range job.Targets {
+			names = append(names, strings.TrimPrefix(target, record.Env))
+		}
+		return names
+	}
+	if strings.Join(targets(plain), "\n") != strings.Join(targets(withSection), "\n") {
+		t.Errorf("the teardown order changed when the configuration gained a "+
+			"session: section:\n%v\n---\n%v", targets(plain), targets(withSection))
+	}
+
+	// And it still comes from the record alone, with the configuration gone.
+	if err := os.Remove(withSection.Config); err != nil {
+		t.Fatal(err)
+	}
+	if job := privileged.UnmountJob(withSection); len(job.Targets) != len(withSection.Mounts) {
+		t.Errorf("the teardown job has %d targets and the record %d mounts",
+			len(job.Targets), len(withSection.Mounts))
+	}
+}
+
+// Where a resolved value may appear: the workload's own environment, and
+// nowhere else. Not in the record camp writes to disk, and not in the job
+// that crosses into the privileged half -- neither of which has any reason
+// to carry one, and both of which outlive the session.
+func TestNoDeclaredValueReachesTheRecordOrTheHelpersJob(t *testing.T) {
+	const sentinel = "s3cret-inherited-value"
+	t.Setenv("CAMP_TEST_SENTINEL", sentinel)
+
+	record := recordFor(t, sessionYAML)
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(sentinel)) {
+		t.Errorf("the state record carries an inherited value:\n%s", encoded)
+	}
+	if !bytes.Contains(encoded, []byte(record.Live)) {
+		t.Error("the state record does not carry the composed tree's path, which " +
+			"it is supposed to")
+	}
+
+	for name, job := range map[string]privileged.Job{
+		"the unmount job": privileged.UnmountJob(record),
+	} {
+		encoded, err := json.Marshal(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(encoded, []byte(sentinel)) {
+			t.Errorf("%s carries an inherited value:\n%s", name, encoded)
+		}
+	}
+}
+
+// The same, for the job the helper is handed when mounting: it names
+// paths, identities and options, and no environment ever enters it.
+func TestTheMountJobCarriesPathsAndNoEnvironment(t *testing.T) {
+	const sentinel = "s3cret-inherited-value"
+	t.Setenv("CAMP_TEST_SENTINEL", sentinel)
+
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	env := testenv.NewEnv(t)
+	built, refused := plan.Prepare(env.Config(t, env.YAML()+sessionYAML), plan.Privileged)
+	if !refused.Empty() {
+		t.Fatalf("the fixture was refused:\n%v", refused)
+	}
+
+	// The operands have to exist: the job records what each one was when
+	// the front end looked at it, which is what closes the swap race.
+	if err := compose.Directories(built); err != nil {
+		t.Fatal(err)
+	}
+	testenv.Write(t, built.ExcludeFile(), "")
+
+	job, problems := privileged.MountJob(built, filepath.Join(built.Work, "staging"))
+	if !problems.Empty() {
+		t.Fatalf("the mount job was refused:\n%v", problems)
+	}
+	encoded, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(sentinel)) {
+		t.Errorf("the helper's job carries an inherited value:\n%s", encoded)
+	}
+	for _, want := range []string{"SESSION_TOKEN", "session"} {
+		if bytes.Contains(encoded, []byte(want)) {
+			t.Errorf("the helper's job mentions %q; the session is not the "+
+				"helper's business:\n%s", want, encoded)
+		}
+	}
+	if !bytes.Contains(encoded, []byte(built.Config.Env)) {
+		t.Error("the helper's job does not carry the environment root, which it " +
+			"resolves every operand beneath")
 	}
 }
 

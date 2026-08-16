@@ -116,25 +116,12 @@ func Explain(p plan.Plan) string {
 			"be cleaned up, and when the last process here\n  exits the kernel " +
 			"removes every mount with it. There is no 'camp down'.\n\n")
 
-		b.WriteString("Files that belong to somebody else\n\n" +
-			"  Only your own user id is mapped in here, so every file on the " +
-			"machine\n  owned by anyone else -- root included -- is shown as " +
-			"'nobody'. Reading\n  and writing are unaffected; what changes is " +
-			"what a program sees when it\n  asks who owns a file. No mapping can " +
-			"fix this: a user namespace lets you\n  map the ids you own, and " +
-			"root's is not one of them.\n\n")
-		b.WriteString("  You meet it with ssh, which refuses a system-wide " +
-			"configuration file it\n  cannot attribute to root or to you. Both " +
-			"'ssh' and 'git push' over ssh\n  fail in here with \"Bad owner or " +
-			"permissions on /etc/ssh/...\". Point ssh\n  at your own " +
-			"configuration, which is also what makes it skip the\n  system-wide " +
-			"one:\n\n" +
-			"    git config --global core.sshCommand 'ssh -F ~/.ssh/config'\n" +
-			"    alias ssh='ssh -F ~/.ssh/config'\n\n" +
-			"  The first covers git and works even where no shell is started, " +
-			"which is\n  the case for a program run directly by 'camp run'. The " +
-			"second is for\n  your own terminals: a shell that reads no startup " +
-			"file has no aliases.\n\n")
+		b.WriteString(Ownership(p))
+	}
+
+	if session := Session(p, "Session environment"); session != "" {
+		b.WriteString(session)
+		b.WriteString("\n")
 	}
 
 	b.WriteString("What camp is not\n\n  Not a sandbox. The read-only mounts " +

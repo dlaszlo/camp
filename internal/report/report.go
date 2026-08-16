@@ -82,6 +82,11 @@ func Plan(p plan.Plan) string {
 		b.WriteString("\n")
 	}
 
+	if session := Session(p, "the session's environment:"); session != "" {
+		b.WriteString(session)
+		b.WriteString("\n")
+	}
+
 	if _, has := p.Config.GenerationStep(); !has {
 		b.WriteString("no generation step: this composition has no exclude at all.\n" +
 			"  git run inside the composed tree will list every workspace name as\n" +

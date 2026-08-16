@@ -20,6 +20,7 @@ import (
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
+	"github.com/dlaszlo/camp/internal/report"
 	"github.com/dlaszlo/camp/internal/state"
 	"github.com/dlaszlo/camp/internal/verify"
 )
@@ -60,6 +61,9 @@ type UpInput struct {
 	Sudo []string
 	// Stderr is where sudo's prompt and the helper's diagnostics go.
 	Stderr *os.File
+	// Say narrates the steps this half of the mode performs. A nil one is
+	// silent, which is what the tests want.
+	Say *report.Narrator
 }
 
 // Up builds the composition for the whole machine.
@@ -88,13 +92,15 @@ func Up(in UpInput) refusal.List {
 		refused.Add("record", "%v", err)
 		return refused
 	}
+	in.Say.Record(state.Path(built.Hash))
 
-	job, problems := mountJob(built, staging)
+	job, problems := MountJob(built, staging)
 	if !problems.Empty() {
 		_ = state.Forget(built.Hash)
 		return problems
 	}
 
+	in.Say.Helper()
 	reply, err := run(in.Sudo, MountArg, job, in.Stderr)
 	switch {
 	case err != nil:
@@ -119,6 +125,8 @@ func Up(in UpInput) refusal.List {
 			reply.Error, strings.Join(reply.Stranded, ", "))
 		return refused
 	}
+
+	in.Say.Mounted(len(reply.Results), staging)
 
 	record.Mounts = merge(record.Mounts, reply.Results)
 	if err := record.Save(); err != nil {
@@ -151,6 +159,9 @@ func Up(in UpInput) refusal.List {
 				"left in place rather than half-removed: run 'camp down'.", built.Live)
 		return problems
 	}
+
+	in.Say.Moved(built.Live)
+	in.Say.Verified(built.Live)
 
 	record.Phase = state.Up
 	if err := record.Save(); err != nil {
@@ -202,9 +213,14 @@ func UnmountJob(record state.Record) Job {
 	return job
 }
 
-// mountJob turns the plan into the instruction the helper executes,
+// MountJob turns the plan into the instruction the helper executes,
 // recording what each operand was when the front end looked at it.
-func mountJob(built plan.Plan, staging string) (Job, refusal.List) {
+//
+// Exported beside UnmountJob so that what crosses into the privileged half
+// can be inspected without elevating anything: it is a plain value, and a
+// test asserting what is *not* in it is worth more than a comment saying
+// the same.
+func MountJob(built plan.Plan, staging string) (Job, refusal.List) {
 	var refused refusal.List
 
 	stagingParts, ok := relativeTo(built.Config.Env, staging)

@@ -28,8 +28,13 @@ func cmdExplain(ctx *context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Every refusal, not only the ones that left no plan behind. explain
+	// describes a tree to whoever is standing in it, and a description
+	// rendered beside a standing refusal describes a tree that will not
+	// exist -- which is worse than no description, because it reads as
+	// authority.
 	built, refused := plan.Prepare(cfg, parseMode(*systemWide))
-	if built.Live == "" {
+	if !refused.Empty() || built.Live == "" {
 		return refusedComposition(refused)
 	}
 	generated, _ := gen.Preview(built)

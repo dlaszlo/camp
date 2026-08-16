@@ -53,7 +53,7 @@ func (r *ready) release() { r.Locks.Release() }
 // only refuse each other. The validation comes second, in the one moment
 // when repairing a repository by hand is safe -- nothing is mounted, and
 // nothing anybody does can land in the wrong place.
-func prepare(cfg config.Config, mode plan.Mode) (*ready, error) {
+func prepare(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, error) {
 	upper, upperOK := repositoryParts(cfg, cfg.Upper)
 	if !upperOK {
 		// The configuration does not name a usable upper; let validation
@@ -72,6 +72,7 @@ func prepare(cfg config.Config, mode plan.Mode) (*ready, error) {
 		// was expected -- has a better message in the validation.
 		return nil, validationError(cfg, mode)
 	}
+	say.Locks(cfg.UpperPath(), cfg.Live())
 
 	built, refused := plan.Prepare(cfg, mode)
 	refused.Extend(runtimeChecks(built, mode))
@@ -79,6 +80,7 @@ func prepare(cfg config.Config, mode plan.Mode) (*ready, error) {
 		pair.Release()
 		return nil, refusedComposition(refused)
 	}
+	say.Checked(len(built.Mounts))
 
 	if err := compose.Directories(built); err != nil {
 		pair.Release()
@@ -90,6 +92,8 @@ func prepare(cfg config.Config, mode plan.Mode) (*ready, error) {
 		pair.Release()
 		return nil, refusedComposition(problems)
 	}
+	_, generates := cfg.GenerationStep()
+	say.Generated(generates)
 
 	return &ready{
 		Config:    cfg,

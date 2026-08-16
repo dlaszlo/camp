@@ -48,7 +48,7 @@ func enter(ctx *context, file string, argv []string) error {
 
 	sweep(ctx, cfg)
 
-	composition, err := prepare(cfg, plan.Namespace)
+	composition, err := prepare(cfg, plan.Namespace, nil)
 	if err != nil {
 		return err
 	}

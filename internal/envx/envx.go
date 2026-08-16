@@ -293,6 +293,14 @@ func NewBase(environ []string, live string) Base {
 // LivePath is camp's authoritative value for the composed tree.
 func (b Base) LivePath() string { return b.live }
 
+// Has reports whether the base already carries a name, which is how a
+// report can say that a declaration replaces something rather than adding
+// it.
+func (b Base) Has(name string) bool {
+	_, ok := b.values[name]
+	return ok
+}
+
 // Resolve produces the bytes the workload will receive.
 func (e Expr) Resolve(base Base) (string, error) {
 	var out strings.Builder

@@ -232,11 +232,32 @@ type Plan struct {
 	// on the code side.
 	Warnings []string
 
+	// Environment is the session's declared environment as a report needs
+	// it: each name, a safe reconstruction of its expression, and whether
+	// it replaces a name the invoking environment already had.
+	//
+	// Never the resolved bytes. Those are built by the process that starts
+	// the workload, reach that workload's environment, and appear in
+	// nothing camp prints or writes.
+	Environment []Variable
+
 	// LowerRoot and UpperRoot are the raw root listings the gate, the
 	// derived protections and the exclude all read. One enumeration, so
 	// they cannot describe different sets.
 	LowerRoot []pathx.Info
 	UpperRoot []pathx.Info
+}
+
+// Variable is one environment declaration, ready to be printed.
+type Variable struct {
+	Name string
+	// Shown is the expression rebuilt for a reader: literal configuration
+	// text as it stands, camp's own live path expanded, and every inherited
+	// insertion as <inherited NAME> rather than its bytes.
+	Shown string
+	// Overrides is true when the invoking environment already had this
+	// name, so the reader can tell replacing from adding.
+	Overrides bool
 }
 
 // Hash derives a composition's identifier from its live path.

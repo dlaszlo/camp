@@ -32,12 +32,9 @@ func cmdUp(ctx *context, args []string) error {
 		return err
 	}
 
-	up, err := prepare(cfg, plan.Privileged)
-	if err != nil {
-		return err
-	}
-	defer up.release()
-
+	// The price of this mode, before the first sudo prompt rather than
+	// after it: nobody should meet a machine-wide read-only workspace as a
+	// surprise.
 	ctx.printf("privileged mode: %s is read-only for the whole machine until "+
 		"'camp down'.\n"+
 		"  One mount table means there is no inside and no outside here: either "+
@@ -45,6 +42,18 @@ func cmdUp(ctx *context, args []string) error {
 		"included, or a process in the tree could write it by absolute path. "+
 		"The protection wins. Normal work runs in the namespace mode, where "+
 		"both promises hold.\n\n", cfg.LowerPath())
+
+	// The steps say what they did as they finish, on stderr. The two modes
+	// differ in what they start and what they make visible, and this is
+	// where that difference is legible: at the moment of use, in the
+	// scrollback, and in whatever captured the run.
+	say := report.Narrate(ctx.err)
+
+	up, err := prepare(cfg, plan.Privileged, say)
+	if err != nil {
+		return err
+	}
+	defer up.release()
 
 	configBytes, _ := os.ReadFile(cfg.Source)
 	refused := privileged.Up(privileged.UpInput{
@@ -54,10 +63,14 @@ func cmdUp(ctx *context, args []string) error {
 		ConfigBytes: configBytes,
 		Sudo:        []string{"sudo"},
 		Stderr:      os.Stderr,
+		Say:         say,
 	})
 	if !refused.Empty() {
 		return failure(ExitFailure, "", "%s", strings.TrimRight(report.Refusals(refused), "\n"))
 	}
+
+	say.MachineWide(cfg.LowerPath(), up.Plan.Live)
+	say.Announcement(cfg.Session)
 
 	ctx.printf("%s is up: %d mounts, all verified at the live path.\n",
 		up.Plan.Live, len(up.Plan.Mounts))

@@ -1,10 +1,13 @@
 package plan
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/envx"
 	"github.com/dlaszlo/camp/internal/gitwire"
 	"github.com/dlaszlo/camp/internal/inventory"
 	"github.com/dlaszlo/camp/internal/pathx"
@@ -73,6 +76,7 @@ func (c *checker) run() (Plan, refusal.List) {
 	}
 
 	built := Build(c.cfg, c.mode, c.live, Hash(c.live), lowerRoot, upperRoot)
+	built.Environment = c.checkSessionEnvironment()
 	c.checkSequence(built)
 	c.checkSourcePolicy()
 	c.checkStoreNames(built)
@@ -97,6 +101,50 @@ func usable(repositories map[string]pathx.Info, names ...string) bool {
 		}
 	}
 	return len(names) > 0
+}
+
+// checkSessionEnvironment resolves the declarations against the
+// environment this command was started with.
+//
+// The configuration reader has already checked everything a file can be
+// checked for on its own. What is left is the one question only the
+// invoking environment can answer -- whether a referenced name is set --
+// and the answer is needed here, while nothing is mounted, rather than in
+// the middle of starting a session.
+//
+// The resolved bytes are dropped on the floor. They are needed by exactly
+// one process, the one that starts the workload, and it resolves them
+// again from its own inherited snapshot. What survives this function is
+// what a report may print: the expression, rebuilt safely.
+//
+// The privileged mode resolves nothing: it starts no workload, so the
+// section is announced there rather than applied, and refusing a
+// reference nothing would read would be refusing a composition for a
+// reason that does not apply to it.
+func (c *checker) checkSessionEnvironment() []Variable {
+	if c.mode != Namespace || !c.cfg.Session.Declares() {
+		return nil
+	}
+	base := envx.NewBase(os.Environ(), c.live)
+
+	declared := make([]Variable, 0, len(c.cfg.Session.Environment))
+	for _, declaration := range c.cfg.Session.Environment {
+		if _, err := declaration.Expr.Resolve(base); err != nil {
+			var single refusal.R
+			if errors.As(err, &single) {
+				c.refused.Push(single)
+			} else {
+				c.refused.Add("environment-undefined", "%v", err)
+			}
+			continue
+		}
+		declared = append(declared, Variable{
+			Name:      declaration.Name,
+			Shown:     declaration.Expr.Display(c.live),
+			Overrides: base.Has(declaration.Name),
+		})
+	}
+	return declared
 }
 
 // checkNames refuses any configured name that cannot be written down
