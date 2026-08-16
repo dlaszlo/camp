@@ -458,7 +458,7 @@ func (e Environment) Workload(live string, argv []string) (Workload, error) {
 	if len(argv) == 0 {
 		argv = []string{shell(envx.Value(e.Env, "SHELL"))}
 	}
-	path, err := envx.Command(argv[0], envx.Value(e.Env, "PATH"))
+	path, err := envx.Command(argv[0], envx.Value(e.Env, "PATH"), live)
 	if err != nil {
 		return Workload{}, err
 	}

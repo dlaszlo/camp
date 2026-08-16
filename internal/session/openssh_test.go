@@ -133,7 +133,7 @@ func TestEachOpenSSHEntryPointReceivesTheUsersConfiguration(t *testing.T) {
 	environment := machine.environment(t)
 
 	for _, program := range []string{"ssh", "scp", "sftp"} {
-		path, err := envx.Command(program, envx.Value(environment, "PATH"))
+		path, err := envx.Command(program, envx.Value(environment, "PATH"), machine.Root)
 		if err != nil {
 			t.Fatalf("%s was not found on the session's PATH: %v", program, err)
 		}
@@ -213,7 +213,7 @@ func TestAnUnusableLauncherFailsLoudly(t *testing.T) {
 
 	// And with no launcher at all, the lookup fails rather than quietly
 	// selecting the host's program: the session's PATH is what decides.
-	if _, err := envx.Command("ssh", filepath.Join(machine.Root, "empty")); err == nil {
+	if _, err := envx.Command("ssh", filepath.Join(machine.Root, "empty"), machine.Root); err == nil {
 		t.Error("a command that is on no directory of the session's PATH was " +
 			"resolved anyway")
 	}

@@ -450,7 +450,8 @@ func Value(environ []string, name string) string {
 	return ""
 }
 
-// Command resolves a workload's argv[0] against an explicit PATH value.
+// Command resolves a workload's argv[0] against an explicit PATH value,
+// as seen from the directory the workload will start in.
 //
 // Never exec.LookPath: that reads the calling process's own PATH, and the
 // calling process here is camp's init, which deliberately does not have
@@ -459,9 +460,18 @@ func Value(environ []string, name string) string {
 // otherwise -- and the composition-owned launcher directory, which is the
 // whole point of being able to declare PATH, would never be reached.
 //
+// Two details keep that promise rather than merely stating it. Every
+// relative PATH element -- an empty one included, which means the working
+// directory the way execvp reads it -- is resolved against `dir`, the
+// directory the workload really starts in, because the process doing the
+// looking here stands somewhere else entirely. And what comes back is
+// always a path with a separator in it, so that the exec cannot fall back
+// to searching: a bare name handed to os/exec is looked up again, against
+// this process's own PATH, which is the very thing being avoided.
+//
 // An argv[0] containing a slash names a file directly and is not searched
 // for, exactly as a shell and execvp treat it.
-func Command(argv0, path string) (string, error) {
+func Command(argv0, path, dir string) (string, error) {
 	if argv0 == "" {
 		return "", refusal.New("workload-empty",
 			"there is no command to run: the first word of the command line is empty.")
@@ -469,12 +479,15 @@ func Command(argv0, path string) (string, error) {
 	if strings.Contains(argv0, "/") {
 		return argv0, nil
 	}
+	if dir == "" {
+		dir = "."
+	}
 	for _, directory := range filepath.SplitList(path) {
-		if directory == "" {
-			// An empty element means the current directory, which is the
-			// composed tree: that is what execvp does with one, and camp does
-			// not quietly mean something else by it.
-			directory = "."
+		if !filepath.IsAbs(directory) {
+			// An empty element is the working directory, and a relative one
+			// is relative to it -- and the working directory that matters is
+			// the workload's, not the one this process happens to stand in.
+			directory = filepath.Join(dir, directory)
 		}
 		candidate := filepath.Join(directory, argv0)
 		if executable(candidate) {

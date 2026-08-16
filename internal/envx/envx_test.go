@@ -359,7 +359,7 @@ func TestABareCommandIsFoundThroughTheGivenPath(t *testing.T) {
 		{"./tool", "./tool"},
 	}
 	for _, test := range cases {
-		got, err := envx.Command(test.argv0, path)
+		got, err := envx.Command(test.argv0, path, root)
 		if err != nil {
 			t.Fatalf("%q was not resolved: %v", test.argv0, err)
 		}
@@ -371,12 +371,83 @@ func TestABareCommandIsFoundThroughTheGivenPath(t *testing.T) {
 	// A path that names no such command, and a name that exists but cannot
 	// be executed, both fail the same way -- and neither prints the path.
 	for _, argv0 := range []string{"absent", "data"} {
-		_, err := envx.Command(argv0, path)
+		_, err := envx.Command(argv0, path, root)
 		if got := rule(t, err); got != "workload-not-found" {
 			t.Fatalf("%q fired %q", argv0, got)
 		}
 		if strings.Contains(err.Error(), first) {
 			t.Errorf("the failure printed the PATH it searched:\n%v", err)
+		}
+	}
+}
+
+// A relative PATH element -- an empty one included, which execvp reads as
+// the working directory -- is resolved against the directory the workload
+// will start in, and never against the one the looking process stands in.
+// Those are two different directories here, and in a real session they
+// always are: the init stands where the command was typed, the workload
+// stands in the composed tree.
+func TestRelativePathElementsAreResolvedAgainstTheWorkloadsDirectory(t *testing.T) {
+	root := testenv.Root(t)
+	elsewhere := testenv.Root(t)
+
+	tool := filepath.Join(root, "tool")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(root, "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "nested"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The process doing the looking stands somewhere with no tool in it.
+	t.Chdir(elsewhere)
+
+	for _, test := range []struct {
+		name  string
+		argv0 string
+		path  string
+		want  string
+	}{
+		{"an empty element at the end", "tool", "/nowhere:", tool},
+		{"an empty element alone", "tool", ":", tool},
+		{"a relative element", "nested", "sub", filepath.Join(nested, "nested")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := envx.Command(test.argv0, test.path, root)
+			if err != nil {
+				t.Fatalf("%q was not found through %q: %v", test.argv0, test.path, err)
+			}
+			if got != test.want {
+				t.Errorf("resolved to %q, wanted %q", got, test.want)
+			}
+		})
+	}
+}
+
+// Whatever comes back has a separator in it. A bare name handed to os/exec
+// is looked up a second time, against the *calling* process's PATH -- so
+// returning one would quietly select the host's command under a plan that
+// says the session's PATH chose it, which is the failure this lookup
+// exists to prevent.
+func TestWhatIsResolvedCanNeverBeSearchedAgain(t *testing.T) {
+	root := testenv.Root(t)
+	if err := os.WriteFile(filepath.Join(root, "tool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+
+	for _, path := range []string{":", ".", "./", "/nowhere:"} {
+		got, err := envx.Command("tool", path, root)
+		if err != nil {
+			t.Fatalf("%q was not found through %q: %v", "tool", path, err)
+		}
+		if !strings.Contains(got, "/") {
+			t.Errorf("%q resolved to the bare name %q, which os/exec would look "+
+				"up again against camp's own PATH", path, got)
 		}
 	}
 }
