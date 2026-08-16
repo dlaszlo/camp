@@ -3,8 +3,11 @@ package mountx_test
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/dlaszlo/camp/internal/testenv"
 )
 
 // A lazy unmount is not in camp, and this is the guard that keeps it out.
@@ -21,7 +24,7 @@ import (
 // non-zero exit. It was --force wearing another name, and the flag that
 // asked for it is deleted.
 func TestNothingInCampCanDetachAMountLazily(t *testing.T) {
-	root := repositoryRoot(t)
+	root := testenv.RepoRoot(t)
 
 	forbidden := []string{"MNT_DETACH", "umount -l", "allowDetach", "--allow-detach"}
 	var offenders []string
@@ -55,7 +58,7 @@ func TestNothingInCampCanDetachAMountLazily(t *testing.T) {
 			}
 			for _, word := range forbidden {
 				if strings.Contains(line, word) {
-					offenders = append(offenders, relative+":"+itoa(number+1)+": "+trimmed)
+					offenders = append(offenders, relative+":"+strconv.Itoa(number+1)+": "+trimmed)
 				}
 			}
 		}
@@ -71,35 +74,5 @@ func TestNothingInCampCanDetachAMountLazily(t *testing.T) {
 			"and still being written through. There is no --force in camp, and "+
 			"this was the same thing under another name.",
 			strings.Join(offenders, "\n  "))
-	}
-}
-
-func itoa(value int) string {
-	if value == 0 {
-		return "0"
-	}
-	var digits []byte
-	for value > 0 {
-		digits = append([]byte{byte('0' + value%10)}, digits...)
-		value /= 10
-	}
-	return string(digits)
-}
-
-func repositoryRoot(t *testing.T) string {
-	t.Helper()
-	directory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(directory, "go.mod")); err == nil {
-			return directory
-		}
-		parent := filepath.Dir(directory)
-		if parent == directory {
-			t.Fatal("no go.mod above the test's directory")
-		}
-		directory = parent
 	}
 }

@@ -24,6 +24,26 @@ import (
 	"github.com/dlaszlo/camp/internal/pathx"
 )
 
+// RepoRoot returns the module's own root, for the tests that read camp's
+// source as data -- the guards that keep a rule true by failing the build.
+func RepoRoot(t *testing.T) string {
+	t.Helper()
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(directory, "go.mod")); err == nil {
+			return directory
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			t.Fatal("no go.mod above the test's directory")
+		}
+		directory = parent
+	}
+}
+
 // Root returns a scratch directory that is removed when the test ends.
 func Root(t *testing.T) string {
 	t.Helper()

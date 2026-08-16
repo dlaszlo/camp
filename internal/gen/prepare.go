@@ -33,6 +33,23 @@ func excludePath(built plan.Plan) string {
 	return filepath.Join(built.Config.UpperPath(), ".git", "info", "exclude")
 }
 
+// expected is camp's own answer to what the generation step must produce.
+//
+// Every entry point below needs exactly this and nothing else: plan
+// prints it, the launcher publishes it, and the process that mounts
+// compares the step's real output against it. Computing it in one place
+// is what makes those three the same answer.
+func expected(built plan.Plan) (Output, refusal.List) {
+	existing, refused := ReadExisting(excludePath(built))
+	if !refused.Empty() {
+		return Output{}, refused
+	}
+	out, problems := git(built, existing)
+	refused.Extend(problems)
+	out.ExcludeFile = built.ExcludeFile()
+	return out, refused
+}
+
 // Prepare runs the generation step and validates everything it produced.
 //
 // The whole phase, in the order the specification fixes: materialise the
@@ -51,13 +68,7 @@ func Prepare(built plan.Plan) (Output, refusal.List) {
 		return withoutAStep(built)
 	}
 
-	existing, problems := ReadExisting(excludePath(built))
-	refused.Extend(problems)
-	if !refused.Empty() {
-		return out, refused
-	}
-
-	refused.Extend(WriteInputs(built, existing))
+	refused.Extend(WriteInputs(built))
 	if !refused.Empty() {
 		return out, refused
 	}
@@ -106,23 +117,12 @@ func Prepare(built plan.Plan) (Output, refusal.List) {
 // such a configuration the islands shown are what camp's own reading of
 // git says, and the report says as much.
 func Preview(built plan.Plan) (Output, refusal.List) {
-	var refused refusal.List
-	var out Output
-
 	step, has := built.Config.GenerationStep()
 	if !has {
 		return withoutAStep(built)
 	}
 
-	existing, problems := ReadExisting(excludePath(built))
-	refused.Extend(problems)
-	if !refused.Empty() {
-		return out, refused
-	}
-
-	out, problems = git(built, existing)
-	refused.Extend(problems)
-	out.ExcludeFile = built.ExcludeFile()
+	out, refused := expected(built)
 	if step.Kind == config.Generate {
 		out.Notes = append(out.Notes,
 			"this configuration runs its own generator ("+step.Command[0]+"), "+
@@ -147,41 +147,29 @@ func Preview(built plan.Plan) (Output, refusal.List) {
 // generator's payload to be byte-identical to that assembly, so there is
 // exactly one right answer and camp can compute it.
 func Adopt(built plan.Plan) (Output, refusal.List) {
-	var refused refusal.List
-	var out Output
-
 	step, has := built.Config.GenerationStep()
 	if !has {
 		return withoutAStep(built)
 	}
 
-	existing, problems := ReadExisting(excludePath(built))
-	refused.Extend(problems)
+	want, refused := expected(built)
 	if !refused.Empty() {
-		return out, refused
+		return Output{}, refused
 	}
 
-	expected, problems := git(built, existing)
-	refused.Extend(problems)
-	if !refused.Empty() {
-		return out, refused
-	}
-
-	switch step.Kind {
-	case config.GitExclude:
-		out = expected
-	case config.Generate:
+	out := want
+	if step.Kind == config.Generate {
 		produced, problems := ReadOutputs(built)
 		refused.Extend(problems)
 		if !refused.Empty() {
-			return out, refused
+			return Output{}, refused
 		}
 		out = produced
-		out.Patterns = expected.Patterns
+		out.Patterns = want.Patterns
+		out.ExcludeFile = want.ExcludeFile
 	}
-	out.ExcludeFile = built.ExcludeFile()
 
-	refused.Extend(Validate(built, out, expected.Exclude))
+	refused.Extend(Validate(built, out, want.Exclude))
 	return out, refused
 }
 

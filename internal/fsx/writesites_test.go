@@ -4,8 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/dlaszlo/camp/internal/testenv"
 )
 
 // The first invariant -- camp only composes, it never modifies a
@@ -37,7 +40,7 @@ var allowed = []string{
 }
 
 func TestEveryFilesystemWriteGoesThroughOnePackage(t *testing.T) {
-	root := repositoryRoot(t)
+	root := testenv.RepoRoot(t)
 
 	var offenders []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -75,7 +78,7 @@ func TestEveryFilesystemWriteGoesThroughOnePackage(t *testing.T) {
 			}
 			if writeCalls.MatchString(line) || openWrite.MatchString(line) {
 				offenders = append(offenders,
-					relative+":"+itoa(number+1)+": "+trimmed)
+					relative+":"+strconv.Itoa(number+1)+": "+trimmed)
 			}
 		}
 		return nil
@@ -92,36 +95,5 @@ func TestEveryFilesystemWriteGoesThroughOnePackage(t *testing.T) {
 			"the code rather than a promise. If one of these really belongs "+
 			"where it is, move it into fsx or add it to the allowed list with "+
 			"the reason.", strings.Join(offenders, "\n  "))
-	}
-}
-
-func itoa(value int) string {
-	if value == 0 {
-		return "0"
-	}
-	var digits []byte
-	for value > 0 {
-		digits = append([]byte{byte('0' + value%10)}, digits...)
-		value /= 10
-	}
-	return string(digits)
-}
-
-// repositoryRoot walks up from the test's directory to the module root.
-func repositoryRoot(t *testing.T) string {
-	t.Helper()
-	directory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(directory, "go.mod")); err == nil {
-			return directory
-		}
-		parent := filepath.Dir(directory)
-		if parent == directory {
-			t.Fatal("no go.mod above the test's directory")
-		}
-		directory = parent
 	}
 }

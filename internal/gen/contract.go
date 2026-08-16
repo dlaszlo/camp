@@ -66,8 +66,12 @@ func PathsFor(built plan.Plan) Paths {
 // Every list uses the one encoding camp writes every record with, so a
 // name containing a tab, a newline or bytes that are not valid UTF-8
 // survives the trip in both directions.
-func WriteInputs(built plan.Plan, existing []byte) refusal.List {
-	var refused refusal.List
+func WriteInputs(built plan.Plan) refusal.List {
+	existing, refused := ReadExisting(
+		filepath.Join(built.Config.UpperPath(), ".git", "info", "exclude"))
+	if !refused.Empty() {
+		return refused
+	}
 
 	work := fsx.Work(built.Work)
 	gen, err := work.Sub("gen")

@@ -37,7 +37,20 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func launch(t *testing.T, argv []string, stdout, stderr *os.File) (int, error) {
+// ready is a composition prepared exactly as the launcher prepares one:
+// validated, generated, expanded, with both locks held.
+type ready struct {
+	Env     *testenv.Env
+	Config  config.Config
+	Plan    plan.Plan
+	Exclude []byte
+	Locks   *locks.Pair
+}
+
+// prepare does the launcher's first four steps. Every test here needs
+// all of them, and a test that skipped one would be measuring a session
+// camp would never start.
+func prepare(t *testing.T) *ready {
 	t.Helper()
 
 	env := testenv.NewEnv(t)
@@ -53,7 +66,6 @@ func launch(t *testing.T, argv []string, stdout, stderr *os.File) (int, error) {
 	if !problems.Empty() {
 		t.Fatalf("generation was refused:\n%v", problems)
 	}
-	built = gen.Expand(built, generated)
 
 	pair, err := takeLocks(cfg)
 	if err != nil {
@@ -61,22 +73,38 @@ func launch(t *testing.T, argv []string, stdout, stderr *os.File) (int, error) {
 	}
 	t.Cleanup(pair.Release)
 
-	devnull, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { devnull.Close() })
-
-	return session.Launch(session.Options{
+	return &ready{
+		Env:     env,
 		Config:  cfg,
-		Plan:    built,
+		Plan:    gen.Expand(built, generated),
 		Exclude: generated.Exclude,
-		Argv:    argv,
 		Locks:   pair,
-		Stdin:   devnull,
+	}
+}
+
+// start runs the session and returns the workload's exit status.
+func (r *ready) start(argv []string, stdin, stdout, stderr *os.File) (int, error) {
+	return session.Launch(session.Options{
+		Config:  r.Config,
+		Plan:    r.Plan,
+		Exclude: r.Exclude,
+		Argv:    argv,
+		Locks:   r.Locks,
+		Stdin:   stdin,
 		Stdout:  stdout,
 		Stderr:  stderr,
 	})
+}
+
+// devnull is the stdio a test hands a workload that has nothing to say.
+func devnull(t *testing.T) *os.File {
+	t.Helper()
+	file, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { file.Close() })
+	return file
 }
 
 func takeLocks(cfg config.Config) (*locks.Pair, error) {
@@ -111,13 +139,9 @@ func skipUnlessNamespaced(t *testing.T, err error) {
 // The launcher waits for the workload, not for the init, and exits with
 // the workload's own status.
 func TestAForegroundCommandsExitStatusIsPropagated(t *testing.T) {
-	devnull, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer devnull.Close()
-
-	status, err := launch(t, []string{"/bin/sh", "-c", "exit 7"}, devnull, os.Stderr)
+	quiet := devnull(t)
+	status, err := prepare(t).start(
+		[]string{"/bin/sh", "-c", "exit 7"}, quiet, quiet, os.Stderr)
 	skipUnlessNamespaced(t, err)
 	if err != nil {
 		t.Fatalf("the session failed: %v", err)
@@ -131,13 +155,9 @@ func TestAForegroundCommandsExitStatusIsPropagated(t *testing.T) {
 // A command that dies on a signal reports 128 plus the signal, the way a
 // shell does.
 func TestASignalledWorkloadReportsTheShellsConvention(t *testing.T) {
-	devnull, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer devnull.Close()
-
-	status, err := launch(t, []string{"/bin/sh", "-c", "kill -TERM $$"}, devnull, os.Stderr)
+	quiet := devnull(t)
+	status, err := prepare(t).start(
+		[]string{"/bin/sh", "-c", "kill -TERM $$"}, quiet, quiet, os.Stderr)
 	skipUnlessNamespaced(t, err)
 	if err != nil {
 		t.Fatalf("the session failed: %v", err)
@@ -149,50 +169,16 @@ func TestASignalledWorkloadReportsTheShellsConvention(t *testing.T) {
 
 // The composition really exists inside, and nothing of it exists outside.
 func TestTheCompositionIsBuiltInsideAndInvisibleOutside(t *testing.T) {
-	env := testenv.NewEnv(t)
-	cfg := env.Config(t, "")
+	session := prepare(t)
 
-	built, refused := plan.Prepare(cfg, plan.Namespace)
-	if !refused.Empty() {
-		t.Fatalf("the fixture was refused:\n%v", refused)
-	}
-	if err := compose.Directories(built); err != nil {
-		t.Fatal(err)
-	}
-	generated, problems := gen.Prepare(built)
-	if !problems.Empty() {
-		t.Fatalf("generation was refused:\n%v", problems)
-	}
-	built = gen.Expand(built, generated)
-
-	pair, err := takeLocks(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pair.Release()
-
-	output, err := os.CreateTemp(env.Path, "out-")
+	output, err := os.CreateTemp(session.Env.Path, "out-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer output.Close()
 
-	devnull, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer devnull.Close()
-
-	status, err := session.Launch(session.Options{
-		Config:  cfg,
-		Plan:    built,
-		Exclude: generated.Exclude,
-		Argv:    []string{"/bin/sh", "-c", "ls -a"},
-		Locks:   pair,
-		Stdin:   devnull,
-		Stdout:  output,
-		Stderr:  os.Stderr,
-	})
+	quiet := devnull(t)
+	status, err := session.start([]string{"/bin/sh", "-c", "ls -a"}, quiet, output, os.Stderr)
 	skipUnlessNamespaced(t, err)
 	if err != nil || status != 0 {
 		t.Fatalf("the session failed: status=%d err=%v", status, err)
@@ -209,7 +195,7 @@ func TestTheCompositionIsBuiltInsideAndInvisibleOutside(t *testing.T) {
 	}
 
 	// And outside, the live directory is empty and always was.
-	entries, err := os.ReadDir(env.Live)
+	entries, err := os.ReadDir(session.Env.Live)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,50 +209,17 @@ func TestTheCompositionIsBuiltInsideAndInvisibleOutside(t *testing.T) {
 // the locks -- not the workload, whose habits with inherited descriptors
 // are nobody's to rely on.
 func TestADaemonisedWorkloadReturnsWhileTheInitHoldsTheLocks(t *testing.T) {
-	env := testenv.NewEnv(t)
-	cfg := env.Config(t, "")
+	session := prepare(t)
+	quiet := devnull(t)
 
-	built, refused := plan.Prepare(cfg, plan.Namespace)
-	if !refused.Empty() {
-		t.Fatalf("the fixture was refused:\n%v", refused)
-	}
-	if err := compose.Directories(built); err != nil {
-		t.Fatal(err)
-	}
-	generated, problems := gen.Prepare(built)
-	if !problems.Empty() {
-		t.Fatalf("generation was refused:\n%v", problems)
-	}
-	built = gen.Expand(built, generated)
-
-	pair, err := takeLocks(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	devnull, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer devnull.Close()
-
-	marker := filepath.Join(env.Path, "still-running")
+	marker := filepath.Join(session.Env.Path, "still-running")
 	// setsid detaches it from this process group and it closes its
 	// descriptors, exactly as a tmux server does.
 	daemon := []string{"/bin/sh", "-c",
 		"setsid /bin/sh -c 'sleep 20 >/dev/null 2>&1 </dev/null' & echo started > " + marker}
 
 	started := time.Now()
-	status, err := session.Launch(session.Options{
-		Config:  cfg,
-		Plan:    built,
-		Exclude: generated.Exclude,
-		Argv:    daemon,
-		Locks:   pair,
-		Stdin:   devnull,
-		Stdout:  devnull,
-		Stderr:  os.Stderr,
-	})
+	status, err := session.start(daemon, quiet, quiet, os.Stderr)
 	skipUnlessNamespaced(t, err)
 	if err != nil {
 		t.Fatalf("the session failed: %v", err)
@@ -283,8 +236,8 @@ func TestADaemonisedWorkloadReturnsWhileTheInitHoldsTheLocks(t *testing.T) {
 
 	// The launcher has returned. The init is still in there, and a second
 	// composition on the same upper must still be refused.
-	pair.Release()
-	if _, err := takeLocks(cfg); err == nil {
+	session.Locks.Release()
+	if _, err := takeLocks(session.Config); err == nil {
 		t.Error("a second composition was accepted while the session was still " +
 			"running.\nThe init is camp resident as pid 1 of the namespace and it " +
 			"holds the locks: a daemonising workload routinely closes the " +
