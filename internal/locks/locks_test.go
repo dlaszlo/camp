@@ -1,0 +1,351 @@
+package locks_test
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/dlaszlo/camp/internal/locks"
+	"github.com/dlaszlo/camp/internal/refusal"
+	"github.com/dlaszlo/camp/internal/testenv"
+)
+
+// The tests need a second process, because a second flock from the same
+// process succeeds -- the lock belongs to the open file description, and
+// re-locking one's own is how a lock is upgraded, not a conflict. The
+// test binary re-executes itself for that.
+const (
+	childEnv  = "CAMP_LOCK_CHILD"
+	holdEnv   = "CAMP_LOCK_HOLD"
+	targetEnv = "CAMP_LOCK_TARGET"
+	baseEnv   = "CAMP_LOCK_BASE"
+)
+
+func TestMain(m *testing.M) {
+	switch os.Getenv(childEnv) {
+	case "try":
+		os.Exit(childTry())
+	case "hold":
+		os.Exit(childHold())
+	}
+	os.Exit(m.Run())
+}
+
+// childTry attempts the lock once and reports the answer through its exit
+// status: 0 taken, 3 refused as busy, 1 anything else.
+func childTry() int {
+	base := os.Getenv(baseEnv)
+	target := os.Getenv(targetEnv)
+	held, err := locks.Take(locks.Upper, base, []string{target}, filepath.Join(base, target))
+	if err == nil {
+		held.Release()
+		return 0
+	}
+	os.Stderr.WriteString(err.Error() + "\n")
+	var single refusal.R
+	if errors.As(err, &single) && strings.HasSuffix(single.Rule, "-locked") {
+		return 3
+	}
+	return 1
+}
+
+// childHold takes the lock and waits to be killed, so the parent can see
+// what happens when a holder dies without releasing anything.
+func childHold() int {
+	base := os.Getenv(baseEnv)
+	target := os.Getenv(targetEnv)
+	held, err := locks.Take(locks.Upper, base, []string{target}, filepath.Join(base, target))
+	if err != nil {
+		return 1
+	}
+	defer held.Release()
+	os.Stdout.WriteString("held\n")
+	os.Stdout.Close()
+	time.Sleep(2 * time.Minute)
+	return 0
+}
+
+func try(t *testing.T, base, target string) int {
+	t.Helper()
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), childEnv+"=try", baseEnv+"="+base, targetEnv+"="+target)
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	if err == nil {
+		return 0
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return exit.ExitCode()
+	}
+	t.Fatalf("running the child: %v", err)
+	return -1
+}
+
+func env(t *testing.T) (string, string) {
+	t.Helper()
+	root := testenv.Root(t)
+	testenv.MkDir(t, filepath.Join(root, "code"))
+	testenv.MkDir(t, filepath.Join(root, "live"))
+	return root, filepath.Join(root, "code")
+}
+
+// The measured double-run scenario: two concurrent runs each composed the
+// same upper. Now the second one is refused.
+func TestASecondCompositionOnTheSameUpperIsRefused(t *testing.T) {
+	root, code := env(t)
+
+	held, err := locks.Take(locks.Upper, root, []string{"code"}, code)
+	if err != nil {
+		t.Fatalf("the first lock should have been taken: %v", err)
+	}
+	defer held.Release()
+
+	if code := try(t, root, "code"); code != 3 {
+		t.Fatalf("the second attempt exited %d; it should have been refused as busy", code)
+	}
+}
+
+// The identity is the inode, not a lock file and not a string. A lock
+// file under the environment directory meant two environment directories
+// naming the same upper locked two different inodes and neither saw the
+// other.
+func TestTheSameDirectoryReachedByAnotherPathIsTheSameLock(t *testing.T) {
+	root, code := env(t)
+	alias := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(alias) })
+
+	held, err := locks.Take(locks.Upper, root, []string{"code"}, code)
+	if err != nil {
+		t.Fatalf("the first lock should have been taken: %v", err)
+	}
+	defer held.Release()
+
+	if code := try(t, alias, "code"); code != 3 {
+		t.Fatalf("a lock taken through a second path to the same directory "+
+			"exited %d; every path to one directory has to be one lock", code)
+	}
+}
+
+func TestTwoDifferentDirectoriesLockIndependently(t *testing.T) {
+	root, code := env(t)
+
+	held, err := locks.Take(locks.Upper, root, []string{"code"}, code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+
+	if code := try(t, root, "live"); code != 0 {
+		t.Fatalf("locking a different directory exited %d; several compositions "+
+			"with different uppers and different live paths stay fine", code)
+	}
+}
+
+// A second composition on the same live directory is refused too, and the
+// two locks are taken upper first, live second, so racing camps can only
+// refuse each other rather than deadlock.
+func TestBothLocksAreHeldAtOnceAndTheSecondFailureReleasesTheFirst(t *testing.T) {
+	root, code := env(t)
+	live := filepath.Join(root, "live")
+
+	pair, err := locks.TakePair(root, []string{"code"}, []string{"live"}, code, live)
+	if err != nil {
+		t.Fatalf("one process should be able to hold both: %v", err)
+	}
+
+	if got := try(t, root, "live"); got != 3 {
+		t.Fatalf("a second composition on the same live directory exited %d", got)
+	}
+	pair.Release()
+
+	// After release both are free again.
+	if got := try(t, root, "code"); got != 0 {
+		t.Errorf("the upper stayed locked after release (exit %d)", got)
+	}
+	if got := try(t, root, "live"); got != 0 {
+		t.Errorf("the live directory stayed locked after release (exit %d)", got)
+	}
+}
+
+// A refusal leaves nothing held. The upper is taken first, so a live
+// directory that is already busy has to give the upper back.
+func TestTheSecondLockFailingReleasesTheFirst(t *testing.T) {
+	root, code := env(t)
+	live := filepath.Join(root, "live")
+
+	blocker := hold(t, root, "live")
+
+	if _, err := locks.TakePair(root, []string{"code"}, []string{"live"}, code, live); err == nil {
+		t.Fatal("the pair was taken although the live directory was busy")
+	}
+
+	// The upper must be free again even though this process took it first.
+	if got := try(t, root, "code"); got != 0 {
+		t.Errorf("the upper lock survived a failed pair (exit %d); a refusal has "+
+			"to leave nothing held", got)
+	}
+
+	_ = blocker.Process.Signal(syscall.SIGKILL)
+	_ = blocker.Wait()
+}
+
+// hold starts a child that takes one lock and waits, and waits until it
+// reports that it has it.
+func hold(t *testing.T, base, target string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), childEnv+"=hold", baseEnv+"="+base, targetEnv+"="+target)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_ = cmd.Wait()
+	})
+	buffer := make([]byte, 5)
+	if _, err := out.Read(buffer); err != nil {
+		t.Fatalf("the holder never reported holding %s: %v", target, err)
+	}
+	return cmd
+}
+
+// The kernel releases the lock when the holder dies. That is the whole
+// reason the guard is something held rather than something written: a
+// record can go stale after kill -9 and would then need exactly the
+// --force this design refuses.
+func TestTheLockIsReleasedWhenTheHolderIsKilled(t *testing.T) {
+	root, _ := env(t)
+
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), childEnv+"=hold", baseEnv+"="+root, targetEnv+"=code")
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 5)
+	if _, err := out.Read(buffer); err != nil {
+		t.Fatalf("the holder never reported holding the lock: %v", err)
+	}
+
+	if got := try(t, root, "code"); got != 3 {
+		t.Fatalf("while the holder lives the lock should be refused (exit %d)", got)
+	}
+
+	if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+
+	if got := try(t, root, "code"); got != 0 {
+		t.Fatalf("after kill -9 the lock should be gone (exit %d); there is no "+
+			"stale lock to clear and no --force to reach for", got)
+	}
+}
+
+// Locking the code repository must not touch it: camp never modifies a
+// repository, and an flock that left a trace would break that invariant
+// on the very directory it is protecting.
+func TestLockingWritesNothingIntoTheDirectory(t *testing.T) {
+	root, code := env(t)
+	testenv.Write(t, filepath.Join(code, "file"), "x\n")
+
+	before, err := os.Stat(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEntries, err := os.ReadDir(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	held, err := locks.Take(locks.Upper, root, []string{"code"}, code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held.Release()
+
+	after, err := os.Stat(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterEntries, err := os.ReadDir(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Error("the directory's mtime changed; locking has to leave no trace")
+	}
+	if len(beforeEntries) != len(afterEntries) {
+		t.Error("an entry appeared in the directory; there is no lock file anywhere")
+	}
+}
+
+// The refusal has to name what holds the directory, read from /proc and
+// never from any program's output.
+func TestTheRefusalNamesTheHolder(t *testing.T) {
+	root, code := env(t)
+
+	held, err := locks.Take(locks.Upper, root, []string{"code"}, code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+
+	holders := locks.Holders(code)
+	if len(holders) == 0 {
+		t.Fatal("no holder was found for a directory this process is holding")
+	}
+	found := false
+	for _, holder := range holders {
+		if holder.PID == os.Getpid() {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the holders found were %v, and this process (%d) is not among them",
+			holders, os.Getpid())
+	}
+
+	// And the message a second camp would print.
+	_, err = locks.Take(locks.Upper, root, []string{"code"}, code)
+	if err == nil {
+		t.Skip("this process can re-lock its own description; the message is " +
+			"exercised by the child tests")
+	}
+}
+
+func TestTheBusyMessageSaysHowToGetIn(t *testing.T) {
+	root, code := env(t)
+	held, err := locks.Take(locks.Upper, root, []string{"code"}, code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), childEnv+"=try", baseEnv+"="+root, targetEnv+"=code")
+	output, _ := cmd.CombinedOutput()
+	message := string(output)
+
+	for _, want := range []string{code, "tmux", "second one", "--force"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("the refusal does not mention %q:\n\n%s", want, message)
+		}
+	}
+}

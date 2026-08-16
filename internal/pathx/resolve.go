@@ -163,6 +163,33 @@ func typeOf(mode uint32) Type {
 	}
 }
 
+// OpenBeneath opens base/parts with the given flags, following no
+// symlink anywhere and never leaving base.
+//
+// The descriptor is what later work hangs off: the flock that guarantees
+// one composition per directory, and the mount made by descriptor so that
+// the object checked is the object mounted.
+func OpenBeneath(base string, parts []string, flags int) (int, error) {
+	if len(parts) == 0 {
+		return unix.Open(base, flags|unix.O_CLOEXEC, 0)
+	}
+	dir, err := openDirBeneath(base, parts[:len(parts)-1])
+	if err != nil {
+		return -1, err
+	}
+	defer unix.Close(dir)
+
+	how := &unix.OpenHow{
+		Flags:   uint64(flags) | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_BENEATH,
+	}
+	fd, err := unix.Openat2(dir, parts[len(parts)-1], how)
+	if err != nil {
+		return -1, translate(err, base, parts[len(parts)-1])
+	}
+	return fd, nil
+}
+
 // ReadDirBeneath lists base/parts, following no symlink on the way and
 // reporting each entry's own type without following it either.
 //
