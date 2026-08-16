@@ -57,7 +57,7 @@ func cmdUp(ctx *context, args []string) error {
 	defer up.release()
 
 	configBytes, _ := os.ReadFile(cfg.Source)
-	refused := privileged.Up(privileged.UpInput{
+	left, refused := privileged.Up(privileged.UpInput{
 		Plan:        up.Plan,
 		Exclude:     up.Generated.Exclude,
 		Tool:        Version,
@@ -70,8 +70,24 @@ func cmdUp(ctx *context, args []string) error {
 		// Said as plainly as the steps that led here. A run that ends with a
 		// sentence about what is not mounted, in the same shape as seven
 		// lines about what went right, reads as a success.
-		say.Failed("camp up failed. Nothing of this composition is mounted, and "+
-			"%s is writable again.", cfg.LowerPath())
+		//
+		// And it says what is true of this failure rather than of failure in
+		// general: the exits after the move leave the composition standing on
+		// purpose, so a fixed sentence about a clean machine told the reader
+		// the workspace was writable while it was held read-only, three lines
+		// above the refusal saying it was still mounted.
+		switch left {
+		case privileged.Clean:
+			say.Failed("camp up failed. Nothing of this composition is mounted, and "+
+				"%s is writable again.", cfg.LowerPath())
+		case privileged.Standing:
+			say.Failed("camp up failed, and what it built is still on the machine: "+
+				"%s stays read-only until it comes down.", cfg.LowerPath())
+		default:
+			say.Failed("camp up failed, and camp cannot say what it left behind: "+
+				"%s may still be read-only. 'camp status' says what is there, and "+
+				"'camp down' removes it.", cfg.LowerPath())
+		}
 		return failure(ExitFailure, "", "%s", strings.TrimRight(report.Refusals(refused), "\n"))
 	}
 

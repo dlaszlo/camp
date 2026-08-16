@@ -66,21 +66,44 @@ type UpInput struct {
 	Say *report.Narrator
 }
 
+// Left says what is on the machine now. Only Up knows: the same failure
+// list is reached from exits that removed everything again and from exits
+// that deliberately left the composition standing, and the sentence that
+// closes a failed run has to be true about the machine the reader is
+// sitting at.
+type Left int
+
+const (
+	// Clean: nothing of this composition is mounted, and the workspace is
+	// not held read-only.
+	Clean Left = iota
+	// Standing: mounts are on the machine and the workspace is read-only
+	// for it. This is what success looks like, and also what the failures
+	// after the move look like -- they leave the tree in place rather than
+	// half-removing it.
+	Standing
+	// Uncertain: camp could not find out. The helper died without a reply,
+	// so it may have stopped before its first mount or after its last, and
+	// guessing either way would be a sentence about a machine nobody
+	// looked at.
+	Uncertain
+)
+
 // Up builds the composition for the whole machine.
-func Up(in UpInput) refusal.List {
+func Up(in UpInput) (Left, refusal.List) {
 	var refused refusal.List
 	built := in.Plan
 
 	if err := compose.Directories(built); err != nil {
 		refused.Add("directories", "%v", err)
-		return refused
+		return Clean, refused
 	}
 
 	work := fsx.Work(built.Work)
 	staging, err := work.MkdirAllMode(0o700, "staging")
 	if err != nil {
 		refused.Add("staging", "%v", err)
-		return refused
+		return Clean, refused
 	}
 
 	// The record goes down before anything is mounted, carrying the whole
@@ -90,14 +113,14 @@ func Up(in UpInput) refusal.List {
 	record.Staging = staging
 	if err := record.Save(); err != nil {
 		refused.Add("record", "%v", err)
-		return refused
+		return Clean, refused
 	}
 	in.Say.Record(state.Path(built.Hash))
 
 	job, problems := MountJob(built, staging, in.Exclude)
 	if !problems.Empty() {
 		_ = state.Forget(built.Hash)
-		return problems
+		return Clean, problems
 	}
 
 	in.Say.Helper()
@@ -107,14 +130,14 @@ func Up(in UpInput) refusal.List {
 		refused.Add("helper", "%v", err)
 		record.Phase = state.Partial
 		_ = record.Save()
-		return refused
+		return Uncertain, refused
 	case reply.Error != "":
 		if reply.RolledBack {
 			_ = state.Forget(built.Hash)
 			refused.Add("mount-failed",
 				"%s\nNothing is mounted: the helper removed everything it had "+
 					"made before it stopped.", reply.Error)
-			return refused
+			return Clean, refused
 		}
 		record.Phase = state.Partial
 		_ = record.Save()
@@ -123,7 +146,7 @@ func Up(in UpInput) refusal.List {
 				"Run 'camp status' to see what is there, and 'camp down' to remove "+
 				"it once whatever is holding it has let go.",
 			reply.Error, strings.Join(reply.Stranded, ", "))
-		return refused
+		return Standing, refused
 	}
 
 	in.Say.Mounted(len(reply.Results), staging)
@@ -131,7 +154,7 @@ func Up(in UpInput) refusal.List {
 	record.Mounts = merge(record.Mounts, reply.Results)
 	if err := record.Save(); err != nil {
 		refused.Add("record", "%v", err)
-		return refused
+		return Standing, refused
 	}
 
 	// The second pass, and the one that decides: the move is the moment
@@ -140,7 +163,7 @@ func Up(in UpInput) refusal.List {
 	table, err := mountinfo.Read(mountinfo.Self)
 	if err != nil {
 		refused.Add("mount-table-unreadable", "%v", err)
-		return refused
+		return Standing, refused
 	}
 	problems = verify.Run(verify.Input{
 		Plan:      built,
@@ -159,7 +182,7 @@ func Up(in UpInput) refusal.List {
 			"The composition is mounted at %s and did not pass the check that "+
 				"runs after it becomes visible to the rest of the machine. It is "+
 				"left in place rather than half-removed: run 'camp down'.", built.Live)
-		return problems
+		return Standing, problems
 	}
 
 	in.Say.Moved(staging, built.Live)
@@ -169,7 +192,7 @@ func Up(in UpInput) refusal.List {
 	if err := record.Save(); err != nil {
 		refused.Add("record", "%v", err)
 	}
-	return refused
+	return Standing, refused
 }
 
 // Down takes a recorded composition apart.
