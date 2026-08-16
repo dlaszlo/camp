@@ -133,6 +133,33 @@ func overlapRefusal(cfg config.Config, lowerPath, upperPath string, rel pathx.Re
 			"would be unreachable from the composed tree."
 	}
 
+	// Inside an allow-listed directory there is no knob to point at.
+	// allow_overlap names root entries, and the check deliberately moves
+	// one level down rather than switching off -- so the advice that fits
+	// the root case sends the reader to a setting that is already there
+	// and would change nothing. Measured on a real composition: after a
+	// copy-up through an allow-listed directory, the refusal named the
+	// file and then advised adding the directory, which was allow-listed
+	// already.
+	if len(rel.Components()) > 1 {
+		return refusal.New("overlap",
+			"%q exists in both repositories, inside the allow-listed directory "+
+				"%q.\n"+
+				"  workspace: %s (%s)\n"+
+				"  code:      %s (%s)\n"+
+				"%s\n"+
+				"This is what a copy-up leaves behind: a write through the composed "+
+				"tree copied the workspace's file into the code repository, and both "+
+				"stand there now. allow_overlap cannot name this one -- it names "+
+				"root entries, and inside an allow-listed directory the check moves "+
+				"one level down rather than switching off, because this trace is "+
+				"the thing it exists to catch.\nDecide which copy is the real one, "+
+				"and remove or rename the other. Nothing is mounted, so both are "+
+				"safe to do right now.",
+			path, rel.First(), lowerFull, lower.Type, upperFull, upper.Type,
+			consequence)
+	}
+
 	return refusal.New("overlap",
 		"%q exists in both repositories and allow_overlap does not name it.\n"+
 			"  workspace: %s (%s)\n"+
