@@ -1,0 +1,285 @@
+// Package inventory is the accepted snapshot of both repositories' root
+// entries, and the comparison camp makes against it at every up.
+//
+// It exists because the two defences that keep the workspace out of the
+// code repository -- the derived read-only binds and the generated
+// exclude -- are both derived from the root listing at the moment of
+// mounting. A new name appearing at the workspace root is therefore a
+// change to what camp protects, and it should be a change somebody
+// decided rather than one that happened.
+//
+// So the snapshot is generated **only** by an explicit `camp accept`, and
+// never by `up`. A refresh that happened silently on the way past would
+// swallow the very signal the file exists to raise.
+//
+// At up a new lower root entry blocks and a type change blocks; a
+// disappeared entry or a change on the upper side warns. At down, and at
+// the end of a namespace session, the same comparison runs and only
+// reports -- the end of a session is when the cause is still fresh, and a
+// teardown that refused would wall the user in.
+//
+// It shares its enumeration with the exclude, so the two cannot drift
+// apart and start describing different sets.
+package inventory
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/dlaszlo/camp/internal/enc"
+	"github.com/dlaszlo/camp/internal/fsx"
+	"github.com/dlaszlo/camp/internal/pathx"
+	"github.com/dlaszlo/camp/internal/refusal"
+)
+
+// FileName is the snapshot, beside the configuration: intent in one file,
+// snapshot in the other.
+const FileName = "inventory"
+
+// Side says which repository an entry came from.
+type Side string
+
+const (
+	// Lower is the workspace.
+	Lower Side = "lower"
+	// Upper is the code repository.
+	Upper Side = "upper"
+)
+
+// Entry is one root name, with its type and -- for a symlink -- what it
+// points at.
+type Entry struct {
+	Side Side
+	Type pathx.Type
+	Name string
+	Link string
+}
+
+// Key identifies an entry across two snapshots.
+func (e Entry) Key() string { return string(e.Side) + "\x00" + e.Name }
+
+// Line renders the record.
+func (e Entry) Line() string {
+	if e.Type == pathx.Symlink {
+		return enc.Line(string(e.Side), string(e.Type), e.Name, e.Link)
+	}
+	return enc.Line(string(e.Side), string(e.Type), e.Name)
+}
+
+// Snapshot is one accepted state of both roots.
+type Snapshot struct {
+	Entries []Entry
+}
+
+// Path is where the snapshot lives for an environment.
+func Path(campDir string) string { return filepath.Join(campDir, FileName) }
+
+// Take reads both roots and builds a snapshot.
+func Take(lowerRoot, upperRoot []pathx.Info) Snapshot {
+	snapshot := Snapshot{}
+	for _, entry := range lowerRoot {
+		snapshot.Entries = append(snapshot.Entries, from(Lower, entry))
+	}
+	for _, entry := range upperRoot {
+		snapshot.Entries = append(snapshot.Entries, from(Upper, entry))
+	}
+	return snapshot
+}
+
+func from(side Side, info pathx.Info) Entry {
+	return Entry{Side: side, Type: info.Type, Name: info.Name, Link: info.Link}
+}
+
+// Bytes renders the whole file, byte-sorted so that its diff is
+// reviewable.
+func (s Snapshot) Bytes() []byte {
+	lines := make([]string, 0, len(s.Entries))
+	for _, entry := range s.Entries {
+		lines = append(lines, entry.Line())
+	}
+	enc.Sort(lines)
+	return enc.Document(lines)
+}
+
+// Save writes the snapshot beside the configuration.
+func (s Snapshot) Save(campDir string) error {
+	area := fsx.Camp(campDir)
+	if err := area.Ensure(0o755); err != nil {
+		return err
+	}
+	return area.Write(FileName, s.Bytes(), 0o644)
+}
+
+// Load reads the accepted snapshot.
+//
+// Absence is reported separately from a parse failure: the first means
+// "run camp accept", the second means the file is damaged and camp will
+// not guess at what it used to say.
+func Load(campDir string) (Snapshot, bool, error) {
+	data, err := os.ReadFile(Path(campDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Snapshot{}, false, nil
+		}
+		return Snapshot{}, false, fmt.Errorf("reading %s: %w", Path(campDir), err)
+	}
+
+	records, err := enc.Parse(data)
+	if err != nil {
+		return Snapshot{}, true, fmt.Errorf("%s: %w", Path(campDir), err)
+	}
+
+	snapshot := Snapshot{}
+	for number, record := range records {
+		if len(record) < 3 {
+			return Snapshot{}, true, fmt.Errorf("%s line %d has %d fields and "+
+				"a record has three, or four for a symlink",
+				Path(campDir), number+1, len(record))
+		}
+		entry := Entry{Side: Side(record[0]), Type: pathx.Type(record[1]), Name: record[2]}
+		if len(record) > 3 {
+			entry.Link = record[3]
+		}
+		snapshot.Entries = append(snapshot.Entries, entry)
+	}
+	return snapshot, true, nil
+}
+
+// Difference is one thing that changed between the accepted snapshot and
+// what is on disk now.
+type Difference struct {
+	Entry Entry
+	// Was is the accepted state, empty for an entry that has appeared.
+	Was Entry
+	// Kind is "appeared", "disappeared" or "changed".
+	Kind string
+	// Blocks is true when the difference stops an up. A new workspace root
+	// entry and a type change block; everything else warns.
+	Blocks bool
+}
+
+// Describe renders one difference for a person.
+func (d Difference) Describe() string {
+	where := "the workspace"
+	if d.Entry.Side == Upper || d.Was.Side == Upper {
+		where = "the code repository"
+	}
+	switch d.Kind {
+	case "appeared":
+		return fmt.Sprintf("%s has a new root entry %q (%s)",
+			where, d.Entry.Name, d.Entry.Type)
+	case "disappeared":
+		return fmt.Sprintf("%s no longer has the root entry %q (%s)",
+			where, d.Was.Name, d.Was.Type)
+	default:
+		return fmt.Sprintf("%s root entry %q was a %s and is now a %s",
+			where, d.Entry.Name, d.Was.Type, d.Entry.Type)
+	}
+}
+
+// Compare returns everything that changed.
+func Compare(accepted, current Snapshot) []Difference {
+	acceptedBy := map[string]Entry{}
+	for _, entry := range accepted.Entries {
+		acceptedBy[entry.Key()] = entry
+	}
+	currentBy := map[string]Entry{}
+	for _, entry := range current.Entries {
+		currentBy[entry.Key()] = entry
+	}
+
+	var differences []Difference
+	for _, entry := range current.Entries {
+		was, known := acceptedBy[entry.Key()]
+		switch {
+		case !known:
+			differences = append(differences, Difference{
+				Entry: entry, Kind: "appeared", Blocks: entry.Side == Lower,
+			})
+		case was.Type != entry.Type || was.Link != entry.Link:
+			differences = append(differences, Difference{
+				Entry: entry, Was: was, Kind: "changed", Blocks: true,
+			})
+		}
+	}
+	for _, entry := range accepted.Entries {
+		if _, still := currentBy[entry.Key()]; !still {
+			differences = append(differences, Difference{
+				Was: entry, Entry: entry, Kind: "disappeared", Blocks: false,
+			})
+		}
+	}
+	return differences
+}
+
+// Check turns the comparison into refusals and warnings for an up.
+//
+// A missing snapshot is refused rather than generated: an up that wrote
+// the file it was supposed to be checked against would swallow the signal
+// entirely.
+func Check(campDir string, current Snapshot) (refused refusal.List, warnings []string) {
+	accepted, found, err := Load(campDir)
+	switch {
+	case err != nil:
+		refused.Add("inventory-unreadable",
+			"%v\nThe snapshot is what tells camp that the workspace's root has "+
+				"not changed under it since anybody looked. camp will not compose "+
+				"without one. Repair the file, or take a fresh snapshot after "+
+				"checking that the two repositories are as you expect:\n"+
+				"  camp accept", err)
+		return refused, nil
+	case !found:
+		refused.Add("inventory-missing",
+			"there is no accepted snapshot of the two repositories' root "+
+				"entries at %s.\n"+
+				"camp compares against it at every up, because a new name at the "+
+				"workspace root changes what the read-only binds protect and what "+
+				"the exclude covers -- and that should be a change somebody "+
+				"decided. Look at what the two roots hold, and then accept it:\n"+
+				"  camp accept\n"+
+				"camp does not write the file on its own: an up that generated the "+
+				"snapshot it was supposed to check against would swallow the "+
+				"signal the file exists to raise.", Path(campDir))
+		return refused, nil
+	}
+
+	for _, difference := range Compare(accepted, current) {
+		if !difference.Blocks {
+			warnings = append(warnings, difference.Describe())
+			continue
+		}
+		refused.Add("inventory-"+difference.Kind,
+			"%s, and the accepted snapshot does not have it that way.\n"+
+				"That name is not covered by a read-only bind and not in the "+
+				"exclude, because both were derived from the snapshot you accepted. "+
+				"Look at it, and then accept the new state:\n  camp accept\n"+
+				"The snapshot is at %s and its diff is meant to be read.",
+			difference.Describe(), Path(campDir))
+	}
+	return refused, warnings
+}
+
+// Report renders the comparison for down and for the end of a session,
+// where it never blocks -- only tells.
+func Report(campDir string, current Snapshot) string {
+	accepted, found, err := Load(campDir)
+	if err != nil || !found {
+		return ""
+	}
+	differences := Compare(accepted, current)
+	if len(differences) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "the repositories' root entries have changed since the "+
+		"snapshot was accepted:\n")
+	for _, difference := range differences {
+		fmt.Fprintf(&b, "  %s\n", difference.Describe())
+	}
+	b.WriteString("  This is reported now, while the cause is fresh. " +
+		"'camp accept' takes a new snapshot once you have looked at it.\n")
+	return b.String()
+}

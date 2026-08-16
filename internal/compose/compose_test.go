@@ -60,6 +60,13 @@ type outcome struct {
 	LandedInRepo  bool   `json:"landed_in_repo"`
 	WorkspaceOwn  string `json:"workspace_own"`
 	ExcludeMatch  bool   `json:"exclude_match"`
+	CodeSeesOwn   bool   `json:"code_sees_own"`
+	IslandWrite   string `json:"island_write"`
+	WaterWrite    string `json:"water_write"`
+
+	// The repeated session.
+	SecondRefused []string `json:"second_refused"`
+	SecondMounted int      `json:"second_mounted"`
 
 	// Teardown.
 	TornDown int      `json:"torn_down"`
@@ -101,11 +108,12 @@ func inside() int {
 		fail("validation: %s", refused.Error())
 		return report(out)
 	}
-	generated, problems := gen.Derive(built)
+	generated, problems := gen.Adopt(built)
 	if !problems.Empty() {
 		fail("generation: %s", problems.Error())
 		return report(out)
 	}
+	built = gen.Expand(built, generated)
 
 	setup := compose.Setup{
 		Plan:    built,
@@ -120,6 +128,8 @@ func inside() int {
 		return lockedFlags(out, built)
 	case "shadow":
 		return shadow(out, setup, built)
+	case "repeat":
+		return repeat(out, setup, built, cfg)
 	}
 
 	result := compose.Build(setup)
@@ -159,9 +169,20 @@ func probe(out *outcome, built plan.Plan) {
 	out.WorkspaceOwn = writeResult(
 		filepath.Join(built.Config.LowerPath(), "sneak.txt"), "z\n")
 
+	// An island is read-only; the water around it takes writes and keeps
+	// them, machine-local, past the end of the session.
+	out.IslandWrite = writeResult(filepath.Join(live, ".claude", "settings.json"), "edited\n")
+	out.WaterWrite = writeResult(filepath.Join(live, ".claude", "settings.local.json"), "{}\n")
+
 	if _, has := built.Config.GenerationStep(); has {
 		payload, err := os.ReadFile(filepath.Join(live, ".git", "info", "exclude"))
 		out.ExcludeMatch = err == nil && strings.Contains(string(payload), gen.Marker(built.Hash))
+
+		// The scoping that makes the whole approach honest: the bind is on
+		// the composed tree's copy, so the code repository -- and any
+		// checkout registered outside -- keeps reading its own file.
+		own, err := os.ReadFile(filepath.Join(built.Config.UpperPath(), ".git", "info", "exclude"))
+		out.CodeSeesOwn = err == nil && !strings.Contains(string(own), gen.Marker(built.Hash))
 	}
 }
 
@@ -228,6 +249,65 @@ func shadow(out outcome, setup compose.Setup, built plan.Plan) int {
 
 	_, _ = mountx.Unmount(target)
 	teardown(&out, built, result)
+	return report(out)
+}
+
+// repeat is the second-run scenario: up, down, up again, with islands.
+//
+// The second run meets camp's own attachment points already standing in
+// the water, and the collision rule -- which exists to stop camp hiding
+// your machine-local files -- would refuse them if the scaffold manifest
+// did not record whose they are. It also meets whatever the first session
+// wrote into the water, which has to survive.
+func repeat(out outcome, setup compose.Setup, built plan.Plan, cfg config.Config) int {
+	first := compose.Build(setup)
+	if !first.OK() {
+		out.Problems = append(out.Problems, "first run: "+first.Refused.Error())
+		return report(out)
+	}
+	out.Mounted = len(first.Mounted)
+
+	// Something machine-local, of the kind that exists in no repository.
+	kept := filepath.Join(built.Live, ".claude", "settings.local.json")
+	out.WaterWrite = writeResult(kept, "{\"kept\":true}\n")
+	teardown(&out, built, first)
+
+	// And again, from the top, exactly as a second session would.
+	second, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Empty() {
+		out.SecondRefused = refused.Rules()
+		out.Problems = append(out.Problems, "second validation: "+refused.Error())
+		return report(out)
+	}
+	generated, problems := gen.Prepare(second)
+	if !problems.Empty() {
+		out.SecondRefused = problems.Rules()
+		out.Problems = append(out.Problems, "second generation: "+problems.Error())
+		return report(out)
+	}
+	second = gen.Expand(second, generated)
+
+	result := compose.Build(compose.Setup{
+		Plan:    second,
+		Prefix:  second.Live,
+		Exclude: generated.Exclude,
+		UID:     os.Getuid(),
+		GID:     os.Getgid(),
+	})
+	out.SecondRefused = result.Refused.Rules()
+	out.SecondMounted = len(result.Mounted)
+	if !result.OK() {
+		out.Problems = append(out.Problems, "second run: "+result.Refused.Error())
+		return report(out)
+	}
+
+	// The machine-local file is still there, through the composition.
+	if _, err := os.Stat(kept); err != nil {
+		out.Problems = append(out.Problems,
+			"what the first session wrote into the water did not survive: "+err.Error())
+	}
+	probe(&out, second)
+	teardown(&out, second, result)
 	return report(out)
 }
 
@@ -430,6 +510,62 @@ func TestAShadowedMountIsCaught(t *testing.T) {
 			"the rules that fired were %v.\nA covered mount stays in the kernel's "+
 			"mount table, so this is exactly the case a table-based check would "+
 			"miss and a path-based one must not", got.Refused)
+	}
+}
+
+// The scoping measurement: the exclude is bound on the composed tree's
+// copy, so what git reports inside the composition changes and what it
+// reports in the code repository does not.
+func TestTheGeneratedExcludeIsVisibleOnlyThroughTheComposedTree(t *testing.T) {
+	env := testenv.NewEnv(t)
+	got := run(t, env, "")
+
+	if !got.ExcludeMatch {
+		t.Error("the composed tree's .git/info/exclude does not carry camp's block")
+	}
+	if !got.CodeSeesOwn {
+		t.Error("the code repository's own .git/info/exclude carries camp's " +
+			"block. It must not: the bind is on the live path, so the " +
+			"repository and every checkout registered outside keep reading " +
+			"their own file, and nothing camp does survives the session there")
+	}
+}
+
+func TestAnIslandIsReadOnlyAndTheWaterAroundItIsNot(t *testing.T) {
+	env := testenv.NewEnv(t)
+	got := run(t, env, "")
+
+	if got.IslandWrite != "EROFS" {
+		t.Errorf("editing a contributed entry through the composed tree "+
+			"returned %q, wanted EROFS. Islands fail loudly; a silent copy "+
+			"anywhere is the failure this design exists to prevent", got.IslandWrite)
+	}
+	if got.WaterWrite != "succeeded" {
+		t.Errorf("writing a machine-local file into the water returned %q. "+
+			"That is what the water is for: a name that exists in no "+
+			"repository has to have somewhere to live", got.WaterWrite)
+	}
+}
+
+// up, down, up: the second run meets its own scaffolding and accepts it,
+// and what the first session wrote into the water is still there.
+func TestARepeatedSessionAcceptsItsOwnScaffolding(t *testing.T) {
+	env := testenv.NewEnv(t)
+	got := run(t, env, "repeat")
+
+	for _, problem := range got.Problems {
+		t.Errorf("inside the namespace: %s", problem)
+	}
+	if len(got.SecondRefused) > 0 {
+		t.Errorf("the second run was refused: %v.\nThe attachment points camp "+
+			"created in the water persist, so on the second up they are already "+
+			"there -- and the collision rule would refuse camp's own objects "+
+			"without the scaffold manifest to say whose they are",
+			got.SecondRefused)
+	}
+	if got.SecondMounted != got.Mounted {
+		t.Errorf("the first run made %d mounts and the second %d",
+			got.Mounted, got.SecondMounted)
 	}
 }
 

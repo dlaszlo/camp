@@ -192,6 +192,12 @@ type Islands struct {
 	Target pathx.Rel
 	// Store is the absolute path of the writable floor.
 	Store string
+	// Repository is the name the source was addressed through, and
+	// Relative the path inside it. The generation step needs both: what a
+	// repository contributes is a question about the repository, asked at
+	// a path inside it.
+	Repository string
+	Relative   string
 }
 
 // Plan is everything an up would do.
@@ -220,6 +226,11 @@ type Plan struct {
 	Mounts []Mount
 	// IslandsMounts are the entries still to be expanded.
 	IslandsMounts []Islands
+
+	// Warnings are things worth saying that stop nothing: a workspace root
+	// entry that has disappeared since the snapshot was accepted, a change
+	// on the code side.
+	Warnings []string
 
 	// LowerRoot and UpperRoot are the raw root listings the gate, the
 	// derived protections and the exclude all read. One enumeration, so
@@ -427,13 +438,18 @@ func Build(cfg config.Config, mode Mode, live, hash string, lowerRoot, upperRoot
 						"repository have somewhere to live and survive the session",
 						entry.Target.String()),
 				})
-				p.IslandsMounts = append(p.IslandsMounts, Islands{
+				islands := Islands{
 					Step:        index,
 					Source:      sourcePath(cfg, entry.Source),
 					SourceParts: sourceParts(cfg, entry.Source),
 					Target:      entry.Target,
 					Store:       store,
-				})
+				}
+				if entry.Source != nil {
+					islands.Repository = entry.Source.Repository
+					islands.Relative = entry.Source.Path.String()
+				}
+				p.IslandsMounts = append(p.IslandsMounts, islands)
 			}
 		case config.GitExclude, config.Generate:
 			rel := pathx.Rel{}

@@ -8,6 +8,8 @@ import (
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/gitwire"
+	"github.com/dlaszlo/camp/internal/inventory"
+	"github.com/dlaszlo/camp/internal/islands"
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/refusal"
 )
@@ -76,8 +78,16 @@ func (c *checker) run() (Plan, refusal.List) {
 	built := Build(c.cfg, c.mode, c.live, Hash(c.live), lowerRoot, upperRoot)
 	c.checkSequence(built)
 	c.checkSourcePolicy()
+	c.checkStoreNames(built)
 	c.checkWorkdirFilesystem(built)
 	c.refused.Extend(Gate(c.cfg, lowerRoot, upperRoot))
+
+	// The accepted snapshot: a new name at the workspace root changes what
+	// the derived binds protect and what the exclude covers, so it has to
+	// be a change somebody decided rather than one that happened.
+	problems, warnings := inventory.Check(c.cfg.CampDir(), inventory.Take(lowerRoot, upperRoot))
+	c.refused.Extend(problems)
+	built.Warnings = warnings
 
 	return built, c.refused
 }
@@ -558,6 +568,33 @@ func (c *checker) checkTracked(mount Mount) {
 			"record that deletion in the history. Move the mount, or move the "+
 			"tracked content.",
 		mount.Rel.String(), describeOrigin(mount), strings.Join(shown, ", "))
+}
+
+// checkStoreNames refuses a target whose store would land on one of the
+// files camp keeps for itself inside a storage directory.
+//
+// The specification does not raise this case: it places the scaffold
+// manifest beside the target marker and outside every store, which is
+// true for every target except one that is named after them. Rather than
+// deciding quietly which of the two wins, camp refuses -- the collision
+// is a configuration a person can change in one line.
+func (c *checker) checkStoreNames(built Plan) {
+	for _, mount := range built.Mounts {
+		if mount.Role != Store || mount.Rel.Empty() {
+			continue
+		}
+		for _, reserved := range islands.Reserved {
+			if mount.Rel.First() != reserved {
+				continue
+			}
+			c.refused.Add("target-reserved-name",
+				"the target %q would put camp's own storage on top of %s, which "+
+					"camp keeps for itself inside every storage directory: it is "+
+					"how camp tells its own objects from your machine-local files "+
+					"and which composition a leftover belonged to.\n"+
+					"Give the mount another target.", mount.Rel.String(), reserved)
+		}
+	}
 }
 
 // checkSourcePolicy refuses a writable mount that sources from a layer

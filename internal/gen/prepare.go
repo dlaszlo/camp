@@ -5,76 +5,259 @@ import (
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/fsx"
+	"github.com/dlaszlo/camp/internal/gitwire"
+	"github.com/dlaszlo/camp/internal/islands"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
 )
 
 // Output is everything the prepare phase produced.
 type Output struct {
-	// Exclude is the payload to mount, complete: the repository's own
+	// Exclude is the payload to mount, complete: the code repository's own
 	// bytes plus camp's block. Empty when no step generates one, and then
-	// nothing checks for one either.
+	// nothing checks for one either -- a composition is not held to a
+	// promise it never made.
 	Exclude []byte
 	// Patterns are camp's own lines, for plan to print.
 	Patterns []string
 	// ExcludeFile is where the payload was written.
 	ExcludeFile string
+	// Islands is one entry list per islands mount, keyed by target.
+	Islands map[string][]islands.Entry
+	// Notes are things worth saying that do not stop anything: a scaffold
+	// camp has stopped claiming, a source that is not a git repository.
+	Notes []string
 }
 
-// Derive computes what the generation step must produce, without writing
-// anything.
+func excludePath(built plan.Plan) string {
+	return filepath.Join(built.Config.UpperPath(), ".git", "info", "exclude")
+}
+
+// Prepare runs the generation step and validates everything it produced.
 //
-// It is a pure function of the two repositories and the plan, and that is
-// what makes it useful twice. The launcher calls Prepare, which derives
-// and writes. The process that actually mounts derives again,
-// independently, and verification then compares the mounted file against
-// *this* payload rather than against the file it just mounted -- which
-// would be circular and would prove nothing.
-func Derive(built plan.Plan) (Output, refusal.List) {
+// The whole phase, in the order the specification fixes: materialise the
+// inputs, run the step -- the shipped git one, or a configured command --
+// read the outputs back, check them as hostile data, re-run the order and
+// tracked-content rules over the mounts that now exist, and only then
+// create anything in storage.
+//
+// It runs before anything is mounted, always as the invoking user.
+func Prepare(built plan.Plan) (Output, refusal.List) {
 	var refused refusal.List
 	var out Output
 
 	step, has := built.Config.GenerationStep()
 	if !has {
-		return out, refused
-	}
-	if step.Kind != config.GitExclude {
-		refused.Add("generate-not-supported",
-			"the configuration uses a custom generate step, and this build "+
-				"runs only the shipped git_exclude step.")
-		return out, refused
+		return withoutAStep(built)
 	}
 
-	existing, problems := ReadExisting(
-		filepath.Join(built.Config.UpperPath(), ".git", "info", "exclude"))
-	refused.Extend(problems)
-
-	patterns, problems := ExcludeLines(built.Config, built)
+	existing, problems := ReadExisting(excludePath(built))
 	refused.Extend(problems)
 	if !refused.Empty() {
 		return out, refused
 	}
 
-	out.Patterns = patterns
-	out.Exclude = ExcludePayload(existing, built.Hash, patterns)
-	out.ExcludeFile = built.ExcludeFile()
-	return out, refused
-}
-
-// Prepare runs the generation step and writes what it produced.
-//
-// It runs before anything is mounted and always as the invoking user. In
-// the privileged mode that is true by construction rather than by a
-// drop protocol: prepare happens in the unprivileged front end, and no
-// privileged camp process ever executes a configured command. Whoever can
-// edit the configuration must never gain root through it.
-func Prepare(built plan.Plan) (Output, refusal.List) {
-	out, refused := Derive(built)
-	if !refused.Empty() || len(out.Exclude) == 0 {
+	refused.Extend(WriteInputs(built, existing))
+	if !refused.Empty() {
 		return out, refused
 	}
+
+	if step.Kind == config.Generate {
+		refused.Extend(external(built, step))
+		if !refused.Empty() {
+			return out, refused
+		}
+	}
+
+	out, refused = Adopt(built)
+	if !refused.Empty() {
+		return out, refused
+	}
+	if step.Kind == config.GitExclude {
+		// The shipped step publishes through the same contract an external
+		// one uses, so it cannot quietly rely on a shortcut.
+		refused.Extend(WriteOutputs(built, out))
+		if !refused.Empty() {
+			return out, refused
+		}
+	}
+
+	refused.Extend(expandedChecks(built, out))
+	if !refused.Empty() {
+		return out, refused
+	}
+
+	refused.Extend(scaffold(built, out, &out.Notes))
+	if !refused.Empty() {
+		return out, refused
+	}
+
 	if err := fsx.Work(built.Work).Write("exclude", out.Exclude, 0o644); err != nil {
 		refused.Add("generate-write", "%v", err)
 	}
 	return out, refused
+}
+
+// Preview derives what the shipped step would produce, running nothing
+// and writing nothing.
+//
+// This is what plan prints. A configured external generator is not run
+// here -- plan executes nothing, which is the whole point of it -- so for
+// such a configuration the islands shown are what camp's own reading of
+// git says, and the report says as much.
+func Preview(built plan.Plan) (Output, refusal.List) {
+	var refused refusal.List
+	var out Output
+
+	step, has := built.Config.GenerationStep()
+	if !has {
+		return withoutAStep(built)
+	}
+
+	existing, problems := ReadExisting(excludePath(built))
+	refused.Extend(problems)
+	if !refused.Empty() {
+		return out, refused
+	}
+
+	out, problems = git(built, existing)
+	refused.Extend(problems)
+	out.ExcludeFile = built.ExcludeFile()
+	if step.Kind == config.Generate {
+		out.Notes = append(out.Notes,
+			"this configuration runs its own generator ("+step.Command[0]+"), "+
+				"and plan does not run it. What is shown is camp's own reading of "+
+				"git; the step's real output is checked against that assembly "+
+				"before anything is mounted")
+	}
+	return out, refused
+}
+
+// Adopt reads what the generation step produced and checks it as hostile
+// data, without running anything and without writing anything.
+//
+// Two processes need this. The launcher calls it as part of Prepare. The
+// process that actually mounts -- the session's init, inside the
+// namespace -- calls it on its own, so that what it mounts has been
+// checked against the repositories by the process doing the mounting, and
+// not merely handed to it.
+//
+// The exclude is always compared against camp's own assembly of it,
+// whichever step produced it: the specification requires a custom
+// generator's payload to be byte-identical to that assembly, so there is
+// exactly one right answer and camp can compute it.
+func Adopt(built plan.Plan) (Output, refusal.List) {
+	var refused refusal.List
+	var out Output
+
+	step, has := built.Config.GenerationStep()
+	if !has {
+		return withoutAStep(built)
+	}
+
+	existing, problems := ReadExisting(excludePath(built))
+	refused.Extend(problems)
+	if !refused.Empty() {
+		return out, refused
+	}
+
+	expected, problems := git(built, existing)
+	refused.Extend(problems)
+	if !refused.Empty() {
+		return out, refused
+	}
+
+	switch step.Kind {
+	case config.GitExclude:
+		out = expected
+	case config.Generate:
+		produced, problems := ReadOutputs(built)
+		refused.Extend(problems)
+		if !refused.Empty() {
+			return out, refused
+		}
+		out = produced
+		out.Patterns = expected.Patterns
+	}
+	out.ExcludeFile = built.ExcludeFile()
+
+	refused.Extend(Validate(built, out, expected.Exclude))
+	return out, refused
+}
+
+// withoutAStep is the shape of a composition that generates nothing.
+//
+// It has no exclude at all -- plan says so plainly rather than leaving
+// the defence out quietly -- and its islands, if it has any, come from
+// the raw listing of the source, which is said out loud because the
+// difference matters: the source's own runtime files become islands.
+func withoutAStep(built plan.Plan) (Output, refusal.List) {
+	var refused refusal.List
+	var out Output
+	if len(built.IslandsMounts) == 0 {
+		return out, refused
+	}
+
+	out.Islands = map[string][]islands.Entry{}
+	for _, mount := range built.IslandsMounts {
+		entries, problems := contributed(built, mount)
+		refused.Extend(problems)
+		out.Islands[mount.Target.String()] = entries
+		out.Notes = append(out.Notes,
+			"there is no generation step, so the islands at "+mount.Target.String()+
+				" come from the raw listing of "+mount.Source+" rather than from "+
+				"what it tracks: the source's own runtime files will appear as "+
+				"islands")
+	}
+	return out, refused
+}
+
+// expandedChecks re-runs the rules that could not be checked before the
+// islands were known.
+func expandedChecks(built plan.Plan, out Output) refusal.List {
+	expanded := Expand(built, out)
+	var tracks func(string) []string
+	if repo, isGit := gitwire.Open(built.Config.UpperPath()); isGit {
+		tracks = func(path string) []string {
+			tracked, err := repo.TracksUnder(path)
+			if err != nil {
+				return nil
+			}
+			return tracked
+		}
+	}
+	return ValidateExpanded(expanded, tracks)
+}
+
+// scaffold creates the attachment points the islands need, after their
+// list has been validated and never before.
+func scaffold(built plan.Plan, out Output, notes *[]string) refusal.List {
+	var refused refusal.List
+	if len(built.IslandsMounts) == 0 {
+		return refused
+	}
+
+	storage := fsx.Storage(built.Storage)
+	manifest, err := islands.LoadManifest(storage)
+	if err != nil {
+		refused.Add("islands-manifest",
+			"%v\nThe manifest is how camp tells its own attachment points from "+
+				"your machine-local files. Without it camp cannot prove which is "+
+				"which, and it will not guess.", err)
+		return refused
+	}
+
+	for _, mount := range built.IslandsMounts {
+		expansion := islands.Expansion{
+			Target:      mount.Target,
+			Store:       mount.Store,
+			Source:      mount.Source,
+			SourceParts: mount.SourceParts,
+			Entries:     out.Islands[mount.Target.String()],
+		}
+		problems, adopted := islands.Scaffold(storage, manifest, expansion)
+		refused.Extend(problems)
+		*notes = append(*notes, adopted...)
+	}
+	return refused
 }

@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/inventory"
+	"github.com/dlaszlo/camp/internal/pathx"
 )
 
 // Root returns a scratch directory that is removed when the test ends.
@@ -153,7 +155,29 @@ func (e *Env) Config(t *testing.T, yaml string) config.Config {
 	if err != nil {
 		t.Fatalf("the fixture configuration did not parse:\n%v", err)
 	}
+	e.Accept(t, cfg)
 	return cfg
+}
+
+// Accept writes the snapshot of both roots that camp compares against at
+// every up, the way 'camp accept' would.
+//
+// Every fixture starts from an accepted state, because that is the steady
+// state camp is judged in. The tests that are about the snapshot change
+// something after this and watch what camp says.
+func (e *Env) Accept(t *testing.T, cfg config.Config) {
+	t.Helper()
+	lower, err := pathx.ReadDirBeneath(cfg.LowerPath(), nil)
+	if err != nil {
+		return // the fixture is deliberately broken; the test is about that
+	}
+	upper, err := pathx.ReadDirBeneath(cfg.UpperPath(), nil)
+	if err != nil {
+		return
+	}
+	if err := inventory.Take(lower, upper).Save(cfg.CampDir()); err != nil {
+		t.Fatalf("writing the fixture inventory: %v", err)
+	}
 }
 
 // TryConfig parses a configuration and returns whatever came back, for

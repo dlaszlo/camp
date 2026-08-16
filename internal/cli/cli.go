@@ -10,6 +10,7 @@ import (
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/fsx"
+	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/refusal"
@@ -150,8 +151,14 @@ func cmdPlan(ctx *context, args []string) error {
 	}
 
 	built, refused := plan.Prepare(cfg, parseMode(*systemWide))
+	generated, problems := gen.Preview(built)
+	refused.Extend(problems)
 	if len(built.Mounts) > 0 {
-		ctx.printf("%s", report.Plan(built))
+		expanded := gen.Expand(built, generated)
+		expanded.Warnings = built.Warnings
+		ctx.printf("%s", report.Plan(expanded))
+		ctx.printf("%s", report.Expansion(built, generated))
+		ctx.printf("the mount calls, in order:\n%s\n", report.Syscalls(expanded))
 	}
 	if !refused.Empty() {
 		ctx.printf("this composition would not start. %d thing(s) stop it:\n\n%s",

@@ -11,8 +11,10 @@ import (
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/holders"
+	"github.com/dlaszlo/camp/internal/inventory"
 	"github.com/dlaszlo/camp/internal/locks"
 	"github.com/dlaszlo/camp/internal/mountinfo"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/privileged"
@@ -34,7 +36,59 @@ func composeCommands() []command {
 		{"status", "what is mounted, and what is not", cmdStatus},
 		{"list", "every recorded composition", cmdList},
 		{"forget", "drop a composition's record; deletes nothing else", cmdForget},
+		{"accept", "record the two repositories' root entries as they are now", cmdAccept},
 	}
+}
+
+// cmdAccept takes the snapshot every up is compared against.
+//
+// Only this command writes it. An up that refreshed the file on the way
+// past would swallow the very signal the file exists to raise: a new name
+// at the workspace root changes what the derived read-only binds protect
+// and what the exclude covers, and that has to be a change somebody
+// looked at.
+func cmdAccept(ctx *context, args []string) error {
+	set, file := flagsFor("accept")
+	if err := set.Parse(args); err != nil {
+		return wrap(err, ExitUsage, "")
+	}
+	cfg, err := resolve(*file)
+	if err != nil {
+		return err
+	}
+
+	lower, err := pathx.ReadDirBeneath(cfg.LowerPath(), nil)
+	if err != nil {
+		return wrap(fmt.Errorf("listing the workspace %s: %w", cfg.LowerPath(), err),
+			ExitPrecondition, "")
+	}
+	upper, err := pathx.ReadDirBeneath(cfg.UpperPath(), nil)
+	if err != nil {
+		return wrap(fmt.Errorf("listing the code repository %s: %w", cfg.UpperPath(), err),
+			ExitPrecondition, "")
+	}
+	current := inventory.Take(lower, upper)
+
+	if previous, found, err := inventory.Load(cfg.CampDir()); err == nil && found {
+		differences := inventory.Compare(previous, current)
+		if len(differences) == 0 {
+			ctx.printf("nothing has changed since the last snapshot.\n")
+			return nil
+		}
+		ctx.printf("accepting %d change(s):\n", len(differences))
+		for _, difference := range differences {
+			ctx.printf("  %s\n", difference.Describe())
+		}
+	}
+
+	if err := current.Save(cfg.CampDir()); err != nil {
+		return wrap(err, ExitFailure, "")
+	}
+	ctx.printf("wrote %s: %d root entries across both repositories.\n"+
+		"Its diff is meant to be read -- it is byte-sorted, one record per "+
+		"line -- and camp compares against it at every up.\n",
+		inventory.Path(cfg.CampDir()), len(current.Entries))
+	return nil
 }
 
 // ready is a composition that has passed everything that can be checked
@@ -96,7 +150,12 @@ func prepare(cfg config.Config, mode plan.Mode) (*ready, error) {
 		return nil, refusedComposition(problems)
 	}
 
-	return &ready{Config: cfg, Plan: built, Generated: generated, Locks: pair}, nil
+	return &ready{
+		Config:    cfg,
+		Plan:      gen.Expand(built, generated),
+		Generated: generated,
+		Locks:     pair,
+	}, nil
 }
 
 func repositoryParts(cfg config.Config, name string) ([]string, bool) {

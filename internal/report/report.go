@@ -14,9 +14,12 @@ package report
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/gen"
+	"github.com/dlaszlo/camp/internal/mountx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/refusal"
@@ -71,13 +74,10 @@ func Plan(p plan.Plan) string {
 		fmt.Fprintf(&b, "    from: %s\n\n", origin(mount))
 	}
 
-	if len(p.IslandsMounts) > 0 {
-		b.WriteString("islands still to be expanded (the entries come from the " +
-			"generation step, and are printed by 'camp up' as they are mounted):\n")
-		for _, islands := range p.IslandsMounts {
-			fmt.Fprintf(&b, "  %s  <- contributed entries of %s\n"+
-				"      writable floor: %s\n",
-				islands.Target.String(), islands.Source, islands.Store)
+	if len(p.Warnings) > 0 {
+		b.WriteString("worth knowing (none of these stop a composition):\n")
+		for _, warning := range p.Warnings {
+			fmt.Fprintf(&b, "  %s\n", warning)
 		}
 		b.WriteString("\n")
 	}
@@ -91,6 +91,60 @@ func Plan(p plan.Plan) string {
 			"  git-based.\n\n")
 	}
 
+	return b.String()
+}
+
+// Expansion renders what the generation step produces: the islands each
+// islands mount will really carry, and the exclude patterns.
+//
+// Printed rather than summarised, because the whole point of the coarse
+// exclude is that a person can read it and see what it covers.
+func Expansion(p plan.Plan, out gen.Output) string {
+	var b strings.Builder
+
+	if len(p.IslandsMounts) > 0 {
+		b.WriteString("islands, derived:\n")
+		b.WriteString(gen.Describe(p, out))
+		b.WriteString("\n")
+	}
+	if len(out.Patterns) > 0 {
+		fmt.Fprintf(&b, "the generated exclude, mounted over %s:\n",
+			filepath.Join(p.Live, ".git", "info", "exclude"))
+		fmt.Fprintf(&b, "  %s\n", gen.Marker(p.Hash))
+		b.WriteString(gen.DescribeExclude(out.Patterns))
+		b.WriteString("  Every line is anchored with a leading slash. The gate " +
+			"compares root\n  entries only, so an unanchored name would also hide " +
+			"a same-named\n  directory deep in the code repository, and no gate " +
+			"would ever fire.\n\n")
+	}
+	for _, note := range out.Notes {
+		fmt.Fprintf(&b, "note: %s\n", wrap(note, "      "))
+	}
+	if len(out.Notes) > 0 {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// Syscalls renders the mount calls a run would make, in order, for
+// somebody who wants to see the plan in the kernel's own terms.
+func Syscalls(p plan.Plan) string {
+	var b strings.Builder
+	for _, mount := range p.Mounts {
+		switch mount.Kind {
+		case plan.Overlay:
+			fmt.Fprintf(&b, "  mount(\"overlay\", %q, \"overlay\", 0, %q)\n",
+				mount.Target, mountx.Options(mount))
+		default:
+			fmt.Fprintf(&b, "  mount(%q, %q, \"\", MS_BIND, \"\")\n",
+				mount.Source, mount.Target)
+			if mount.Kind == plan.BindRO {
+				fmt.Fprintf(&b, "  mount(\"\", %q, \"\", MS_REMOUNT|MS_BIND|MS_RDONLY|<locked flags>, \"\")\n",
+					mount.Target)
+			}
+		}
+		fmt.Fprintf(&b, "  mount(\"\", %q, \"\", MS_PRIVATE, \"\")\n", mount.Target)
+	}
 	return b.String()
 }
 

@@ -277,14 +277,17 @@ func rebuild(configPath string) (plan.Plan, []byte, refusal.List) {
 		return plan.Plan{}, nil, problems
 	}
 
-	// Derived again here, independently of the launcher, so that
-	// verification compares the mounted file against a payload computed
+	// Checked again here, by the process that is about to mount it, and
+	// against the repositories themselves. The launcher already validated
+	// the same output; doing it again is what closes the gap between the
+	// moment of validation and the moment of mounting, and it is what lets
+	// verification compare the mounted file against a payload computed
 	// from the repositories rather than against the file it just mounted.
-	generated, problems := gen.Derive(built)
+	generated, problems := gen.Adopt(built)
 	if !problems.Empty() {
 		return plan.Plan{}, nil, problems
 	}
-	return built, generated.Exclude, refused
+	return gen.Expand(built, generated), generated.Exclude, refused
 }
 
 func describeFailure(result compose.Result) string {
