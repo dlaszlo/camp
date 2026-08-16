@@ -46,9 +46,16 @@ func git(built plan.Plan, existing []byte) (Output, refusal.List) {
 
 	out.Islands = map[string][]islands.Entry{}
 	for _, mount := range built.IslandsMounts {
-		entries, problems := contributed(built, mount)
+		entries, fromGit, problems := contributed(built, mount)
 		refused.Extend(problems)
 		out.Islands[mount.Target.String()] = entries
+		if !fromGit {
+			out.Notes = append(out.Notes,
+				"the islands at "+mount.Target.String()+" come from the raw "+
+					"listing of "+mount.Source+", because that source is not in a "+
+					"git repository: every entry the directory happens to hold "+
+					"becomes an island, the source's own runtime files included")
+		}
 	}
 	return out, refused
 }
@@ -61,7 +68,10 @@ func git(built plan.Plan, existing []byte) (Output, refusal.List) {
 // islands mount exists to keep out of the composed tree. A source that is
 // not a git repository falls back to the raw listing, and doctor says so
 // rather than letting the difference go unnoticed.
-func contributed(built plan.Plan, mount plan.Islands) ([]islands.Entry, refusal.List) {
+// It reports which of the two answered, because the difference has to be
+// said out loud where it is noticed rather than absorbed: a raw listing is
+// a usable answer, not an equivalent one.
+func contributed(built plan.Plan, mount plan.Islands) ([]islands.Entry, bool, refusal.List) {
 	var refused refusal.List
 
 	repository := built.Config.RepositoryPath(mount.Repository)
@@ -71,25 +81,18 @@ func contributed(built plan.Plan, mount plan.Islands) ([]islands.Entry, refusal.
 			refused.Add("generate-git",
 				"asking git what %s contributes at %q failed: %v.",
 				repository, mount.Relative, err)
-			return nil, refused
+			return nil, true, refused
 		}
-		return toEntries(infos), refused
+		return toEntries(infos), true, refused
 	}
 
 	infos, err := pathx.ReadDirBeneath(built.Config.Env, mount.SourceParts)
 	if err != nil {
 		refused.Add("generate-listing",
 			"listing %s failed: %v.", mount.Source, err)
-		return nil, refused
+		return nil, false, refused
 	}
-	return toEntries(infos), refused
-}
-
-// IsGitBacked reports whether an islands source is a git repository, so
-// that doctor can say when the fallback is in use.
-func IsGitBacked(built plan.Plan, mount plan.Islands) bool {
-	_, isGit := gitwire.Open(built.Config.RepositoryPath(mount.Repository))
-	return isGit
+	return toEntries(infos), false, refused
 }
 
 func toEntries(infos []pathx.Info) []islands.Entry {

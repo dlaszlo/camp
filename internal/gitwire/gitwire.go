@@ -30,10 +30,27 @@ import (
 	"github.com/dlaszlo/camp/internal/pathx"
 )
 
-// Repo is a git working tree, opened for reading.
+// Repo is a directory inside a git working tree, opened for reading.
+//
+// The directory need not be the working tree's root. A composition's
+// participants are directories, and whether one of them happens to be a
+// repository root or a subdirectory of a larger repository is the user's
+// arrangement, not something camp gets to require: a workspace can sit
+// inside the environment's own repository and still be tracked content
+// with a history behind it.
+//
+// So every question below is asked in the repository's frame -- pathspecs
+// anchor at the root and --full-name answers in root-relative paths -- and
+// answered in the opened directory's. A caller never learns which of the
+// two it got, because for every question camp asks, the answer is the
+// same either way.
 type Repo struct {
-	// Path is the working tree's root.
+	// Path is the directory that was opened.
 	Path string
+	// prefix is where Path sits inside the repository, relative to the
+	// working tree's root and without a trailing slash. Empty when Path is
+	// the root itself.
+	prefix string
 }
 
 // Available reports whether git can be run at all.
@@ -50,17 +67,73 @@ func Available() error {
 	return nil
 }
 
-// Open reports whether a directory is a git working tree, and returns a
-// handle for reading it.
+// Open reports whether a directory is inside a git working tree, and
+// returns a handle for reading it.
 //
-// A directory that is not one is not an error: a composition need not be
+// A directory that is not is not an error: a composition need not be
 // git-based at all, and camp says so rather than failing.
+//
+// Both facts come from one call. --is-inside-work-tree is the question
+// that must be answered before anything else is asked -- it is false in a
+// bare repository and inside a .git directory, where the reads below mean
+// nothing -- and --show-prefix is the frame every later question needs.
+// Asking them together also makes them one answer about one moment.
 func Open(path string) (*Repo, bool) {
 	repo := &Repo{Path: path}
-	if _, err := repo.run("rev-parse", "--is-inside-work-tree"); err != nil {
+	out, err := repo.run("rev-parse", "--is-inside-work-tree", "--show-prefix")
+	if err != nil {
 		return nil, false
 	}
+	inside, prefix, split := strings.Cut(string(out), "\n")
+	if !split || inside != "true" {
+		return nil, false
+	}
+	// --show-prefix prints the location with a trailing slash, and an empty
+	// line at the root. Only the final newline is git's -- a directory name
+	// may legally contain one -- so exactly one is removed, and then the
+	// separator git adds.
+	repo.prefix = strings.TrimSuffix(strings.TrimSuffix(prefix, "\n"), "/")
 	return repo, true
+}
+
+// scoped turns a path relative to the opened directory into one relative
+// to the repository root.
+//
+// This is the whole of the correction. A pathspec carrying ",top" anchors
+// at the repository's root, so asking for ".claude" from a subdirectory
+// asks about a ".claude" at the root -- which is usually not there, and
+// git answers, correctly and uselessly, that nothing matches. That empty
+// answer is indistinguishable from "the source contributes nothing", and
+// camp would have gone on to mount no islands at all without a word.
+func (r *Repo) scoped(path string) string {
+	switch {
+	case r.prefix == "":
+		return path
+	case path == "":
+		return r.prefix
+	default:
+		return r.prefix + "/" + path
+	}
+}
+
+// unscoped brings root-relative answers back into the opened directory's
+// frame, and drops what falls outside it.
+//
+// Dropping is the point as much as trimming: a repository that holds the
+// opened directory holds other things too, and a caller asking what this
+// directory contains must not be handed a path that is not in it.
+func (r *Repo) unscoped(paths []string) []string {
+	if r.prefix == "" {
+		return paths
+	}
+	prefix := r.prefix + "/"
+	var kept []string
+	for _, path := range paths {
+		if rest := strings.TrimPrefix(path, prefix); rest != path {
+			kept = append(kept, rest)
+		}
+	}
+	return kept
 }
 
 // run executes one read-only git command and returns its raw output.
@@ -104,11 +177,11 @@ func splitZero(data []byte) []string {
 // and .git/info/exclude pass automatically, because git tracks nothing
 // under .git.
 func (r *Repo) TracksUnder(path string) ([]string, error) {
-	out, err := r.run("ls-files", "-z", "--full-name", "--", literal(path))
+	out, err := r.run("ls-files", "-z", "--full-name", "--", literal(r.scoped(path)))
 	if err != nil {
 		return nil, err
 	}
-	return splitZero(out), nil
+	return r.unscoped(splitZero(out)), nil
 }
 
 // Contributes returns the entries a repository contributes at a
@@ -176,6 +249,7 @@ func (r *Repo) Indexed() ([]string, error) {
 			paths = append(paths, path)
 		}
 	}
+	paths = r.unscoped(paths)
 	sort.Strings(paths)
 	return paths, nil
 }
@@ -187,15 +261,9 @@ func (r *Repo) Untracked() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	paths := splitZero(out)
+	paths := r.unscoped(splitZero(out))
 	sort.Strings(paths)
 	return paths, nil
-}
-
-// ExcludeFile is the repository's own exclude, whose bytes the generated
-// payload begins with.
-func (r *Repo) ExcludeFile() string {
-	return filepath.Join(r.Path, ".git", "info", "exclude")
 }
 
 // Worktree is one registered worktree.

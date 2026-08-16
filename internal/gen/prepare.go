@@ -188,7 +188,7 @@ func withoutAStep(built plan.Plan) (Output, refusal.List) {
 
 	out.Islands = map[string][]islands.Entry{}
 	for _, mount := range built.IslandsMounts {
-		entries, problems := contributed(built, mount)
+		entries, _, problems := contributed(built, mount)
 		refused.Extend(problems)
 		out.Islands[mount.Target.String()] = entries
 		out.Notes = append(out.Notes,
