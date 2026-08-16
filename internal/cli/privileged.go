@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/dlaszlo/camp/internal/compose"
+	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/drift"
 	"github.com/dlaszlo/camp/internal/holders"
 	"github.com/dlaszlo/camp/internal/plan"
@@ -102,6 +103,7 @@ func cmdUp(ctx *context, args []string) error {
 
 func cmdDown(ctx *context, args []string) error {
 	set, file := flagsFor("down")
+	live, hash := recoveryFlags(set)
 	if err := set.Parse(args); err != nil {
 		return wrap(err, ExitUsage, "")
 	}
@@ -109,21 +111,20 @@ func cmdDown(ctx *context, args []string) error {
 		return failure(ExitUsage, "", "%s", err)
 	}
 
-	cfg, unreadable, err := resolveForTeardown(*file)
+	noteUnreadableConfiguration(ctx, *file)
+
+	record, found, err := selectRecord(*file, *live, *hash)
 	if err != nil {
 		return err
 	}
-	if !unreadable.Empty() {
-		fmt.Fprintf(ctx.err, "%s no longer reads as a configuration:\n\n%s\n"+
-			"The teardown goes ahead anyway: it comes from this composition's "+
-			"record, not from this file. What the file cannot say is what "+
-			"changed while the composition was up, so the drift report below "+
-			"is left out.\n\n",
-			cfg.Source, strings.TrimRight(report.Refusals(unreadable), "\n"))
-	}
-	record, err := recordFor(cfg)
-	if err != nil {
-		return err
+	if !found {
+		return failure(ExitNotFound, "",
+			"no record for this directory, so there is nothing camp "+
+				"knows how to take down.\nA namespace session leaves no record on "+
+				"purpose: it ends when its last process exits, and the kernel "+
+				"removes every mount with it. 'camp list' prints the compositions "+
+				"that do have a record, and 'camp status' says what is mounted "+
+				"here.")
 	}
 
 	reply, refused := privileged.Down(record, []string{"sudo"}, os.Stderr)
@@ -162,14 +163,22 @@ func cmdDown(ctx *context, args []string) error {
 	_ = record.Save()
 
 	// The four read-only scans, while the cause is still fresh. They never
-	// block: down may only report. A configuration that no longer parses
-	// has nothing trustworthy to compare against, so the scans are skipped
-	// rather than run over a half-read file.
-	if unreadable.Empty() {
-		if built, refused := plan.Prepare(cfg, plan.Privileged); refused.Empty() || built.Live != "" {
-			if found := drift.Refresh(built); !found.Empty() {
-				ctx.printf("\n%s", found.String())
-			}
+	// block: down may only report. Unlike the teardown above, they do need
+	// the configuration -- they compare the repositories against what it
+	// declares -- so when the file is gone or no longer describes this
+	// composition they are skipped, and said to be skipped. A silent
+	// omission would read as "no drift found".
+	switch cfg, err := config.Load(record.Config); {
+	case record.Config == "" || err != nil:
+		ctx.printf("\nthe drift and leak scans need the configuration and were "+
+			"skipped: %s cannot be read now. The teardown needed none of it.\n",
+			record.Config)
+	default:
+		if built, _ := plan.Prepare(cfg, plan.Privileged); built.Live != record.Live {
+			ctx.printf("\nthe drift and leak scans were skipped: %s no longer "+
+				"describes the composition that was here.\n", record.Config)
+		} else if found := drift.Refresh(built); !found.Empty() {
+			ctx.printf("\n%s", found.String())
 		}
 	}
 

@@ -1,19 +1,16 @@
 package cli
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
-	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/inventory"
 	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
-	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/report"
 	"github.com/dlaszlo/camp/internal/state"
 	"github.com/dlaszlo/camp/internal/verify"
@@ -95,35 +92,56 @@ func cmdAccept(ctx *context, args []string) error {
 	return nil
 }
 
+// cmdStatus says what is on the machine, and it is the command a person
+// reaches for when something has gone wrong. So it asks the record first
+// and the configuration only when there is no record: the configuration
+// may have been edited, or deleted, while the composition was up (§12).
 func cmdStatus(ctx *context, args []string) error {
 	set, file := flagsFor("status")
+	live, hash := recoveryFlags(set)
 	if err := set.Parse(args); err != nil {
 		return wrap(err, ExitUsage, "")
 	}
-	cfg, err := resolve(*file)
+
+	table, err := mountinfo.Read(mountinfo.Self)
+	if err != nil {
+		return wrap(err, ExitFailure, "")
+	}
+
+	record, found, err := selectRecord(*file, *live, *hash)
+	if err != nil {
+		return err
+	}
+	for _, listing := range corruptRecords() {
+		ctx.printf("corrupt: %s\n         %v\n\n", listing.Path, listing.Corrupt)
+	}
+	if found {
+		return describeRecord(ctx, record, table)
+	}
+	return statusFromConfiguration(ctx, *file, table)
+}
+
+// statusFromConfiguration answers when no record claims this directory.
+//
+// The namespace mode leaves none by design -- the namespace is the state,
+// and it goes with its last process -- and a composition that was never
+// brought up leaves none either. Here the configuration is the only
+// source there is, and it says one thing worth having: which tree to look
+// at.
+func statusFromConfiguration(ctx *context, file string, table []mountinfo.Entry) error {
+	cfg, err := resolve(file)
 	if err != nil {
 		return err
 	}
 
 	built, refused := plan.Prepare(cfg, plan.Namespace)
-	table, tableErr := mountinfo.Read(mountinfo.Self)
-	if tableErr != nil {
-		return wrap(tableErr, ExitFailure, "")
-	}
-
 	if built.Live == "" {
 		return refusedComposition(refused)
 	}
 
-	record, found, _ := state.Load(built.Hash)
-	if found {
-		ctx.printf("record: %s, phase %s, %s\n", state.Path(built.Hash),
-			record.Phase, record.Age())
-	} else {
-		ctx.printf("no record: either nothing is up, or this is a namespace " +
-			"session, which leaves none -- the namespace is the state, and it " +
-			"goes with its last process.\n")
-	}
+	ctx.printf("no record for %s. A namespace session leaves none: the "+
+		"namespace is the state, and it goes with its last process. A "+
+		"privileged composition always leaves one.\n", built.Live)
 
 	present := mountinfo.Under(table, built.Live)
 	if len(present) == 0 {
@@ -136,6 +154,10 @@ func cmdStatus(ctx *context, args []string) error {
 		ctx.printf("  %-8s %s\n", entry.FSType, entry.Point)
 	}
 
+	// Compared against the plan this configuration derives today, in the
+	// namespace mode -- which is what a session standing here was built
+	// from. It is a comparison against a file rather than against a
+	// record, and it says so, because the file may have moved on.
 	problems := verify.Run(verify.Input{
 		Plan:      built,
 		Prefix:    built.Live,
@@ -146,12 +168,12 @@ func cmdStatus(ctx *context, args []string) error {
 		GID:       os.Getgid(),
 	})
 	if problems.Empty() {
-		ctx.printf("\nup: every planned mount is present, reachable and the right " +
-			"way round.\n")
+		ctx.printf("\nup: every mount the configuration plans is present, " +
+			"reachable and the right way round.\n")
 		return nil
 	}
-	ctx.printf("\npartly up. %d thing(s) do not match the plan:\n\n%s",
-		len(problems), report.Refusals(problems))
+	ctx.printf("\n%d thing(s) do not match the plan this configuration derives "+
+		"today:\n\n%s", len(problems), report.Refusals(problems))
 	return failure(ExitPrecondition, "", "run 'camp down' to take it apart")
 }
 
@@ -219,72 +241,4 @@ func cmdForget(ctx *context, args []string) error {
 	ctx.printf("forgot the record for %s. Nothing else was deleted: not the "+
 		"repositories, not the storage, not the composed tree.\n", record.Live)
 	return nil
-}
-
-// resolveForTeardown finds the composition a teardown acts on, and
-// refuses to let a configuration stop it.
-//
-// down tears down from its record; it reads the configuration only to
-// learn which record, and afterwards to report drift. A file edited while
-// the composition was up -- a mistyped step, a session: entry that does
-// not parse -- must therefore not be able to wall the user in behind
-// mounts camp made and now will not remove. So the refusals come back
-// beside the configuration rather than instead of it, and the teardown
-// goes ahead as long as the two fields that name the tree survived the
-// parse. Without those there is nothing to point a teardown at, and the
-// refusal is all there is to say.
-func resolveForTeardown(file string) (config.Config, refusal.List, error) {
-	path := file
-	if path == "" {
-		start, err := os.Getwd()
-		if err != nil {
-			return config.Config{}, nil, wrap(err, ExitFailure, "")
-		}
-		found, err := config.Find(start)
-		if err != nil {
-			return config.Config{}, nil, wrap(err, ExitNotFound, "")
-		}
-		path = found
-	}
-
-	cfg, err := config.Load(path)
-	if err == nil {
-		return cfg, nil, nil
-	}
-	var refused refusal.List
-	if !errors.As(err, &refused) || cfg.Env == "" || cfg.Merged.Empty() {
-		return config.Config{}, nil, failure(ExitUsage, "",
-			"%s cannot be read:\n\n%s", path, report.Refusals(refused))
-	}
-	return cfg, refused, nil
-}
-
-// recordFor finds the record a teardown should act on.
-func recordFor(cfg config.Config) (state.Record, error) {
-	live, hashErr := livePath(cfg)
-	if hashErr != nil {
-		return state.Record{}, hashErr
-	}
-
-	record, found, err := state.Load(plan.Hash(live))
-	if err != nil {
-		return state.Record{}, wrap(err, ExitFailure, "")
-	}
-	if !found {
-		return state.Record{}, failure(ExitNotFound, "",
-			"there is no record for %s, so there is nothing camp knows how to "+
-				"take down.\nA namespace session leaves no record on purpose: it "+
-				"ends when its last process exits, and the kernel removes every "+
-				"mount with it. If something is mounted at %s all the same, 'camp "+
-				"status' will show it.", live, live)
-	}
-	return record, nil
-}
-
-func livePath(cfg config.Config) (string, error) {
-	live := cfg.Live()
-	if _, err := os.Stat(live); err != nil {
-		return "", failure(ExitNotFound, "", "%s does not exist", live)
-	}
-	return live, nil
 }
