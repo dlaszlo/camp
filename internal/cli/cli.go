@@ -1,0 +1,251 @@
+package cli
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
+	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/plan"
+	"github.com/dlaszlo/camp/internal/preflight"
+	"github.com/dlaszlo/camp/internal/refusal"
+	"github.com/dlaszlo/camp/internal/report"
+)
+
+// Version is stamped at build time; the zero value is honest about that.
+var Version = "dev"
+
+// command is one subcommand: its name, one line of help, and how to run it.
+type command struct {
+	name    string
+	summary string
+	run     func(ctx *context, args []string) error
+}
+
+// context is what every command is given. Keeping the streams here rather
+// than reaching for os.Stdout means the commands can be tested.
+type context struct {
+	out io.Writer
+	err io.Writer
+}
+
+func (c *context) printf(format string, args ...any) {
+	fmt.Fprintf(c.out, format, args...)
+}
+
+func commands() []command {
+	return []command{
+		{"plan", "print what would be mounted, and why", cmdPlan},
+		{"doctor", "what this machine and this configuration lack", cmdDoctor},
+		{"init", "write a " + config.Dir + "/" + config.FileName + " to start from", cmdInit},
+	}
+}
+
+// Main parses arguments, runs one command and returns an exit code.
+func Main(args []string, out, errOut io.Writer) int {
+	ctx := &context{out: out, err: errOut}
+
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		usage(ctx)
+		return ExitOK
+	}
+	if args[0] == "--version" || args[0] == "version" {
+		ctx.printf("camp %s\n", Version)
+		return ExitOK
+	}
+
+	for _, candidate := range commands() {
+		if candidate.name != args[0] {
+			continue
+		}
+		if err := candidate.run(ctx, args[1:]); err != nil {
+			fmt.Fprintln(errOut, render(err))
+			return exitCode(err)
+		}
+		return ExitOK
+	}
+
+	fmt.Fprintf(errOut, "error: no command called %q\n", args[0])
+	usage(ctx)
+	return ExitUsage
+}
+
+func usage(ctx *context) {
+	ctx.printf("camp composes several git repositories into one working " +
+		"directory,\nwithout any of them learning about the others.\n\n")
+	ctx.printf("usage: camp <command> [options]\n\n")
+	width := 0
+	for _, c := range commands() {
+		if len(c.name) > width {
+			width = len(c.name)
+		}
+	}
+	for _, c := range commands() {
+		ctx.printf("  %-*s  %s\n", width, c.name, c.summary)
+	}
+	ctx.printf("\nrun 'camp <command> -h' for the options of one command\n")
+}
+
+// -- shared plumbing --------------------------------------------------------
+
+func flagsFor(name string) (*flag.FlagSet, *string) {
+	set := flag.NewFlagSet(name, flag.ContinueOnError)
+	file := set.String("f", "", "path to a "+config.Dir+"/"+config.FileName+
+		" (default: found in this directory or above)")
+	return set, file
+}
+
+// resolve finds the composition a command should act on: the one named by
+// -f, or the one this directory belongs to.
+func resolve(file string) (config.Config, error) {
+	path := file
+	if path == "" {
+		start, err := os.Getwd()
+		if err != nil {
+			return config.Config{}, wrap(err, ExitFailure, "")
+		}
+		found, err := config.Find(start)
+		if err != nil {
+			return config.Config{}, wrap(err, ExitNotFound, "")
+		}
+		path = found
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		var refused refusal.List
+		if errors.As(err, &refused) {
+			return config.Config{}, failure(ExitUsage, "",
+				"%s cannot be read:\n\n%s", path, report.Refusals(refused))
+		}
+		return config.Config{}, wrap(err, ExitUsage, "")
+	}
+	return cfg, nil
+}
+
+func parseMode(privileged bool) plan.Mode {
+	if privileged {
+		return plan.Privileged
+	}
+	return plan.Namespace
+}
+
+// -- commands ---------------------------------------------------------------
+
+func cmdPlan(ctx *context, args []string) error {
+	set, file := flagsFor("plan")
+	privileged := set.Bool("privileged", false,
+		"plan for the system-wide mode instead of the namespace mode")
+	if err := set.Parse(args); err != nil {
+		return wrap(err, ExitUsage, "")
+	}
+	cfg, err := resolve(*file)
+	if err != nil {
+		return err
+	}
+
+	built, refused := plan.Prepare(cfg, parseMode(*privileged))
+	if len(built.Mounts) > 0 {
+		ctx.printf("%s", report.Plan(built))
+	}
+	if !refused.Empty() {
+		ctx.printf("this composition would not start. %d thing(s) stop it:\n\n%s",
+			len(refused), report.Refusals(refused))
+		return failure(ExitPrecondition, "",
+			"nothing was mounted, and nothing has to be undone -- every one of "+
+				"these can be fixed by hand right now")
+	}
+	ctx.printf("%s\n", plan.GateSummary(cfg, built.LowerRoot, built.UpperRoot))
+	ctx.printf("nothing stops this composition.\n")
+	return nil
+}
+
+func cmdDoctor(ctx *context, args []string) error {
+	set, file := flagsFor("doctor")
+	if err := set.Parse(args); err != nil {
+		return wrap(err, ExitUsage, "")
+	}
+
+	// Each mode is reported separately: one being unavailable is not a
+	// failure as long as the other works.
+	var usable []preflight.Mode
+	for _, mode := range []preflight.Mode{preflight.Namespace, preflight.Privileged} {
+		checks := preflight.Run(mode)
+		ctx.printf("%s mode:\n%s\n", mode, report.Checks(checks))
+		if len(preflight.Failures(checks)) == 0 {
+			usable = append(usable, mode)
+		}
+	}
+	switch len(usable) {
+	case 0:
+		ctx.printf("no mode is available on this machine.\n\n")
+	case 1:
+		ctx.printf("usable mode: %s\n\n", usable[0])
+	default:
+		ctx.printf("both modes are available.\n\n")
+	}
+
+	cfg, err := resolve(*file)
+	if err != nil {
+		ctx.printf("%s\n", render(err))
+		if len(usable) == 0 {
+			return failure(ExitPrecondition, "", "this machine is missing something camp needs")
+		}
+		return nil
+	}
+
+	ctx.printf("composition: %s\n\n", report.ConfigSummary(cfg))
+	built, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Empty() {
+		ctx.printf("this composition would not start. %d thing(s) stop it:\n\n%s",
+			len(refused), report.Refusals(refused))
+		return failure(ExitPrecondition, "", "something above has to be fixed first")
+	}
+	ctx.printf("%s", plan.GateSummary(cfg, built.LowerRoot, built.UpperRoot))
+	ctx.printf("the configuration is sound: %d mounts, nothing refused.\n", len(built.Mounts))
+	if len(usable) == 0 {
+		return failure(ExitPrecondition, "", "this machine is missing something camp needs")
+	}
+	return nil
+}
+
+// cmdInit writes the skeleton and refuses to overwrite an existing one.
+//
+// No --force: a configuration that is already there was written by
+// somebody for a reason, and replacing it is their move, not camp's.
+func cmdInit(ctx *context, args []string) error {
+	set := flag.NewFlagSet("init", flag.ContinueOnError)
+	if err := set.Parse(args); err != nil {
+		return wrap(err, ExitUsage, "")
+	}
+
+	directory := "."
+	if set.NArg() > 0 {
+		directory = set.Arg(0)
+	}
+	env, err := filepath.Abs(directory)
+	if err != nil {
+		return wrap(err, ExitFailure, "")
+	}
+
+	target := config.Path(env)
+	if _, err := os.Stat(target); err == nil {
+		return failure(ExitPrecondition,
+			"edit it, or move it aside first -- camp does not overwrite a "+
+				"configuration somebody wrote",
+			"%s already exists", target)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return wrap(err, ExitFailure, "")
+	}
+	if err := os.WriteFile(target, []byte(report.ConfigTemplate(env)), 0o644); err != nil {
+		return wrap(err, ExitFailure, "")
+	}
+	ctx.printf("wrote %s\n"+
+		"Edit it -- every CHANGE-ME has to become a real directory name -- "+
+		"then run 'camp plan' to see what it would do.\n", target)
+	return nil
+}

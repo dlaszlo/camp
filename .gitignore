@@ -1,0 +1,10 @@
+# Build output
+/camp
+/dist/
+
+# Go
+*.test
+*.out
+
+# What camp generates for itself, in case anyone runs it from a checkout
+.camp/

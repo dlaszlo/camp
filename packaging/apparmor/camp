@@ -1,0 +1,43 @@
+# AppArmor profile: let this one binary create a user namespace.
+#
+# Ubuntu 23.10 and later refuse unprivileged user namespaces by default
+# (kernel.apparmor_restrict_unprivileged_userns=1). That protection stops
+# a whole class of local privilege escalation, and turning it off
+# system-wide to run one tool trades it away for every program on the
+# machine.
+#
+# This profile is the narrow alternative: it grants the permission to the
+# camp binary and to nothing else. The binary stays otherwise unconfined --
+# it is a development tool that runs your editor, your shell and your test
+# suite, so a confining profile would have to allow nearly everything
+# anyway, and a profile that pretends to confine while allowing everything
+# is worse than an honest one.
+#
+# Install:
+#
+#     sudo install -m 644 packaging/apparmor/camp /etc/apparmor.d/camp
+#     sudo apparmor_parser -r /etc/apparmor.d/camp
+#
+# The path below has to match where the binary actually is. Check with
+# "command -v camp", and edit both the attachment path and the profile
+# name if you install it somewhere else.
+#
+# Uninstall:
+#
+#     sudo rm /etc/apparmor.d/camp
+#     sudo systemctl reload apparmor
+#
+# This is only needed for the rootless mode ("camp run", "camp shell"). The
+# privileged mode ("camp up") does not create a user namespace and is not
+# affected.
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile camp /usr/local/bin/camp flags=(unconfined) {
+  userns,
+
+  # Site-local additions, if the file exists.
+  include if exists <local/camp>
+}

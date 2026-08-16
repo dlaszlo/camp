@@ -1,0 +1,221 @@
+// Package testenv builds real directory trees for the tests.
+//
+// Everything camp decides before it mounts can be decided from ordinary
+// directories, so the tests construct real trees and never need root.
+// What cannot be tested that way -- that the kernel does what the mount
+// asks -- is not pretended to be tested here.
+//
+// The scratch root deliberately does not use t.TempDir(). That lands in
+// /tmp, which is commonly a tmpfs mounted nosuid,nodev, and the tests
+// that go on to mount something need a filesystem whose locked flags a
+// namespace can replicate. One root for every test keeps
+// the surprise out of the tests that mount, at no cost to the ones that
+// do not. CAMP_TEST_ROOT overrides it.
+package testenv
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+
+	"github.com/dlaszlo/camp/internal/config"
+)
+
+// Root returns a scratch directory that is removed when the test ends.
+func Root(t *testing.T) string {
+	t.Helper()
+
+	base := os.Getenv("CAMP_TEST_ROOT")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("finding a home directory for the scratch root: %v", err)
+		}
+		base = filepath.Join(home, "overlayfs", ".camp-tests")
+	}
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatalf("creating the scratch root %s: %v", base, err)
+	}
+	dir, err := os.MkdirTemp(base, "t-")
+	if err != nil {
+		t.Fatalf("creating a scratch directory under %s: %v", base, err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+// Env is a scratch environment directory in the shape camp expects.
+type Env struct {
+	// Path is the environment root -- what env: names.
+	Path string
+	// Workspace, Code and Registry are absolute repository paths.
+	Workspace string
+	Code      string
+	Registry  string
+	// Live is the empty directory the composed tree would appear in.
+	Live string
+}
+
+// NewEnv builds the layout the specification is written against: a code
+// repository, a workspace repository owning the development environment,
+// a separate record repository, and an empty directory for the composed
+// tree.
+//
+// Zero overlap between the two roots except .gitignore, which each
+// repository needs its own copy of -- the steady state the migration is
+// meant to establish.
+func NewEnv(t *testing.T) *Env {
+	t.Helper()
+	root := Root(t)
+
+	env := &Env{
+		Path:      root,
+		Workspace: filepath.Join(root, "workspace"),
+		Code:      filepath.Join(root, "code"),
+		Registry:  filepath.Join(root, "registry"),
+		Live:      filepath.Join(root, "live"),
+	}
+
+	GitRepo(t, env.Code)
+	Write(t, filepath.Join(env.Code, "src", "app.go"), "package main\n")
+	Write(t, filepath.Join(env.Code, "README.md"), "the product\n")
+	Write(t, filepath.Join(env.Code, ".gitignore"), "/node_modules\n")
+
+	GitRepo(t, env.Workspace)
+	Write(t, filepath.Join(env.Workspace, "CLAUDE.md"), "instructions\n")
+	Write(t, filepath.Join(env.Workspace, "AGENTS.md"), "agents\n")
+	Write(t, filepath.Join(env.Workspace, ".gitignore"), "/.claude/worktrees\n")
+	Write(t, filepath.Join(env.Workspace, ".claude", "settings.json"), "{}\n")
+	Write(t, filepath.Join(env.Workspace, ".claude", "agents", "reviewer.md"), "reviewer\n")
+	Write(t, filepath.Join(env.Workspace, ".workspace", "docs", "topology.md"), "docs\n")
+	// The record repository's mount point: committed and empty, because a
+	// bind cannot create its own mount point and git cannot track an empty
+	// directory.
+	Write(t, filepath.Join(env.Workspace, ".registry", ".gitkeep"), "")
+
+	GitRepo(t, env.Registry)
+	Write(t, filepath.Join(env.Registry, "events.jsonl"), "")
+
+	// Committed, because the checks that read git have to meet tracked
+	// content and not an empty index.
+	Commit(t, env.Code, "the product")
+	Commit(t, env.Workspace, "the development environment")
+	Commit(t, env.Registry, "the record")
+
+	MkDir(t, env.Live)
+	return env
+}
+
+// YAML returns a configuration for this environment: the target shape of
+// the specification's own example, with the paths of this scratch tree.
+func (e *Env) YAML() string {
+	return `env: ` + e.Path + `
+merged: live
+
+repositories:
+  - { name: workspace, path: workspace }
+  - { name: code,      path: code }
+  - { name: registry,  path: registry }
+
+overlayfs:
+  lower: [workspace]
+  upper: code
+
+allow_overlap: [.gitignore]
+
+steps:
+  - mount_rw:
+      - { source: "code/.git", target: ".git" }
+      - { source: "registry",  target: ".registry" }
+  - mount_islands:
+      - { source: "workspace/.claude", target: ".claude" }
+  - git_exclude
+`
+}
+
+// Config parses a configuration for this environment, failing the test if
+// it does not parse. Pass an empty string for the default shape.
+func (e *Env) Config(t *testing.T, yaml string) config.Config {
+	t.Helper()
+	if yaml == "" {
+		yaml = e.YAML()
+	}
+	cfg, err := config.Parse([]byte(yaml), config.Path(e.Path))
+	if err != nil {
+		t.Fatalf("the fixture configuration did not parse:\n%v", err)
+	}
+	return cfg
+}
+
+// TryConfig parses a configuration and returns whatever came back, for
+// the tests that are about the refusal.
+func (e *Env) TryConfig(yaml string) (config.Config, error) {
+	return config.Parse([]byte(yaml), config.Path(e.Path))
+}
+
+// GitRepo makes a real git repository, because the checks that read git
+// have to be tested against git and not against a directory that looks
+// like one.
+func GitRepo(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", path, err)
+	}
+	git(t, path, "init", "--quiet", "-b", "main")
+	git(t, path, "config", "user.name", "camp tests")
+	git(t, path, "config", "user.email", "tests@example.invalid")
+	git(t, path, "config", "commit.gpgsign", "false")
+	return path
+}
+
+// Commit stages everything in a repository and commits it, so that the
+// tracked-content checks have tracked content to find.
+func Commit(t *testing.T, path, message string) {
+	t.Helper()
+	git(t, path, "add", "-A")
+	git(t, path, "commit", "--quiet", "--allow-empty", "-m", message)
+}
+
+func git(t *testing.T, path string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", path}, args...)...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, path, err, out)
+	}
+}
+
+// Write creates a file and every directory above it.
+func Write(t *testing.T, path, content string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	return path
+}
+
+// MkDir creates a directory and every directory above it.
+func MkDir(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", path, err)
+	}
+	return path
+}
+
+// Symlink creates a symbolic link, for the tests about refusing them.
+func Symlink(t *testing.T, target, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("linking %s -> %s: %v", path, target, err)
+	}
+	return path
+}
