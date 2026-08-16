@@ -68,6 +68,11 @@ type outcome struct {
 	SecondRefused []string `json:"second_refused"`
 	SecondMounted int      `json:"second_mounted"`
 
+	// The held teardown.
+	HeldStuck    []string `json:"held_stuck"`
+	HeldMessage  string   `json:"held_message"`
+	StillMounted bool     `json:"still_mounted"`
+
 	// Teardown.
 	TornDown int      `json:"torn_down"`
 	Stuck    []string `json:"stuck"`
@@ -130,6 +135,8 @@ func inside() int {
 		return shadow(out, setup, built)
 	case "repeat":
 		return repeat(out, setup, built, cfg)
+	case "held":
+		return held(out, setup, built)
 	}
 
 	result := compose.Build(setup)
@@ -308,6 +315,54 @@ func repeat(out outcome, setup compose.Setup, built plan.Plan, cfg config.Config
 	}
 	probe(&out, second)
 	teardown(&out, second, result)
+	return report(out)
+}
+
+// held is the scenario where something is standing in the tree.
+//
+// A composition cannot be unmounted from under a process whose working
+// directory is inside it, and camp does not pretend otherwise: the mount
+// stays mounted, it is reported as still mounted with the holder named,
+// and the command fails. There is no lazy detach to make the ending look
+// clean.
+func held(out outcome, setup compose.Setup, built plan.Plan) int {
+	result := compose.Build(setup)
+	if !result.OK() {
+		out.Problems = append(out.Problems, result.Refused.Error())
+		return report(out)
+	}
+	out.Mounted = len(result.Mounted)
+
+	inside := filepath.Join(built.Live, ".registry")
+	holder := exec.Command("/bin/sh", "-c", "sleep 30")
+	holder.Dir = inside
+	if err := holder.Start(); err != nil {
+		out.Problems = append(out.Problems, err.Error())
+		return report(out)
+	}
+	defer func() {
+		_ = holder.Process.Kill()
+		_, _ = holder.Process.Wait()
+	}()
+
+	targets := make([]string, 0, len(result.Mounted))
+	for index := len(result.Mounted) - 1; index >= 0; index-- {
+		targets = append(targets, setup.Target(result.Mounted[index]))
+	}
+	teardownReport := compose.Down(targets)
+	for _, stuck := range teardownReport.Stuck {
+		out.HeldStuck = append(out.HeldStuck, stuck.Target)
+		out.HeldMessage += compose.DescribeStuck(stuck)
+	}
+
+	// What could not be removed is still there, and said to be.
+	if _, err := os.Stat(filepath.Join(inside, "events.jsonl")); err == nil {
+		out.StillMounted = true
+	}
+
+	_ = holder.Process.Kill()
+	_, _ = holder.Process.Wait()
+	_ = compose.Down(targets)
 	return report(out)
 }
 
@@ -566,6 +621,31 @@ func TestARepeatedSessionAcceptsItsOwnScaffolding(t *testing.T) {
 	if got.SecondMounted != got.Mounted {
 		t.Errorf("the first run made %d mounts and the second %d",
 			got.Mounted, got.SecondMounted)
+	}
+}
+
+// A teardown that meets a process standing in the tree fails loudly,
+// names it, and leaves the composition where it is.
+func TestATeardownHeldByAProcessFailsLoudlyAndNamesIt(t *testing.T) {
+	env := testenv.NewEnv(t)
+	got := run(t, env, "held")
+
+	for _, problem := range got.Problems {
+		t.Errorf("inside the namespace: %s", problem)
+	}
+	if len(got.HeldStuck) == 0 {
+		t.Fatal("the teardown reported nothing stuck although a process was " +
+			"standing in the tree")
+	}
+	if !got.StillMounted {
+		t.Error("the mount camp could not remove is gone from the tree anyway. " +
+			"That is what a lazy detach does, and camp does not have one: what " +
+			"could not be removed is still mounted and is said to be")
+	}
+	for _, want := range []string{"held by", "Leave that directory"} {
+		if !strings.Contains(got.HeldMessage, want) {
+			t.Errorf("the message does not contain %q:\n%s", want, got.HeldMessage)
+		}
 	}
 }
 

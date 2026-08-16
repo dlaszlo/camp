@@ -9,6 +9,7 @@ import (
 
 	"github.com/dlaszlo/camp/internal/compose"
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/drift"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/holders"
 	"github.com/dlaszlo/camp/internal/inventory"
@@ -37,7 +38,27 @@ func composeCommands() []command {
 		{"list", "every recorded composition", cmdList},
 		{"forget", "drop a composition's record; deletes nothing else", cmdForget},
 		{"accept", "record the two repositories' root entries as they are now", cmdAccept},
+		{"explain", "describe the composed tree to whoever is standing in it", cmdExplain},
 	}
+}
+
+func cmdExplain(ctx *context, args []string) error {
+	set, file := flagsFor("explain")
+	systemWide := set.Bool("privileged", false, "describe the system-wide mode")
+	if err := set.Parse(args); err != nil {
+		return wrap(err, ExitUsage, "")
+	}
+	cfg, err := resolve(*file)
+	if err != nil {
+		return err
+	}
+	built, refused := plan.Prepare(cfg, parseMode(*systemWide))
+	if built.Live == "" {
+		return refusedComposition(refused)
+	}
+	generated, _ := gen.Preview(built)
+	ctx.printf("%s", report.Explain(gen.Expand(built, generated)))
+	return nil
 }
 
 // cmdAccept takes the snapshot every up is compared against.
@@ -373,6 +394,10 @@ func cmdDown(ctx *context, args []string) error {
 		return failure(ExitUsage, "", "%s", err)
 	}
 
+	cfg, err := resolve(*file)
+	if err != nil {
+		return err
+	}
 	record, err := recordFor(*file)
 	if err != nil {
 		return err
@@ -412,6 +437,14 @@ func cmdDown(ctx *context, args []string) error {
 
 	record.Phase = state.Down
 	_ = record.Save()
+
+	// The four read-only scans, while the cause is still fresh. They never
+	// block: down may only report.
+	if built, refused := plan.Prepare(cfg, plan.Privileged); refused.Empty() || built.Live != "" {
+		if found := drift.Refresh(built); !found.Empty() {
+			ctx.printf("\n%s", found.String())
+		}
+	}
 
 	if leftovers, err := compose.Residue(record.Live); err == nil && len(leftovers) > 0 {
 		ctx.printf("\n%s is not empty after unmounting: %s\n"+
@@ -530,12 +563,7 @@ func cmdForget(ctx *context, args []string) error {
 	if err != nil {
 		return wrap(err, ExitFailure, "")
 	}
-	var still []string
-	for _, mount := range record.Mounts {
-		if len(mountinfo.At(table, mount.Target)) > 0 {
-			still = append(still, mount.Target)
-		}
-	}
+	still := state.StillMounted(record, table)
 	if len(still) > 0 {
 		return failure(ExitPrecondition, "",
 			"%s is in phase %q and %d of its mounts are still present: %s.\n"+

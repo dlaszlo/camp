@@ -4,7 +4,6 @@ package main
 
 import (
 	"os"
-	"strconv"
 
 	"github.com/dlaszlo/camp/internal/cli"
 	"github.com/dlaszlo/camp/internal/preflight"
@@ -27,7 +26,7 @@ func main() {
 	// discovery and no logging can run before it -- it has one job, and it
 	// is holding the session's locks while it does it.
 	if len(os.Args) > 1 && os.Args[1] == session.InitArg {
-		runInit(os.Args[2:])
+		session.InitMain(os.Args[2:])
 		return
 	}
 
@@ -44,19 +43,4 @@ func main() {
 	}
 
 	os.Exit(cli.Main(os.Args[1:], os.Stdout, os.Stderr))
-}
-
-// runInit unpacks "<config> <uid> <gid> -- <command>..." and hands over.
-func runInit(args []string) {
-	if len(args) < 4 || args[3] != "--" {
-		os.Stderr.WriteString("camp: the session init was invoked wrongly\n")
-		os.Exit(1)
-	}
-	uid, uidErr := strconv.Atoi(args[1])
-	gid, gidErr := strconv.Atoi(args[2])
-	if uidErr != nil || gidErr != nil {
-		os.Stderr.WriteString("camp: the session init was given a bad identity\n")
-		os.Exit(1)
-	}
-	session.Inside(args[0], uid, gid, args[4:])
 }

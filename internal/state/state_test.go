@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/state"
 	"github.com/dlaszlo/camp/internal/testenv"
@@ -202,6 +203,61 @@ func TestForgetRemovesTheRecordAndNothingElse(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("%s was removed too; forget deletes one file and nothing "+
 				"else: not a repository, not the storage, not the composed tree", path)
+		}
+	}
+}
+
+// forget refuses while any mount of the recorded plan is still there.
+//
+// The record is the only authoritative list of what a teardown has to
+// remove -- down's to consume, not forget's to lose -- so the check is
+// against the kernel's table and not against the phase, which a crash can
+// leave saying anything.
+func TestForgetIsRefusedWhileAnythingIsStillMounted(t *testing.T) {
+	scratch(t)
+	record, _ := fixture(t)
+	record.Phase = state.Partial
+	if err := record.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The kernel's table, with one of the recorded mounts in it.
+	table, err := mountinfo.Read(mountinfo.Self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.StillMounted(record, table)) != 0 {
+		t.Fatal("the fixture's paths are somehow mounted already")
+	}
+
+	pretend := append(table, mountinfo.Entry{Point: record.Mounts[0].Target, FSType: "overlay"})
+	still := state.StillMounted(record, pretend)
+	if len(still) != 1 || still[0] != record.Mounts[0].Target {
+		t.Fatalf("the still-mounted check found %v", still)
+	}
+}
+
+// list shows the phase of every record, and a corrupt one as corrupt.
+func TestListShowsPhases(t *testing.T) {
+	scratch(t)
+	record, _ := fixture(t)
+	for _, phase := range []state.Phase{state.Mounting, state.Up, state.Partial, state.Down} {
+		record.Phase = phase
+		record.Hash = string(phase) + "0000000000"
+		if err := record.Save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seen := map[state.Phase]bool{}
+	for _, listing := range state.All() {
+		if listing.Corrupt == nil {
+			seen[listing.Record.Phase] = true
+		}
+	}
+	for _, phase := range []state.Phase{state.Mounting, state.Up, state.Partial, state.Down} {
+		if !seen[phase] {
+			t.Errorf("no record listed in phase %q", phase)
 		}
 	}
 }

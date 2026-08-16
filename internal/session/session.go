@@ -51,11 +51,13 @@ import (
 	"github.com/dlaszlo/camp/internal/capsx"
 	"github.com/dlaszlo/camp/internal/compose"
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/drift"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/locks"
 	"github.com/dlaszlo/camp/internal/nsx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
+	"github.com/dlaszlo/camp/internal/reports"
 )
 
 // InitArg is the hidden argument that marks the re-executed child. It is
@@ -166,7 +168,13 @@ func Launch(options Options) (int, error) {
 		case kindRefused:
 			return 1, refusal.New("session-refused", "%s", note.Text)
 		case kindExit:
-			status = note.Code
+			// The workload is finished, and that is what this process was
+			// waiting for. The init may well still be resident -- holding the
+			// composition open for a server that reparented to it -- and
+			// waiting for the pipe to close would mean waiting for the whole
+			// session, which is exactly what 'camp run -- tmux new-session -d'
+			// must not do.
+			return note.Code, nil
 		}
 	}
 
@@ -187,6 +195,25 @@ func namespaceError(err error) error {
 				"binary anywhere else is not covered by it.")
 	}
 	return fmt.Errorf("starting the session: %w", err)
+}
+
+// InitMain unpacks the init's argument vector and hands over.
+//
+// The binary dispatches to this before anything else -- no flag parsing,
+// no configuration discovery, no logging in between. The init has one
+// job, and it is holding the session's locks while it does it.
+func InitMain(args []string) {
+	if len(args) < 4 || args[3] != "--" {
+		os.Stderr.WriteString("camp: the session init was invoked wrongly\n")
+		os.Exit(1)
+	}
+	uid, uidErr := strconv.Atoi(args[1])
+	gid, gidErr := strconv.Atoi(args[2])
+	if uidErr != nil || gidErr != nil {
+		os.Stderr.WriteString("camp: the session init was given a bad identity\n")
+		os.Exit(1)
+	}
+	Inside(args[0], uid, gid, args[4:])
 }
 
 // Inside is the init: camp as pid 1 of the namespace.
@@ -248,10 +275,40 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	}
 	report(message{Kind: kindUp})
 
-	status := supervise(workload)
-	report(message{Kind: kindExit, Code: status})
+	// The workload's status goes back the moment the workload exits, not
+	// when the session ends. Those are different moments whenever
+	// something daemonised: the launching command is finished and its
+	// caller should get its shell back, while the server that reparented
+	// to this process keeps the composition open.
+	supervise(workload, func(status int) {
+		report(message{Kind: kindExit, Code: status})
+	})
+
+	// The last thing this process does before the kernel takes the
+	// namespace apart: look, while the composition still exists, and leave
+	// what it found where somebody will meet it. This is the only moment
+	// anything can look -- there is no down here, and by the time a
+	// detached session empties, its terminal is long gone.
+	farewell(built, os.Stderr)
+
 	pipe.Close()
 	os.Exit(0)
+}
+
+// farewell runs the same read-only pass the privileged down runs, writes
+// it where the next camp command will find it, and prints it when there
+// is still a terminal attached.
+func farewell(built plan.Plan, stderr *os.File) {
+	found := drift.Refresh(built)
+	if found.Empty() {
+		return
+	}
+	body := "the session at " + built.Live + " ended.\n\n" + found.String()
+	if _, err := reports.Write(built.Config.CampDir(), built.Hash, body); err != nil {
+		fmt.Fprintf(stderr, "camp: the end-of-session report could not be "+
+			"written: %v\n", err)
+	}
+	fmt.Fprintf(stderr, "\n%s", body)
 }
 
 // rebuild derives the plan again inside the namespace.
@@ -352,9 +409,9 @@ func shell() string {
 // it must never kill the supervisor that is holding the locks in the
 // middle of a session.
 //
-// It returns when the last other process in the namespace is gone, with
-// the workload's exit status.
-func supervise(workload *exec.Cmd) int {
+// It calls back the moment the workload itself exits, and returns when
+// the last other process in the namespace is gone.
+func supervise(workload *exec.Cmd, workloadExited func(int)) {
 	ignored := make(chan os.Signal, 1)
 	signal.Notify(ignored, unix.SIGINT, unix.SIGQUIT, unix.SIGTTIN, unix.SIGTTOU)
 	go func() {
@@ -372,7 +429,6 @@ func supervise(workload *exec.Cmd) int {
 		}
 	}()
 
-	status := 0
 	for {
 		var wait unix.WaitStatus
 		pid, err := unix.Wait4(-1, &wait, 0, nil)
@@ -381,12 +437,12 @@ func supervise(workload *exec.Cmd) int {
 			continue
 		case errors.Is(err, unix.ECHILD):
 			// Nothing is left in the namespace. The session is over.
-			return status
+			return
 		case err != nil:
-			return status
+			return
 		}
 		if workload.Process != nil && pid == workload.Process.Pid {
-			status = exitStatus(wait)
+			workloadExited(exitStatus(wait))
 		}
 	}
 }

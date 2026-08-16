@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/dlaszlo/camp/internal/fsx"
+	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/plan"
 )
 
@@ -266,6 +267,23 @@ func All() []Listing {
 // storage, not the composed tree -- one file.
 func Forget(hash string) error {
 	return fsx.State(Dir()).Remove(hash + ".json")
+}
+
+// StillMounted returns the recorded mounts that are still present.
+//
+// This is what stops `forget` from discarding a composition that is up.
+// The record is the only authoritative list of what a teardown has to
+// remove -- it is down's to consume, not forget's to lose -- so the check
+// is against the kernel's table and not against the phase, which a crash
+// can leave behind.
+func StillMounted(record Record, table []mountinfo.Entry) []string {
+	var present []string
+	for _, mount := range record.Mounts {
+		if len(mountinfo.At(table, mount.Target)) > 0 {
+			present = append(present, mount.Target)
+		}
+	}
+	return present
 }
 
 // Teardown returns the recorded mounts in the order they come down.

@@ -11,10 +11,13 @@ import (
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/gen"
+	"github.com/dlaszlo/camp/internal/health"
+	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/report"
+	"github.com/dlaszlo/camp/internal/reports"
 )
 
 // Version is stamped at build time; the zero value is honest about that.
@@ -126,6 +129,13 @@ func resolve(file string) (config.Config, error) {
 		}
 		return config.Config{}, wrap(err, ExitUsage, "")
 	}
+
+	// A namespace session leaves its findings in a file, because by the
+	// time its last window closes there is nobody to print them to. This
+	// is where they reach somebody: once, and then marked as read.
+	reports.Show(cfg.CampDir(), func(text string) {
+		fmt.Fprintf(os.Stderr, "%s\n", text)
+	})
 	return cfg, nil
 }
 
@@ -215,6 +225,21 @@ func cmdDoctor(ctx *context, args []string) error {
 	}
 	ctx.printf("%s", plan.GateSummary(cfg, built.LowerRoot, built.UpperRoot))
 	ctx.printf("the configuration is sound: %d mounts, nothing refused.\n", len(built.Mounts))
+
+	if len(built.Warnings) > 0 {
+		ctx.printf("\nworth knowing (none of these stop a composition):\n")
+		for _, warning := range built.Warnings {
+			ctx.printf("  %s\n", warning)
+		}
+	}
+
+	table, tableErr := mountinfo.Read(mountinfo.Self)
+	if tableErr == nil {
+		if notes := health.Look(cfg, built, table); len(notes) > 0 {
+			ctx.printf("\nthis environment:\n%s", health.Render(notes))
+		}
+	}
+
 	if len(usable) == 0 {
 		return failure(ExitPrecondition, "", "this machine is missing something camp needs")
 	}
