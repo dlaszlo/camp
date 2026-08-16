@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -352,17 +353,16 @@ type raw struct {
 	// to honour it but to recognise it: a shipped key that moves owes the
 	// reader its forwarding address rather than the generic unknown-key
 	// message.
-	Identity string      `yaml:"identity"`
-	Session  *rawSession `yaml:"session"`
+	Identity string    `yaml:"identity"`
+	Session  yaml.Node `yaml:"session"`
 }
 
-// rawSession is the section as YAML sees it. The fields are nodes rather
-// than values so that a wrong shape is refused with its own message and
-// its own line, instead of failing the whole document's decode.
-type rawSession struct {
-	Identity    string    `yaml:"identity"`
-	Environment yaml.Node `yaml:"environment"`
-}
+// sessionKeys is what the section may hold. The section is read by hand
+// rather than decoded into a struct, so that an unknown key is refused
+// with a message written for a person -- naming the key, the line and the
+// keys that do exist -- instead of the YAML reader's own sentence, which
+// would name a Go type the reader has never heard of.
+var sessionKeys = []string{"identity", "environment"}
 
 type rawRepo struct {
 	Name string `yaml:"name"`
@@ -396,10 +396,10 @@ func Parse(data []byte, source string) (Config, error) {
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&document); err != nil {
 		return Config{}, refusal.New("config-syntax",
-			"%s could not be read as YAML: %v.\n"+
+			"%s could not be read as YAML: %s.\n"+
 				"Unknown keys are refused too -- camp never guesses at a key it does "+
 				"not know, because a typo that is quietly ignored is a protection "+
-				"that quietly is not there.", source, err)
+				"that quietly is not there.", source, readable(err))
 	}
 
 	cfg := Config{Source: source}
@@ -417,6 +417,20 @@ func Parse(data []byte, source string) (Config, error) {
 	checkGenerationSteps(cfg.Steps, &refused)
 
 	return cfg, refused.Err()
+}
+
+// goType matches the YAML reader's way of naming the structure it was
+// decoding into: "field sandbox not found in type config.raw".
+var goType = regexp.MustCompile(` in type [A-Za-z0-9_.]+`)
+
+// readable strips camp's own internals out of the YAML reader's message.
+//
+// The rest of that sentence is genuinely useful -- it names the line and
+// the key -- but the name of a Go type means nothing to somebody editing
+// a configuration file, and every message here is written for a reader
+// who has not seen the source.
+func readable(err error) string {
+	return goType.ReplaceAllString(err.Error(), "")
 }
 
 func parseEnv(value string, refused *refusal.List) string {
@@ -585,6 +599,9 @@ func checkMovedIdentity(value string, refused *refusal.List) {
 	if value == "" {
 		return
 	}
+	// The value is the reader's own bytes, so it is encoded like every other
+	// name camp prints: a raw newline in it would otherwise break the two
+	// lines below into something that is not a repair.
 	refused.Add("identity-moved",
 		"identity: is at the top level of the file, and it now lives inside "+
 			"the session: section:\n\n"+
@@ -592,19 +609,74 @@ func checkMovedIdentity(value string, refused *refusal.List) {
 			"It configures the session 'camp run' and 'camp shell' start -- which "+
 			"uid route their namespace uses -- and nothing about the composed "+
 			"tree, so it sits with the other key of that kind rather than beside "+
-			"the mounts. Nothing else about it changed.", value)
+			"the mounts. Nothing else about it changed.", enc.Encode(value))
 }
 
 // parseSession reads the section that configures the session.
-func parseSession(section *rawSession, refused *refusal.List) Session {
-	if section == nil {
+//
+// Presence is exactly whether the key is in the file, which is what the
+// privileged mode announces on. A section with nothing under it is still
+// a section: it declares nothing, and saying so is not the same as
+// saying nothing.
+func parseSession(node yaml.Node, refused *refusal.List) Session {
+	if node.Kind == 0 {
 		return Session{}
 	}
-	return Session{
-		Present:     true,
-		Identity:    parseIdentity(section.Identity, refused),
-		Environment: parseEnvironment(section.Environment, refused),
+	session := Session{Present: true}
+	if node.Tag == "!!null" {
+		return session
 	}
+	if node.Kind != yaml.MappingNode {
+		refused.Add("session-shape",
+			"session: at line %d is %s. It is a section holding the keys that "+
+				"configure the session 'camp run' and 'camp shell' start:\n\n"+
+				"  session:\n    identity: uidmap\n    environment:\n"+
+				"      NAME: \"value\"\n\n"+
+				"Both keys are optional; the section may hold either, both, or "+
+				"nothing at all.", node.Line, describeNode(node))
+		return session
+	}
+
+	var identity string
+	var environment yaml.Node
+	lines := map[string]int{}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		key, value := node.Content[index], node.Content[index+1]
+		if previous, twice := lines[key.Value]; twice {
+			refused.Add("session-duplicate",
+				"session: declares %s twice, at lines %d and %d.\n"+
+					"Only one of them could take effect, and camp will not pick "+
+					"which. Keep the one you meant.",
+				enc.Encode(key.Value), previous, key.Line)
+			continue
+		}
+		lines[key.Value] = key.Line
+
+		switch key.Value {
+		case "identity":
+			if value.Kind != yaml.ScalarNode {
+				refused.Add("identity-unknown",
+					"session.identity at line %d is %s. It is one of two words: "+
+						"leave it out for the default -- your own uid mapped to itself "+
+						"-- or write 'identity: uidmap'.", value.Line, describeNode(*value))
+				continue
+			}
+			identity = value.Value
+		case "environment":
+			environment = *value
+		default:
+			refused.Add("session-unknown-key",
+				"session: has a key camp does not know at line %d: %s.\n"+
+					"The section holds %s, and nothing else. camp refuses a key it "+
+					"does not recognise rather than ignoring it, because a typo that "+
+					"is quietly skipped is a setting that looks applied and is not.",
+				key.Line, enc.Encode(key.Value), strings.Join(sessionKeys, " and "))
+		}
+	}
+
+	session.Identity = parseIdentity(identity, refused)
+	session.Environment = parseEnvironment(environment, refused)
+	return session
 }
 
 func parseIdentity(value string, refused *refusal.List) Identity {

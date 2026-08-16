@@ -285,10 +285,12 @@ steps:
 # Uncomment from here down and edit:
 #
 # session:
-#   # How you are mapped inside. Leave it out for the default: your own
-#   # uid mapped to itself, with the mount capability dropped before
-#   # anything you asked for runs.
-#   identity: uidmap
+#   # How you are mapped inside. The default -- your own uid mapped to
+#   # itself, with the mount capability dropped before anything you asked
+#   # for runs -- is what you get by leaving this out, and it is what you
+#   # want unless you know otherwise. The other route needs the uidmap
+#   # package installed. It stays commented when you uncomment the rest.
+#   # identity: uidmap
 #
 #   environment:
 #     SOME_TOOL_OPTIONS: "--config ${HOME}/.config/some-tool"

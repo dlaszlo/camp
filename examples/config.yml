@@ -94,11 +94,13 @@ steps:
 #
 # session:
 #   # Which uid route the namespace takes. Left out, your own uid maps to
-#   # itself and the mount capability is dropped before anything runs.
-#   # 'uidmap' uses newuidmap and your subuid range instead, podman's
-#   # keep-id shape. camp never switches between them on its own: they
-#   # present different uid worlds to whatever runs inside.
-#   identity: uidmap
+#   # itself and the mount capability is dropped before anything runs --
+#   # which is the route you want unless you know otherwise. 'uidmap' uses
+#   # newuidmap and your subuid range instead, podman's keep-id shape, and
+#   # needs the uidmap package installed. camp never switches between them
+#   # on its own: they present different uid worlds to whatever runs
+#   # inside. This line stays commented when you uncomment the rest.
+#   # identity: uidmap
 #
 #   # The environment the workload receives, and through ordinary
 #   # inheritance everything descended from it. This is not env: at the

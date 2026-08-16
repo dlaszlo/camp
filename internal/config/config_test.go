@@ -271,11 +271,88 @@ func TestDeclarationsAreReadInByteOrder(t *testing.T) {
 }
 
 // The section is strict like everything else: a key camp does not know is
-// refused rather than ignored.
+// refused rather than ignored, and the refusal is written for somebody
+// editing a file rather than for somebody reading camp's source.
 func TestAnUnknownSessionKeyIsRefused(t *testing.T) {
 	env := testenv.NewEnv(t)
-	_, err := env.TryConfig(session(env, "  sandbox: yes\n"))
+	list := mustRefuse(t, mustFail(env, session(env, "  sandbox: yes\n")),
+		"session-unknown-key")
+	for _, want := range []string{"sandbox", "identity and environment"} {
+		if !strings.Contains(list.Error(), want) {
+			t.Errorf("the refusal does not mention %q:\n%v", want, list.Error())
+		}
+	}
+	if strings.Contains(list.Error(), "config.") {
+		t.Errorf("the refusal names one of camp's own Go types:\n%v", list.Error())
+	}
+}
+
+// No message camp prints names a Go type. The YAML reader's own sentence
+// does, and it is useful for everything else it says -- the line and the
+// key -- so the type is taken out rather than the sentence.
+func TestNoRefusalNamesOneOfCampsOwnTypes(t *testing.T) {
+	env := testenv.NewEnv(t)
+	// A file YAML itself cannot read comes back as one refusal rather than
+	// a list, so this reads the error directly.
+	err := mustFail(env, env.YAML()+"\nwritable: [x]\n")
 	mustRefuse(t, err, "config-syntax")
+	if !strings.Contains(err.Error(), "field writable not found") {
+		t.Errorf("the refusal no longer names the key:\n%v", err)
+	}
+	if strings.Contains(err.Error(), "in type") {
+		t.Errorf("the refusal names a Go type:\n%v", err)
+	}
+}
+
+// The rest of the section's own shape refusals.
+func TestSessionShapeRefusals(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cases := []struct {
+		name string
+		body string
+		rule string
+		says string
+	}{
+		{"the section is a list", "  [a]\n", "session-shape", "a list"},
+		{"identity is not a word", "  identity: [a]\n", "identity-unknown", "a list"},
+		{"the same key twice", "  identity: uidmap\n  identity: uidmap\n",
+			"session-duplicate", "twice"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			yaml := env.YAML() + "\nsession:\n" + test.body
+			if test.name == "the section is a list" {
+				yaml = env.YAML() + "\nsession: [a]\n"
+			}
+			list := mustRefuse(t, mustFail(env, yaml), test.rule)
+			if !strings.Contains(list.Error(), test.says) {
+				t.Errorf("the refusal does not mention %q:\n%v", test.says, list.Error())
+			}
+		})
+	}
+}
+
+// A section with nothing under it is still a section. It declares nothing,
+// and the privileged mode saying so is not the same as it saying nothing.
+func TestASectionWithNoBodyIsStillPresent(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg, err := env.TryConfig(env.YAML() + "\nsession:\n")
+	if err != nil {
+		t.Fatalf("an empty section is legal and was refused:\n%v", err)
+	}
+	if !cfg.Session.Present {
+		t.Error("'session:' with nothing under it reports no section at all, so " +
+			"the privileged mode would say nothing about a key that is in the file")
+	}
+	if cfg.Session.Declares() {
+		t.Error("an empty section declares something")
+	}
+}
+
+// mustFail parses a configuration that is supposed to be refused.
+func mustFail(env *testenv.Env, yaml string) error {
+	_, err := env.TryConfig(yaml)
+	return err
 }
 
 // Every shape refusal of session.environment, each with the rule that has
