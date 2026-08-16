@@ -47,6 +47,10 @@ func (l *List) Add(rule, format string, args ...any) {
 // Extend appends every refusal of another list.
 func (l *List) Extend(other List) { *l = append(*l, other...) }
 
+// Push appends a refusal that was built somewhere else, so that a check
+// living in its own package still reports through the one mechanism.
+func (l *List) Push(r R) { *l = append(*l, r) }
+
 // Empty reports whether nothing was refused.
 func (l List) Empty() bool { return len(l) == 0 }
 

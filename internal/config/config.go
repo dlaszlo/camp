@@ -18,14 +18,18 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/dlaszlo/camp/internal/enc"
+	"github.com/dlaszlo/camp/internal/envx"
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/refusal"
 )
@@ -71,10 +75,53 @@ type Config struct {
 	// order it will run.
 	Steps []Step
 
-	// Identity selects how the user is mapped inside a namespace. Empty is
-	// route A, the only route camp takes on its own.
-	Identity Identity
+	// Session is everything that configures the session camp starts, and
+	// nothing that configures the tree.
+	Session Session
 }
+
+// Session is the `session:` section: what shapes the supervised run that
+// 'camp run' and 'camp shell' create, and that ends with its last process.
+//
+// It exists as a section because more than one key is scoped this way, and
+// because a flat key does not say in the file what it applies to. What is
+// mounted, protected and generated is the composition itself -- the same
+// in every mode -- and stays outside this section. The privileged mode
+// starts no session, so it announces this section rather than applying it
+// or refusing it (§14): an explicit statement of non-application cannot
+// look applied, and refusing would only force editing the file to move
+// between the modes.
+type Session struct {
+	// Present is whether the file has the section at all. It is what the
+	// privileged mode announces on; an empty section declares nothing but is
+	// still present.
+	Present bool
+
+	// Identity selects how the user is mapped inside the namespace. Empty
+	// is route A, the only route camp takes on its own.
+	Identity Identity
+
+	// Environment is every declared variable, in byte order by name. The
+	// mapping's own order carries no meaning: declarations never read each
+	// other, so nothing depends on which was written first.
+	Environment []Declaration
+}
+
+// Declaration is one environment variable the session declares.
+//
+// It carries the expression, never a resolved value: resolution needs the
+// environment camp was started with, happens in the process that is about
+// to start the workload, and the bytes it produces reach that workload's
+// environment and nothing else camp writes.
+type Declaration struct {
+	Name string
+	Expr envx.Expr
+	// Line is where the entry sits in the file.
+	Line int
+}
+
+// Declares reports whether the session declares any environment variable.
+func (s Session) Declares() bool { return len(s.Environment) > 0 }
 
 // Identity is the uid-mapping route for the namespace mode.
 type Identity string
@@ -301,7 +348,20 @@ type raw struct {
 	Overlayfs    rawOverlay  `yaml:"overlayfs"`
 	AllowOverlap []string    `yaml:"allow_overlap"`
 	Steps        []yaml.Node `yaml:"steps"`
-	Identity     string      `yaml:"identity"`
+	// Identity is the key's old top-level position. It is still read, not
+	// to honour it but to recognise it: a shipped key that moves owes the
+	// reader its forwarding address rather than the generic unknown-key
+	// message.
+	Identity string      `yaml:"identity"`
+	Session  *rawSession `yaml:"session"`
+}
+
+// rawSession is the section as YAML sees it. The fields are nodes rather
+// than values so that a wrong shape is refused with its own message and
+// its own line, instead of failing the whole document's decode.
+type rawSession struct {
+	Identity    string    `yaml:"identity"`
+	Environment yaml.Node `yaml:"environment"`
 }
 
 type rawRepo struct {
@@ -350,7 +410,8 @@ func Parse(data []byte, source string) (Config, error) {
 	cfg.Repositories = parseRepositories(document.Repositories, &refused)
 	cfg.Lower, cfg.Upper = parseOverlay(document.Overlayfs, cfg.Repositories, &refused)
 	cfg.AllowOverlap = parseAllowOverlap(document.AllowOverlap, &refused)
-	cfg.Identity = parseIdentity(document.Identity, &refused)
+	checkMovedIdentity(document.Identity, &refused)
+	cfg.Session = parseSession(document.Session, &refused)
 	cfg.Steps = parseSteps(document.Steps, cfg.Repositories, &refused)
 
 	checkGenerationSteps(cfg.Steps, &refused)
@@ -513,6 +574,39 @@ func parseAllowOverlap(entries []string, refused *refusal.List) []string {
 	return names
 }
 
+// checkMovedIdentity meets a configuration written before the key moved.
+//
+// identity: configures the session and nothing else, so it now lives in
+// the session: section beside the environment. Left as an unknown
+// top-level key it would produce the generic "camp does not know this
+// key" refusal, which is true and useless: the reader knows what the key
+// means and needs to be told where it went.
+func checkMovedIdentity(value string, refused *refusal.List) {
+	if value == "" {
+		return
+	}
+	refused.Add("identity-moved",
+		"identity: is at the top level of the file, and it now lives inside "+
+			"the session: section:\n\n"+
+			"  session:\n    identity: %s\n\n"+
+			"It configures the session 'camp run' and 'camp shell' start -- which "+
+			"uid route their namespace uses -- and nothing about the composed "+
+			"tree, so it sits with the other key of that kind rather than beside "+
+			"the mounts. Nothing else about it changed.", value)
+}
+
+// parseSession reads the section that configures the session.
+func parseSession(section *rawSession, refused *refusal.List) Session {
+	if section == nil {
+		return Session{}
+	}
+	return Session{
+		Present:     true,
+		Identity:    parseIdentity(section.Identity, refused),
+		Environment: parseEnvironment(section.Environment, refused),
+	}
+}
+
 func parseIdentity(value string, refused *refusal.List) Identity {
 	switch Identity(value) {
 	case Ambient:
@@ -521,8 +615,8 @@ func parseIdentity(value string, refused *refusal.List) Identity {
 		return UIDMap
 	default:
 		refused.Add("identity-unknown",
-			"identity: is %q, which camp does not know. Leave it out for the "+
-				"default -- your own uid mapped to itself, with the mount "+
+			"session.identity is %q, which camp does not know. Leave it out for "+
+				"the default -- your own uid mapped to itself, with the mount "+
 				"capability carried in the ambient set and dropped before anything "+
 				"runs -- or write 'identity: uidmap' to use newuidmap and the "+
 				"subuid range instead. camp never switches between the two on its "+
@@ -530,6 +624,116 @@ func parseIdentity(value string, refused *refusal.List) Identity {
 			value)
 		return Ambient
 	}
+}
+
+// parseEnvironment reads session.environment: the variables the workload
+// receives.
+//
+// Note which key this is not. The top-level env: names the environment
+// *root directory*, the one absolute path in the file; this declares the
+// *process environment* a session's workload runs with. The two are
+// neighbours in name and nothing else.
+//
+// Every entry is checked here except one thing: whether a referenced name
+// is set. That needs the environment the command was started with, so it
+// belongs to planning, and everything else is reported in this one pass.
+func parseEnvironment(node yaml.Node, refused *refusal.List) []Declaration {
+	if node.Kind == 0 {
+		return nil
+	}
+	if node.Kind != yaml.MappingNode {
+		refused.Add("environment-shape",
+			"session.environment at line %d is %s. It has to be a mapping from "+
+				"variable names to string values:\n\n"+
+				"  session:\n    environment:\n      NAME: \"value\"\n\n"+
+				"camp does not read another YAML shape as process settings.",
+			node.Line, describeNode(node))
+		return nil
+	}
+
+	declarations := make([]Declaration, 0, len(node.Content)/2)
+	lines := map[string]int{}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		key, value := node.Content[index], node.Content[index+1]
+		name := key.Value
+
+		if err := envx.CheckName(name); err != nil {
+			push(refused, err)
+			continue
+		}
+		if previous, duplicate := lines[name]; duplicate {
+			refused.Add("environment-duplicate",
+				"session.environment declares %s twice, at lines %d and %d.\n"+
+					"Only one of them could reach the workload, and camp will not "+
+					"pick which. Keep the one you meant.",
+				enc.Encode(name), previous, key.Line)
+			continue
+		}
+		if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+			refused.Add("environment-shape",
+				"session.environment.%s at line %d is %s, not a string.\n"+
+					"An environment value is bytes: it has no number, boolean or null "+
+					"type for camp to convert from, and guessing at the text a value "+
+					"was meant to have is not something camp does. Quote it: "+
+					"%s: \"%s\".",
+				enc.Encode(name), value.Line, describeNode(*value),
+				enc.Encode(name), enc.Encode(value.Value))
+			continue
+		}
+
+		expression, err := envx.Parse(name, value.Value)
+		if err != nil {
+			push(refused, err)
+			continue
+		}
+		lines[name] = key.Line
+		declarations = append(declarations, Declaration{
+			Name: name, Expr: expression, Line: key.Line,
+		})
+	}
+
+	// Byte order, so that two orderings of the same map are the same
+	// composition and every report of it reads the same.
+	sort.Slice(declarations, func(i, j int) bool {
+		return declarations[i].Name < declarations[j].Name
+	})
+	return declarations
+}
+
+// describeNode names a YAML shape the way somebody reading the file would.
+func describeNode(node yaml.Node) string {
+	switch node.Kind {
+	case yaml.SequenceNode:
+		return "a list"
+	case yaml.MappingNode:
+		return "a mapping"
+	case yaml.AliasNode:
+		return "an alias"
+	}
+	switch node.Tag {
+	case "!!null":
+		return "empty"
+	case "!!int", "!!float":
+		return "a number"
+	case "!!bool":
+		return "a true/false value"
+	case "!!str":
+		return "a string"
+	default:
+		return "a " + strings.TrimPrefix(node.Tag, "!!") + " value"
+	}
+}
+
+// push carries a refusal built elsewhere into this file's list, so that a
+// grammar check living in its own package still reports through the one
+// mechanism everything else does.
+func push(refused *refusal.List, err error) {
+	var single refusal.R
+	if errors.As(err, &single) {
+		refused.Push(single)
+		return
+	}
+	refused.Add("environment-shape", "%v", err)
 }
 
 // parseSteps reads the sequence. Each item is either a bare kind or a

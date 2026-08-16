@@ -57,8 +57,8 @@ func TestTargetConfigurationParses(t *testing.T) {
 	if cfg.Upper != "code" || len(cfg.Lower) != 1 || cfg.Lower[0] != "workspace" {
 		t.Errorf("the layers came out as lower=%v upper=%q", cfg.Lower, cfg.Upper)
 	}
-	if cfg.Identity != config.Ambient {
-		t.Errorf("identity came out as %q, wanted the default", cfg.Identity)
+	if cfg.Session.Identity != config.Ambient {
+		t.Errorf("identity came out as %q, wanted the default", cfg.Session.Identity)
 	}
 	if !cfg.AllowsOverlap(".gitignore") {
 		t.Error("allow_overlap did not carry .gitignore")
@@ -189,19 +189,182 @@ func TestSourcelessMountRWIsAWritableHole(t *testing.T) {
 func TestIdentityRoutes(t *testing.T) {
 	env := testenv.NewEnv(t)
 
-	cfg, err := env.TryConfig(env.YAML() + "\nidentity: uidmap\n")
+	cfg, err := env.TryConfig(env.YAML() + "\nsession:\n  identity: uidmap\n")
 	if err != nil {
-		t.Fatalf("identity: uidmap is a legal choice and was refused:\n%v", err)
+		t.Fatalf("session.identity: uidmap is a legal choice and was refused:\n%v", err)
 	}
-	if cfg.Identity != config.UIDMap {
-		t.Errorf("identity came out as %q", cfg.Identity)
+	if cfg.Session.Identity != config.UIDMap {
+		t.Errorf("identity came out as %q", cfg.Session.Identity)
 	}
 
-	_, err = env.TryConfig(env.YAML() + "\nidentity: whatever\n")
+	_, err = env.TryConfig(env.YAML() + "\nsession:\n  identity: whatever\n")
 	list := mustRefuse(t, err, "identity-unknown")
 	if !strings.Contains(list.Error(), "never switches between the two on its own") {
 		t.Error("the refusal should say camp never falls back between the routes")
 	}
+}
+
+// The key was shipped at the top level. A configuration written then meets
+// the move, and a reader who knows what identity: means should be told
+// where it went rather than that camp does not know the key.
+func TestTheOldTopLevelIdentityNamesItsNewPlace(t *testing.T) {
+	env := testenv.NewEnv(t)
+	_, err := env.TryConfig(env.YAML() + "\nidentity: uidmap\n")
+	list := mustRefuse(t, err, "identity-moved")
+	if !strings.Contains(list.Error(), "session:\n    identity: uidmap") {
+		t.Errorf("the refusal should print the section it moved into:\n%v", list.Error())
+	}
+}
+
+// -- the session section ----------------------------------------------------
+
+// session applies a section to the fixture configuration.
+func session(env *testenv.Env, body string) string {
+	return env.YAML() + "\nsession:\n" + body
+}
+
+// Absent, present-and-empty, and present-with-declarations are three
+// different states, and the privileged mode's announcement hangs on the
+// difference between the first and the second.
+func TestAnAbsentSectionAndAnEmptyOneAreDifferentStates(t *testing.T) {
+	env := testenv.NewEnv(t)
+
+	cfg := env.Config(t, "")
+	if cfg.Session.Present {
+		t.Error("a configuration with no session: section reports one")
+	}
+
+	cfg, err := env.TryConfig(session(env, "  environment: {}\n"))
+	if err != nil {
+		t.Fatalf("an empty environment map is legal and was refused:\n%v", err)
+	}
+	if !cfg.Session.Present {
+		t.Error("a session: section with an empty map is still present")
+	}
+	if cfg.Session.Declares() {
+		t.Error("an empty map declares nothing")
+	}
+}
+
+func TestDeclarationsAreReadInByteOrder(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg, err := env.TryConfig(session(env, `  environment:
+    ZULU: "z"
+    GIT_SSH_COMMAND: "ssh -F $HOME/.ssh/config"
+    ALPHA: "a"
+`))
+	if err != nil {
+		t.Fatalf("the section was refused:\n%v", err)
+	}
+	want := []string{"ALPHA", "GIT_SSH_COMMAND", "ZULU"}
+	if len(cfg.Session.Environment) != len(want) {
+		t.Fatalf("%d declarations were read, wanted %d", len(cfg.Session.Environment), len(want))
+	}
+	for index, name := range want {
+		if got := cfg.Session.Environment[index].Name; got != name {
+			t.Errorf("declaration %d is %q, wanted %q", index, got, name)
+		}
+	}
+	if got := cfg.Session.Environment[1].Expr.References(); len(got) != 1 || got[0] != "HOME" {
+		t.Errorf("the expression's references came out as %v", got)
+	}
+}
+
+// The section is strict like everything else: a key camp does not know is
+// refused rather than ignored.
+func TestAnUnknownSessionKeyIsRefused(t *testing.T) {
+	env := testenv.NewEnv(t)
+	_, err := env.TryConfig(session(env, "  sandbox: yes\n"))
+	mustRefuse(t, err, "config-syntax")
+}
+
+// Every shape refusal of session.environment, each with the rule that has
+// to fire and the repair it has to name.
+func TestEnvironmentRefusals(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cases := []struct {
+		name string
+		body string
+		rule string
+		says string
+	}{
+		{"the map is a list", "  environment: [A, B]\n",
+			"environment-shape", "mapping from variable names"},
+		{"the map is empty rather than a mapping", "  environment:\n",
+			"environment-shape", "mapping from variable names"},
+		{"a numeric value", "  environment:\n    PORT: 8080\n",
+			"environment-shape", `PORT: "8080"`},
+		{"a boolean value", "  environment:\n    FLAG: true\n",
+			"environment-shape", "not a string"},
+		{"a value that is a mapping", "  environment:\n    A: {b: c}\n",
+			"environment-shape", "not a string"},
+		{"a null value", "  environment:\n    A:\n",
+			"environment-shape", "not a string"},
+		{"a name with an equals sign", "  environment:\n    \"A=B\": \"x\"\n",
+			"environment-name", "'='"},
+		{"an empty name", "  environment:\n    \"\": \"x\"\n",
+			"environment-name", "empty name"},
+		{"a reserved prefix", "  environment:\n    CAMP_THING: \"x\"\n",
+			"environment-reserved", "camp's own"},
+		{"the working directory", "  environment:\n    PWD: \"/tmp\"\n",
+			"environment-reserved", "working directory"},
+		{"a malformed expression", "  environment:\n    A: \"${HOME\"\n",
+			"environment-expansion", "never closed"},
+		{"a reference to PWD", "  environment:\n    A: \"$PWD/x\"\n",
+			"environment-pwd", "$CAMP_LIVE"},
+		{"the same name twice",
+			"  environment:\n    A: \"one\"\n    A: \"two\"\n",
+			"environment-duplicate", "twice"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := env.TryConfig(session(env, test.body))
+			list := mustRefuse(t, err, test.rule)
+			if !strings.Contains(list.Error(), test.says) {
+				t.Errorf("the refusal does not mention %q:\n%v", test.says, list.Error())
+			}
+		})
+	}
+}
+
+// A NUL cannot be written into a YAML plain scalar, but it can be escaped
+// into one -- and the byte still cannot cross execve.
+func TestNULBytesInNamesAndValuesAreRefused(t *testing.T) {
+	env := testenv.NewEnv(t)
+
+	_, err := env.TryConfig(session(env, "  environment:\n    A: \"one\\0two\"\n"))
+	mustRefuse(t, err, "environment-value")
+
+	_, err = env.TryConfig(session(env, "  environment:\n    \"A\\0B\": \"x\"\n"))
+	mustRefuse(t, err, "environment-name")
+}
+
+// Four defects, one pass. The section obeys the same rule as the rest of
+// the file: fixing four mistakes should cost one round, not four.
+func TestEveryEnvironmentDefectIsReportedAtOnce(t *testing.T) {
+	env := testenv.NewEnv(t)
+	_, err := env.TryConfig(session(env, `  environment:
+    PORT: 8080
+    CAMP_THING: "x"
+    "A=B": "y"
+    GOOD: "${HOME"
+`))
+	found := rules(t, err)
+	for _, want := range []string{"environment-shape", "environment-reserved",
+		"environment-name", "environment-expansion"} {
+		if !contains(found, want) {
+			t.Errorf("%q did not fire; the rules that did were %v", want, found)
+		}
+	}
+}
+
+func contains(names []string, want string) bool {
+	for _, name := range names {
+		if name == want {
+			return true
+		}
+	}
+	return false
 }
 
 // Every problem in one pass. Four mistakes should cost one round of

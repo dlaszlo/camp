@@ -113,7 +113,7 @@ func Launch(options Options) (int, error) {
 	}
 	defer read.Close()
 
-	identity := nsx.For(options.Config.Identity)
+	identity := nsx.For(options.Config.Session.Identity)
 	attrs, err := identity.Attrs()
 	if err != nil {
 		write.Close()
