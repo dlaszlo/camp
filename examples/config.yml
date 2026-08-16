@@ -1,0 +1,79 @@
+# A worked configuration, with three repositories.
+#
+# This file lives at $ENV/.camp/config.yml. It states intent, and nothing
+# else: the mount plan, the exclude, the inventory and the state record
+# are all derived from it.
+#
+# The names here are an example. Use your own.
+
+# The one absolute path in the file. Everything else is relative to it,
+# and camp resolves it once, at startup.
+env: /home/you/work
+
+# Where the composed tree appears. It has to exist, be a real directory
+# rather than a symlink, and be empty: an overlay laid over content hides
+# that content for the whole session.
+merged: shop-live
+
+# The participants. A source addresses one of these by name.
+repositories:
+  - { name: workspace, path: shop-env }
+  - { name: code,      path: shop }
+  - { name: records,   path: shop-records }
+
+overlayfs:
+  # The development environment: read-only underneath. A list, because
+  # several lowers are a later iteration -- they will be merged by camp
+  # into one read-only tree, so that shadowing between them can be
+  # reported by name. Exactly one entry is accepted today.
+  lower: [workspace]
+  # The product: on top, and the only place ordinary writes land.
+  upper: code
+
+# The only names allowed to exist in both roots. Each repository needs
+# its own .gitignore, and it is a file overlap, so the composed tree
+# shows the code repository's copy -- which is correct: the live tree is
+# governed by the product's ignore rules, and git applies no ignore rules
+# to tracked files anyway.
+allow_overlap: [.gitignore]
+
+# The mount sequence. One ordered list, and its order is the mount order:
+# an earlier mount's target may not lie inside a later one's, because the
+# later would silently cover the earlier. Parent first, then child.
+steps:
+  - mount_rw:
+      # Both repositories have a .git at their root -- the one overlap
+      # that never goes away -- and directories merge, so without this
+      # bind the two git directories would union their refs and objects,
+      # and refs/heads/main could resolve to the wrong history. The bind
+      # covers completely; nothing merges.
+      #
+      # camp never adds this on its own: a core that reaches for the name
+      # .git carries git knowledge, and leaving the entry out is not a
+      # hole -- .git exists in both roots, nothing would cover it, and
+      # the overlap gate refuses the composition before anything mounts.
+      - { source: "code/.git",         target: ".git" }
+
+      # A third repository, writable. It is a repository of its own
+      # rather than a directory in the workspace, because no writable
+      # mount may source from the lower. The workspace keeps a committed,
+      # empty .records/ for it to attach to -- git cannot track an empty
+      # directory, so put a placeholder file in it.
+      - { source: "records",           target: ".records" }
+
+  # The dual-natured directory: what the workspace tracks stands
+  # read-only as islands, and everything else -- settings.local.json,
+  # worktrees, whatever the tools invent next -- lands in machine-local
+  # storage underneath and survives the session.
+  - mount_islands:
+      - { source: "workspace/.claude", target: ".claude" }
+
+  # The shipped generation step: reads git, produces the exclude payload
+  # and the islands expansions, and binds the exclude over the composed
+  # tree's copy of .git/info/exclude. The repository's own file is never
+  # written. Without this step the composition has no exclude at all, and
+  # 'camp plan' says so.
+  #
+  # It comes after the .git bind on purpose: its target lies inside .git,
+  # and the other order would be refused.
+  - git_exclude
