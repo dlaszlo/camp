@@ -252,10 +252,18 @@ func TestTheNarrationSaysWhatHappenedAndPrintsNoValues(t *testing.T) {
 		}
 		at += index + len(label)
 	}
-	// The one fact of this run that surprises somebody later rides on the
-	// identity line, in the few words a progress line has room for.
+	// The one fact of this run that surprises somebody later is said, and
+	// said as a note: it is not the outcome of a step, it is something
+	// standing that a captured log needs on the day an artefact's
+	// ownership is a question.
 	if !strings.Contains(unwrapped(text), "show as nobody") {
-		t.Errorf("the identity line does not carry the ownership fact:\n%s", text)
+		t.Errorf("the narration does not carry the ownership fact:\n%s", text)
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "show as nobody") && !strings.HasPrefix(line, report.MarkNote) &&
+			!strings.HasPrefix(line, " ") {
+			t.Errorf("the ownership fact is not a note: %q", line)
+		}
 	}
 	if !strings.Contains(text, "GIT_SSH_COMMAND, PATH") {
 		t.Errorf("the environment line does not name what was applied:\n%s", text)
@@ -272,7 +280,9 @@ func TestTheNarrationSaysWhatHappenedAndPrintsNoValues(t *testing.T) {
 		if strings.HasPrefix(line, " ") {
 			continue // a folded continuation, aligned under its own text
 		}
-		if !strings.HasPrefix(line, report.MarkOK) {
+		if !strings.HasPrefix(line, report.MarkOK) &&
+			!strings.HasPrefix(line, report.MarkNote) &&
+			!strings.HasPrefix(line, report.MarkWarn) {
 			t.Errorf("a line begins with something other than a marker: %q", line)
 		}
 	}
@@ -329,4 +339,44 @@ func TestASilentNarratorIsSafe(t *testing.T) {
 	say.Locks("a", "b")
 	say.Identity(config.Session{})
 	say.Announcement(config.Session{Present: true})
+}
+
+// What is worth knowing and stops nothing has its own marker, and a
+// caller.
+//
+// plan.Warnings is computed at every up -- a workspace root entry that
+// has disappeared since the snapshot was accepted, a change on the code
+// side -- and until this existed only 'camp plan' and 'camp doctor'
+// showed them. The command that composes the tree said nothing, which is
+// the one command somebody runs before starting work.
+func TestWhatStopsNothingIsStillSaid(t *testing.T) {
+	var out strings.Builder
+	say := report.Narrate(&out)
+
+	say.Checked(3)
+	say.Warnings([]string{
+		"the workspace no longer has the root entry \"docs\" (directory)",
+		"the code repository has a new root entry \"vendor\" (directory)",
+	})
+
+	text := out.String()
+	for _, want := range []string{"docs", "vendor"} {
+		var found bool
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, report.MarkWarn) && strings.Contains(line, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q is not said as a warning:\n%s", want, text)
+		}
+	}
+	if strings.Count(text, report.MarkWarn) != 2 {
+		t.Errorf("two warnings, two lines -- one problem is stated once:\n%s", text)
+	}
+	// And it is not [OK]: a run going ahead with something the reader has
+	// not agreed to must not read like a run where everything matched.
+	if strings.Contains(text, report.MarkOK+"    the workspace") {
+		t.Errorf("a warning was said as an outcome:\n%s", text)
+	}
 }

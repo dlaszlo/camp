@@ -171,8 +171,8 @@ func cmdPlan(ctx *context, args []string) error {
 		ctx.printf("the mount calls, in order:\n%s\n", report.Syscalls(expanded))
 	}
 	if !refused.Empty() {
-		ctx.printf("this composition would not start. %d thing(s) stop it:\n\n%s",
-			len(refused), report.Refusals(refused))
+		fmt.Fprintf(ctx.err, "this composition would not start. %d thing(s) "+
+			"stop it:\n\n%s", len(refused), report.Refusals(refused))
 		return failure(ExitPrecondition, "",
 			"nothing was mounted, and nothing has to be undone -- every one of "+
 				"these can be fixed by hand right now")
@@ -209,7 +209,7 @@ func cmdDoctor(ctx *context, args []string) error {
 
 	cfg, err := resolve(*file)
 	if err != nil {
-		ctx.printf("%s\n", render(err))
+		fmt.Fprintf(ctx.err, "%s\n", render(err))
 		if len(usable) == 0 {
 			return failure(ExitPrecondition, "", "this machine is missing something camp needs")
 		}
@@ -219,8 +219,8 @@ func cmdDoctor(ctx *context, args []string) error {
 	ctx.printf("composition: %s\n\n", report.ConfigSummary(cfg))
 	built, refused := plan.Prepare(cfg, plan.Namespace)
 	if !refused.Empty() {
-		ctx.printf("this composition would not start. %d thing(s) stop it:\n\n%s",
-			len(refused), report.Refusals(refused))
+		fmt.Fprintf(ctx.err, "this composition would not start. %d thing(s) "+
+			"stop it:\n\n%s", len(refused), report.Refusals(refused))
 		return failure(ExitPrecondition, "", "something above has to be fixed first")
 	}
 	ctx.printf("%s", plan.GateSummary(cfg, built.LowerRoot, built.UpperRoot))

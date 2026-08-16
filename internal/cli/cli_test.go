@@ -151,14 +151,20 @@ func TestABrokenSectionStillStopsTheCommandsThatNeedIt(t *testing.T) {
 func TestPlanStillPrintsThePlanBesideTheRefusal(t *testing.T) {
 	path := refusing(t)
 
-	out, _, code := run(t, "plan", "-f", path)
+	out, errOut, code := run(t, "plan", "-f", path)
 	if code == 0 {
 		t.Error("plan exited 0 with a refusal standing")
 	}
 	if !strings.Contains(out, "mount sequence, in order:") {
 		t.Errorf("plan printed no sequence:\n%s", out)
 	}
-	if !strings.Contains(out, "would not start") {
-		t.Errorf("plan did not say the composition would not start:\n%s", out)
+	// The two are printed together and go to different streams: the plan is
+	// the command's product, which somebody pipes, and what stops it is
+	// about the run.
+	if !strings.Contains(errOut, "would not start") {
+		t.Errorf("plan did not say the composition would not start:\n%s", errOut)
+	}
+	if strings.Contains(out, "would not start") {
+		t.Errorf("the refusal is on stdout, where the plan is:\n%s", out)
 	}
 }

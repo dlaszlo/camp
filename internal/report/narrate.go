@@ -32,8 +32,13 @@ type Narrator struct{ out io.Writer }
 // the aftermath of a failure, reads as a success. The marker is the first
 // thing on the line because that is the column an eye runs down.
 const (
-	MarkOK    = "[OK]"
-	MarkNote  = "[NOTE]"
+	MarkOK   = "[OK]"
+	MarkNote = "[NOTE]"
+	// MarkWarn is for what is worth knowing and stops nothing. It is the
+	// one marker a reader has to be able to tell from [OK] at a glance:
+	// the composition is going ahead, and something about it is not what
+	// the reader last agreed to.
+	MarkWarn  = "[WARN]"
 	MarkError = "[ERROR]"
 	MarkHint  = "[HINT]"
 	// markWidth aligns the text, so the prose starts in one column
@@ -78,6 +83,26 @@ func (n *Narrator) Note(format string, args ...any) {
 	n.mark(MarkNote, fmt.Sprintf(format, args...))
 }
 
+// Warn is something worth knowing that stops nothing.
+//
+// The composition is going ahead; this is the thing about it that the
+// reader has not agreed to yet -- a workspace root entry that has
+// disappeared since the snapshot was accepted, a change on the code side.
+// Until this existed those were computed at every up and shown by nobody:
+// 'camp plan' and 'camp doctor' printed them, and the command that
+// actually composes the tree said nothing.
+func (n *Narrator) Warn(format string, args ...any) {
+	n.mark(MarkWarn, fmt.Sprintf(format, args...))
+}
+
+// Warnings says each of them, one line each, in the order they were
+// found.
+func (n *Narrator) Warnings(warnings []string) {
+	for _, warning := range warnings {
+		n.Warn("%s", warning)
+	}
+}
+
 // Failed is what stopped the command, said as plainly as the steps that
 // led to it.
 func (n *Narrator) Failed(format string, args ...any) {
@@ -114,9 +139,17 @@ func (n *Narrator) Generated(has bool) {
 
 // Identity: which uid route the namespace takes, and the one fact about
 // this run that surprises somebody later.
+//
+// Two lines, because they are two different kinds of thing. The route is
+// the outcome of a step and says so and stops. That only your own id is
+// mapped -- so anything owned by anybody else shows as nobody -- is not
+// an outcome at all: it is a standing fact about the run, and the
+// breadcrumb a captured log needs on the day somebody is surprised by an
+// artefact's ownership. A note is what that is.
 func (n *Narrator) Identity(session config.Session) {
-	n.say("identity: %s; files owned by anyone else show as nobody",
-		nsx.For(session.Identity).Short())
+	n.say("identity: %s", nsx.For(session.Identity).Short())
+	n.Note("only your own id is mapped, so files owned by anyone else show " +
+		"as nobody")
 }
 
 // Environment: the names applied, never their values. What a variable
@@ -169,4 +202,31 @@ func (n *Narrator) Announcement(session config.Session) {
 		return
 	}
 	n.Note("session: not applied here; 'camp run' and 'camp shell' apply it")
+}
+
+// Done is a command's closing line, in the same columns as the steps that
+// led to it. A run whose ending is rendered in some other shape is a run
+// whose ending somebody has to hunt for.
+func (n *Narrator) Done(format string, args ...any) {
+	n.say(format, args...)
+}
+
+// Unmounted: one line per operation, because a teardown is a sequence
+// like the one that built it, and "11 of 11 removed" says nothing about
+// which eleven.
+func (n *Narrator) Unmounted(target string) {
+	n.say("unmounted: %s", target)
+}
+
+// Swept: a work directory left by a session that is gone. The namespace
+// mode has no teardown of its own, so the next run clears what the last
+// one could not.
+func (n *Narrator) Swept(directory string) {
+	n.say("swept: %s, left by a session that has ended", directory)
+}
+
+// LeftAlone: something in camp's own work area that camp could not prove
+// is its own. It stops nothing and it is nobody's to remove silently.
+func (n *Narrator) LeftAlone(note string) {
+	n.Warn("left alone: %s", note)
 }

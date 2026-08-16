@@ -2,7 +2,6 @@ package cli
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 
@@ -47,7 +46,7 @@ func enter(ctx *context, file string, argv []string) error {
 		return err
 	}
 
-	sweep(ctx, cfg)
+	sweep(report.Narrate(ctx.err), cfg)
 
 	// The launcher's own steps, said as they finish. The rest of the
 	// sequence -- the identity route, the mounts, their verification and
@@ -90,7 +89,7 @@ func enter(ctx *context, file string, argv []string) error {
 // and outlives it. So the next run sweeps. An entry whose marker cannot
 // be read is reported and left alone -- camp removes only what it can
 // prove is its own.
-func sweep(ctx *context, cfg config.Config) {
+func sweep(say *report.Narrator, cfg config.Config) {
 	swept, kept := compose.Sweep(cfg.CampDir(), func(live string) bool {
 		if _, err := os.Stat(live); err != nil {
 			return true // the composed tree is gone; so is its session
@@ -103,9 +102,9 @@ func sweep(ctx *context, cfg config.Config) {
 		return true
 	})
 	for _, directory := range swept {
-		ctx.printf("swept the leftover work directory %s\n", directory)
+		say.Swept(directory)
 	}
 	for _, note := range kept {
-		fmt.Fprintf(ctx.err, "left alone: %s\n", note)
+		say.LeftAlone(note)
 	}
 }

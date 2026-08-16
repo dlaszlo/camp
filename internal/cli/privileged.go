@@ -37,7 +37,8 @@ func cmdUp(ctx *context, args []string) error {
 	// The price of this mode, before the first sudo prompt rather than
 	// after it: nobody should meet a machine-wide read-only workspace as a
 	// surprise.
-	ctx.printf("privileged mode: %s is read-only for the whole machine until "+
+	fmt.Fprintf(ctx.err, "privileged mode: %s is read-only for the whole "+
+		"machine until "+
 		"'camp down'.\n"+
 		"  One mount table means there is no inside and no outside here: either "+
 		"the workspace is held read-only for every process, your editor "+
@@ -95,9 +96,8 @@ func cmdUp(ctx *context, args []string) error {
 	say.MachineWide(cfg.LowerPath(), up.Plan.Live)
 	say.Announcement(cfg.Session)
 
-	ctx.printf("%s\n", report.Marked(report.MarkOK,
-		fmt.Sprintf("camp up finished: %s is up, %d mounts, all verified at the "+
-			"live path. 'camp down' takes it apart.", up.Plan.Live, len(up.Plan.Mounts))))
+	say.Done("camp up finished: %s is up, %d mounts, all verified at the live "+
+		"path. 'camp down' takes it apart.", up.Plan.Live, len(up.Plan.Mounts))
 	return nil
 }
 
@@ -142,7 +142,13 @@ func cmdDown(ctx *context, args []string) error {
 			mismatched = append(mismatched, result.Error)
 		}
 	}
-	ctx.printf("%d of %d mounts removed.\n", removed, len(reply.Results))
+	say := report.Narrate(ctx.err)
+	for _, result := range reply.Results {
+		if result.Outcome == "unmounted" {
+			say.Unmounted(result.Target)
+		}
+	}
+	say.Done("%d of %d mounts removed.", removed, len(reply.Results))
 
 	if len(reply.Stranded) > 0 {
 		record.Phase = state.Partial

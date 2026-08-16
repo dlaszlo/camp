@@ -81,6 +81,11 @@ func prepare(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, e
 		return nil, refusedComposition(refused)
 	}
 	say.Checked(len(built.Mounts))
+	// Said here, by the command that is actually composing the tree. These
+	// were computed at every up and shown by nobody: only 'camp plan' and
+	// 'camp doctor' printed them, and neither is what somebody runs before
+	// starting work.
+	say.Warnings(built.Warnings)
 
 	if err := compose.Directories(built); err != nil {
 		pair.Release()
