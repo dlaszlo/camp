@@ -414,3 +414,32 @@ printf '%s\n' "$CAMP_MARKER" >> "$CAMP_GEN_OUT/exclude"
 		t.Fatalf("the rules that fired were %v\n%v", refused.Rules(), refused.Error())
 	}
 }
+
+// The shipped step is defined as reading git. Without git it would
+// quietly become something else -- islands derived from raw directory
+// listings, carrying files no repository tracks -- so it refuses instead
+// of falling back.
+//
+// This is the one case where camp really needs git. A composition that
+// lists no generation step does not, and works without it.
+func TestTheShippedStepRefusesWhenGitIsNotInstalled(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+	built, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Empty() {
+		t.Fatalf("the fixture was refused:\n%v", refused)
+	}
+	if err := os.MkdirAll(built.Work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
+
+	_, problems := gen.Prepare(built)
+	if !problems.Has("generate-git-missing") {
+		t.Fatalf("the rules that fired were %v", problems.Rules())
+	}
+	if !strings.Contains(problems.Error(), "drop the step") {
+		t.Error("the refusal should say what the alternative is")
+	}
+}

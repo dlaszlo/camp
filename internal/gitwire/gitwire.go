@@ -36,6 +36,20 @@ type Repo struct {
 	Path string
 }
 
+// Available reports whether git can be run at all.
+//
+// Open cannot answer this on its own: with no git on PATH every
+// repository looks like "not a git working tree", and a caller that
+// treats that as an ordinary answer would silently fall back to reading
+// raw directory listings -- which is exactly the difference that has to
+// be said out loud rather than absorbed.
+func Available() error {
+	if _, err := exec.LookPath("git"); err != nil {
+		return fmt.Errorf("git is not on PATH: %w", err)
+	}
+	return nil
+}
+
 // Open reports whether a directory is a git working tree, and returns a
 // handle for reading it.
 //

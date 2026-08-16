@@ -24,6 +24,21 @@ func git(built plan.Plan, existing []byte) (Output, refusal.List) {
 	var refused refusal.List
 	var out Output
 
+	// The shipped step is defined as reading git. Without git it would
+	// quietly become something else -- islands from raw directory
+	// listings, carrying the source's own runtime files -- so it refuses
+	// instead.
+	if err := gitwire.Available(); err != nil {
+		refused.Add("generate-git-missing",
+			"the configuration uses the git_exclude step, and %v.\n"+
+				"That step reads git to work out what each repository "+
+				"contributes; without it the islands would silently come from raw "+
+				"directory listings and carry files no repository tracks. Install "+
+				"git, or drop the step -- a composition with no generation step is "+
+				"legal, and 'camp plan' says what it costs.", err)
+		return out, refused
+	}
+
 	patterns, problems := ExcludeLines(built.Config, built)
 	refused.Extend(problems)
 	out.Patterns = patterns

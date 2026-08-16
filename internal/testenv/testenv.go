@@ -8,9 +8,9 @@
 // The scratch root deliberately does not use t.TempDir(). That lands in
 // /tmp, which is commonly a tmpfs mounted nosuid,nodev, and the tests
 // that go on to mount something need a filesystem whose locked flags a
-// namespace can replicate. One root for every test keeps
-// the surprise out of the tests that mount, at no cost to the ones that
-// do not. CAMP_TEST_ROOT overrides it.
+// namespace can replicate. One root for every test keeps the surprise out
+// of the tests that mount, at no cost to the ones that do not.
+// CAMP_TEST_ROOT overrides it.
 package testenv
 
 import (

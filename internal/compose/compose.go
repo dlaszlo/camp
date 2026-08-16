@@ -1,9 +1,9 @@
 // Package compose builds a composition and takes it apart.
 //
 // It is the middle of the tool: the plan says what, mountx says how, this
-// says in what order and what happens when a step fails. The order is
-// The split it rests on is the point -- a frame that always executes,
-// the configuration's steps in the middle of it, and verification before
+// says in what order and what happens when a step fails. The split it
+// rests on is the point -- a frame that always executes, the
+// configuration's steps in the middle of it, and verification before
 // anything is declared up.
 //
 // One rule governs failure: up may refuse, and a refusal leaves nothing

@@ -60,12 +60,16 @@ func (c Check) Symbol() string {
 // Run evaluates every requirement for a mode. All of them are evaluated,
 // so one run reports everything rather than one thing per attempt.
 func Run(mode Mode) []Check {
-	checks := []Check{platform(), procfs(), overlayfs(), tool("git")}
+	checks := []Check{platform(), procfs(), overlayfs(), git()}
 	switch mode {
 	case Namespace:
 		checks = append(checks, userNamespaces())
 	case Privileged:
-		checks = append(checks, tool("mount"), tool("umount"), privilege())
+		// No check for mount(8) or umount(8): camp does not use them. The
+		// privileged helper calls mount(2) directly, the same way the
+		// namespace mode does, because the messages the binaries print are
+		// translated and their exit codes say less than the syscall's errno.
+		checks = append(checks, privilege())
 	}
 	return checks
 }
@@ -134,6 +138,27 @@ func overlayfs() Check {
 		Detail: "the running kernel does not list overlay in /proc/filesystems",
 		Fatal:  true,
 		Hint:   "try 'sudo modprobe overlay', or use a kernel built with it",
+	}
+}
+
+// git is a warning rather than a requirement.
+//
+// camp uses git for the shipped generation step and for the scans it runs
+// when a session ends. A composition of two directories that are not
+// repositories needs none of that and works without it -- so a machine
+// with no git is worth mentioning and is not a reason to refuse. The one
+// place where it really is required refuses there, with the reason.
+func git() Check {
+	path, err := exec.LookPath("git")
+	if err == nil {
+		return Check{Name: "tool: git", OK: true, Detail: path, Fatal: true}
+	}
+	return Check{
+		Name:   "tool: git",
+		Detail: "not on PATH",
+		Hint: "camp needs git for the shipped git_exclude step and for the " +
+			"scans it runs when a session ends. A composition that lists no " +
+			"generation step does not need it, and works without it.",
 	}
 }
 
@@ -281,33 +306,56 @@ func probeUserNamespace() (bool, string) {
 // where the probe has already failed.
 func restrictionHint(detail string) string {
 	if strings.Contains(detail, "unprivileged_userns") {
-		return "The permission is granted by an AppArmor profile to one binary " +
-			"path, and this binary is not at that path. Install camp and its " +
-			"profile:\n" +
+		return "This machine restricts unprivileged user namespaces through " +
+			"AppArmor, and grants the permission per binary path. camp ships a " +
+			"profile that grants it to one path and nothing else:\n" +
 			"  sudo install -m 755 camp /usr/local/bin/camp\n" +
 			"  sudo install -m 644 packaging/apparmor/camp /etc/apparmor.d/camp\n" +
 			"  sudo apparmor_parser -r /etc/apparmor.d/camp\n" +
-			"A copy of the binary anywhere else is not covered by the profile. " +
-			"The system-wide restriction stays on, which is the point of doing " +
-			"it this way."
+			"A copy of the binary anywhere else is not covered by the profile, " +
+			"so install it first and run it from there. The system-wide " +
+			"restriction stays on, which is the point of doing it this way. " +
+			"Ubuntu 23.10 and later are the systems this applies to; most " +
+			"distributions permit unprivileged user namespaces and need none " +
+			"of it."
 	}
+
 	if maximum, ok := readInt("/proc/sys/user/max_user_namespaces"); ok && maximum == 0 {
-		return "sudo sysctl -w user.max_user_namespaces=15000"
+		return "This kernel allows zero user namespaces per user, so nothing " +
+			"can create one. Raising it affects every program on the machine, " +
+			"and it does not survive a reboot unless you also write it to " +
+			"/etc/sysctl.d:\n" +
+			"  sudo sysctl -w user.max_user_namespaces=15000\n" +
+			"Or use the system-wide mode instead: 'camp up'."
 	}
+
 	if allowed, ok := readInt("/proc/sys/kernel/unprivileged_userns_clone"); ok && allowed == 0 {
-		return "sudo sysctl -w kernel.unprivileged_userns_clone=1"
+		return "This kernel carries the older switch that forbids unprivileged " +
+			"user namespaces outright -- some Debian and hardened kernels do. " +
+			"There is no per-binary exception for it; turning it on affects " +
+			"every program on the machine:\n" +
+			"  sudo sysctl -w kernel.unprivileged_userns_clone=1\n" +
+			"Or use the system-wide mode instead: 'camp up'."
 	}
+
 	if restricted, ok := readInt("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"); ok && restricted == 1 {
-		return "AppArmor restricts unprivileged user namespaces on this system. " +
-			"Install the profile shipped with camp (packaging/apparmor/camp) so " +
-			"that this one binary may create one -- note that the profile has to " +
-			"name the path the binary is actually installed at, and that a copy " +
-			"run from anywhere else is not covered by it. Or use the privileged " +
-			"mode: 'camp up'. Turning the restriction off system-wide works too, " +
-			"but removes a protection from every program on the machine."
+		return "AppArmor restricts unprivileged user namespaces here. Install " +
+			"the profile camp ships (packaging/apparmor/camp) so that this one " +
+			"binary may create one -- the profile names the path the binary is " +
+			"installed at, and a copy run from anywhere else is not covered by " +
+			"it. Or use the system-wide mode: 'camp up'."
 	}
-	return "run this again with 'camp doctor' after checking dmesg: something " +
-		"denied the namespace without one of the usual switches being set"
+
+	if enforcing, ok := readInt("/sys/fs/selinux/enforce"); ok && enforcing == 1 {
+		return "Something denied the namespace and none of the usual switches " +
+			"is set. SELinux is enforcing on this machine, so it is the likely " +
+			"cause: check 'sudo ausearch -m AVC -ts recent' for a denial naming " +
+			"this binary. Or use the system-wide mode: 'camp up'."
+	}
+
+	return "Something denied the namespace and none of the switches camp knows " +
+		"about is set. Check the kernel log ('sudo dmesg | tail') for a denial. " +
+		"The system-wide mode does not need a namespace at all: 'camp up'."
 }
 
 func readInt(path string) (int, bool) {
