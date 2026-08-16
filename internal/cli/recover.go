@@ -76,21 +76,33 @@ func selectRecord(file, live, hash string) (state.Record, bool, error) {
 		return record, true, nil
 	}
 
-	// A configuration named with -f says which composition is meant. It is
-	// read for its live path and for nothing else here, so a file that no
-	// longer parses still answers as long as the two fields that name the
-	// tree survived: a mistyped section must never stand between somebody
-	// and a teardown. If even that is gone, the directory match below
-	// answers the same question without the file.
+	// A configuration named with -f says which composition is meant, and
+	// then it is the only one meant: falling back to whatever the current
+	// directory belongs to would act on a composition nobody named.
+	// Measured, because it happened -- a test that named a configuration in
+	// a scratch directory reached the record of the real environment its
+	// working directory sat in, and got as far as sudo.
+	//
+	// The file is read for its live path and for nothing else here, so one
+	// that no longer parses still answers as long as the two fields naming
+	// the tree survived: a mistyped section must never stand between
+	// somebody and a teardown.
 	if file != "" {
 		cfg, err := config.Load(file)
-		if err == nil || (cfg.Env != "" && !cfg.Merged.Empty()) {
-			if real, err := pathx.Real(cfg.Live()); err == nil {
-				if record, found, err := state.Load(plan.Hash(real)); err == nil && found {
-					return record, true, nil
-				}
-			}
+		if err != nil && (cfg.Env == "" || cfg.Merged.Empty()) {
+			return state.Record{}, false, failure(ExitUsage, "",
+				"%s does not say which composition to act on, and it was named "+
+					"with -f, so camp will not go looking for another one.", file)
 		}
+		real, err := pathx.Real(cfg.Live())
+		if err != nil {
+			return state.Record{}, false, nil
+		}
+		record, found, err := state.Load(plan.Hash(real))
+		if err != nil {
+			return state.Record{}, false, wrap(err, ExitFailure, "")
+		}
+		return record, found, nil
 	}
 
 	dir, err := os.Getwd()

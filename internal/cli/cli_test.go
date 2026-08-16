@@ -12,6 +12,25 @@ import (
 	"github.com/dlaszlo/camp/internal/testenv"
 )
 
+// TestMain points the state directory somewhere of its own, for every
+// test in this package.
+//
+// These tests invoke the real commands, and the commands that recover a
+// composition now find one by the directory the process is standing in --
+// which, for a test binary, is a directory inside a real environment.
+// Without this, one of them read the record of the machine's own
+// composition and got as far as calling sudo on it.
+func TestMain(m *testing.M) {
+	directory, err := os.MkdirTemp("", "camp-cli-state-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_STATE_HOME", directory)
+	code := m.Run()
+	os.RemoveAll(directory)
+	os.Exit(code)
+}
+
 // run invokes a command the way a terminal does, and returns what each
 // stream received.
 func run(t *testing.T, args ...string) (string, string, int) {
