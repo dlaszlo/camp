@@ -415,6 +415,54 @@ printf '%s\n' "$CAMP_MARKER" >> "$CAMP_GEN_OUT/exclude"
 	}
 }
 
+// The generation step keeps its own environment contract, and the
+// session's declarations are no part of it.
+//
+// Generation runs in the prepare phase, before anything is mounted and
+// before any workload exists, so there is nothing for a workload's
+// environment to mean here. A generator that silently received it would
+// be a second, undeclared place where a configured value steers a
+// program.
+func TestAGeneratorDoesNotReceiveTheSessionsEnvironment(t *testing.T) {
+	env := testenv.NewEnv(t)
+
+	seen := filepath.Join(env.Path, "generator-environment")
+	script := filepath.Join(env.Path, "generator.sh")
+	testenv.Write(t, script, `#!/bin/sh
+env > `+seen+`
+mkdir -p "$CAMP_GEN_OUT/islands"
+cat "$CAMP_GEN_IN/upper-exclude.current" > "$CAMP_GEN_OUT/exclude"
+`)
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	yaml := strings.Replace(env.YAML(),
+		"  - mount_islands:\n      - { source: \"workspace/.claude\", target: \".claude\" }\n", "", 1)
+	yaml = strings.Replace(yaml, "  - git_exclude\n",
+		"  - generate: { command: [\""+script+"\"] }\n", 1)
+	yaml += `
+session:
+  environment:
+    SESSION_SENTINEL: "sentinel-value-9c1f"
+`
+
+	prepared(t, env, yaml)
+
+	text, err := os.ReadFile(seen)
+	if err != nil {
+		t.Fatalf("the generator did not run: %v", err)
+	}
+	if strings.Contains(string(text), "SESSION_SENTINEL") {
+		t.Errorf("the generator received the session's declared environment:\n%s", text)
+	}
+	for _, want := range []string{"CAMP_GEN_IN=", "CAMP_GEN_OUT=", "CAMP_ENV=", "CAMP_LIVE="} {
+		if !strings.Contains(string(text), want) {
+			t.Errorf("the generator's own contract is missing %q:\n%s", want, text)
+		}
+	}
+}
+
 // The shipped step is defined as reading git. Without git it would
 // quietly become something else -- islands derived from raw directory
 // listings, carrying files no repository tracks -- so it refuses instead
