@@ -385,3 +385,41 @@ func TestARecordThatCannotMeanWhatItSaysIsRefused(t *testing.T) {
 		}
 	})
 }
+
+// Spec §12 lists what a record carries. Two of its fields were declared
+// and never filled: the overlay's options, and the paths camp created.
+func TestARecordCarriesTheOverlaysOptionsAndWhatCampCreated(t *testing.T) {
+	scratch(t)
+	record, _ := fixture(t)
+
+	var overlay state.Mount
+	for _, mount := range record.Mounts {
+		if mount.FSType == "overlay" {
+			overlay = mount
+		}
+	}
+	if overlay.Options == "" {
+		t.Fatal("the composed tree's mount carries no options; the record is " +
+			"meant to say what the kernel was given")
+	}
+	for _, part := range []string{"lowerdir=", "upperdir=", "workdir="} {
+		if !strings.Contains(overlay.Options, part) {
+			t.Errorf("the recorded options have no %s: %q", part, overlay.Options)
+		}
+	}
+
+	if len(record.Created) == 0 {
+		t.Fatal("the record does not say what camp created")
+	}
+	for _, path := range record.Created {
+		if !strings.HasPrefix(path, record.Env) {
+			t.Errorf("camp recorded %s as its own, and it is not in the "+
+				"environment root", path)
+		}
+		// Storage holds half-done work and camp never removes it, so a list
+		// headed "what camp may clear" must not name it.
+		if strings.Contains(path, "/storage/") {
+			t.Errorf("%s is in storage, which camp never removes", path)
+		}
+	}
+}

@@ -41,6 +41,7 @@ import (
 
 	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/mountinfo"
+	"github.com/dlaszlo/camp/internal/mountx"
 	"github.com/dlaszlo/camp/internal/plan"
 )
 
@@ -109,8 +110,15 @@ type Record struct {
 	// reverse is the teardown order.
 	Mounts []Mount `json:"mounts"`
 
-	// Created is every path camp made: the work directory, the scaffold
-	// entries. It is the entire list camp is allowed to remove.
+	// Created is what camp made for this composition and may clear again:
+	// the work area, and the overlay work directory inside it that the
+	// kernel fills with a root-owned leftover.
+	//
+	// Storage is deliberately not here, and neither are the attachment
+	// points camp scaffolds inside it. That directory holds half-done work
+	// and camp never removes it (invariant 3), so a list headed "what camp
+	// may clear" must not name it; what camp put there is recorded in the
+	// islands manifest, which lives beside it and survives this record.
 	Created []string `json:"created"`
 
 	// Staging is where the tree was built before the move, in the
@@ -168,6 +176,7 @@ func FromPlan(built plan.Plan, tool, configDigest, inventoryDigest string, uid, 
 		// here rather than inferred at teardown, because a teardown works
 		// from this record and from nothing else.
 		Detached:  []string{built.Live},
+		Created:   []string{built.Work, built.OverlayWork},
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -178,8 +187,12 @@ func FromPlan(built plan.Plan, tool, configDigest, inventoryDigest string, uid, 
 			Source: mount.Source,
 			Target: mount.Target,
 		}
+		// The overlay's operands, as the string the kernel was given.
+		// Rendered by the same function that mounts it, so the record cannot
+		// describe a mount that was made differently.
 		if mount.Kind == plan.Overlay {
 			recorded.FSType = "overlay"
+			recorded.Options = mountx.Options(mount)
 		}
 		record.Mounts = append(record.Mounts, recorded)
 	}
