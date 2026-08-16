@@ -345,7 +345,14 @@ func (c *checker) checkLive(found map[string]pathx.Info) (string, bool) {
 				"If it is the residue of a composition that did not come down "+
 				"cleanly, run 'camp status' first.",
 			absolute, strings.Join(names, ", "))
-		return "", false
+		// Refused, and the derivation carries on. This one is a precondition
+		// for mounting, not a fault in the path: the directory is a real
+		// directory and the plan built on it is exactly the plan a reader
+		// wants to see. Stopping here returned an empty plan to every
+		// caller, including the two that only describe -- so 'camp status'
+		// refused to describe a composition that was up, in the words of the
+		// refusal that recommends running it. Every caller that mounts stops
+		// on a non-empty refusal list, which is what keeps this safe.
 	}
 
 	for _, repo := range c.cfg.Repositories {
