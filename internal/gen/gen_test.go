@@ -9,6 +9,7 @@ import (
 	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/islands"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/testenv"
@@ -350,6 +351,68 @@ func TestNoGenerationStepMeansNoExclude(t *testing.T) {
 	if len(out.Notes) == 0 {
 		t.Error("the fallback to the raw listing for the islands was not said out loud")
 	}
+}
+
+// A composition without a generation step is prepared as completely as
+// one with it: the raw listing, the expanded checks, and the attachment
+// points its islands need.
+//
+// It used to return the moment it found no step, so the islands were
+// computed and nothing was created -- and the first file island had
+// nothing to bind onto, which a bind cannot make for itself. It also
+// asked git, which is the one thing this branch documents that it does
+// not do: what it produces is the raw listing, runtime files included.
+func TestWithoutAGenerationStepTheIslandsAreStillPrepared(t *testing.T) {
+	env := testenv.NewEnv(t)
+	// A file the source does not track. With a generation step it would
+	// not become an island; without one it does, because a raw listing is
+	// what there is.
+	testenv.Write(t, filepath.Join(env.Workspace, ".claude", "settings.local.json"), "{}\n")
+
+	yaml := strings.Replace(env.YAML(), "  - git_exclude\n", "", 1)
+	built, out, refused := prepared(t, env, yaml)
+	if !refused.Empty() {
+		t.Fatalf("generation was refused:\n%v", refused)
+	}
+
+	entries := out.Islands[".claude"]
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name)
+	}
+	if !contains(names, "settings.local.json") {
+		t.Errorf("the raw listing was not used: the islands are %v", names)
+	}
+
+	// The attachment points exist, and the file island is a file: a bind
+	// cannot create its own mount point, and by the time it happens the
+	// tree underneath is read-only.
+	for _, entry := range entries {
+		path := filepath.Join(built.Storage, ".claude", entry.Name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Errorf("the island %q has no attachment point in storage: %v", entry.Name, err)
+			continue
+		}
+		if info.IsDir() != (entry.Type == pathx.Dir) {
+			t.Errorf("the attachment point for %q is the wrong kind of thing", entry.Name)
+		}
+	}
+
+	// And a second run over the same storage accepts what the first one
+	// made rather than refusing it as somebody else's.
+	if _, problems := gen.Prepare(built); !problems.Empty() {
+		t.Fatalf("a second run was refused:\n%v", problems)
+	}
+}
+
+func contains(names []string, want string) bool {
+	for _, name := range names {
+		if name == want {
+			return true
+		}
+	}
+	return false
 }
 
 // The contract on disk is the same door for the shipped step and for an

@@ -7,6 +7,7 @@ import (
 	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/gitwire"
 	"github.com/dlaszlo/camp/internal/islands"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
 )
@@ -64,32 +65,42 @@ func Prepare(built plan.Plan) (Output, refusal.List) {
 	var out Output
 
 	step, has := built.Config.GenerationStep()
-	if !has {
-		return withoutAStep(built)
-	}
-
-	refused.Extend(WriteInputs(built))
-	if !refused.Empty() {
-		return out, refused
-	}
-
-	if step.Kind == config.Generate {
-		refused.Extend(external(built, step))
+	switch {
+	case !has:
+		// No generation step: no exclude, and the islands come from the raw
+		// listing. What follows is the same for both branches, and that is
+		// the point -- this one used to return here, so a composition
+		// without a step got no expanded checks and no attachment points at
+		// all, and its first file island had nothing to bind onto.
+		out, refused = withoutAStep(built)
 		if !refused.Empty() {
 			return out, refused
 		}
-	}
 
-	out, refused = Adopt(built)
-	if !refused.Empty() {
-		return out, refused
-	}
-	if step.Kind == config.GitExclude {
-		// The shipped step publishes through the same contract an external
-		// one uses, so it cannot quietly rely on a shortcut.
-		refused.Extend(WriteOutputs(built, out))
+	default:
+		refused.Extend(WriteInputs(built))
 		if !refused.Empty() {
 			return out, refused
+		}
+
+		if step.Kind == config.Generate {
+			refused.Extend(external(built, step))
+			if !refused.Empty() {
+				return out, refused
+			}
+		}
+
+		out, refused = Adopt(built)
+		if !refused.Empty() {
+			return out, refused
+		}
+		if step.Kind == config.GitExclude {
+			// The shipped step publishes through the same contract an external
+			// one uses, so it cannot quietly rely on a shortcut.
+			refused.Extend(WriteOutputs(built, out))
+			if !refused.Empty() {
+				return out, refused
+			}
 		}
 	}
 
@@ -103,8 +114,10 @@ func Prepare(built plan.Plan) (Output, refusal.List) {
 		return out, refused
 	}
 
-	if err := fsx.Work(built.Config.Env, built.Hash).Write("exclude", out.Exclude, 0o644); err != nil {
-		refused.Add("generate-write", "%v", err)
+	if has {
+		if err := fsx.Work(built.Config.Env, built.Hash).Write("exclude", out.Exclude, 0o644); err != nil {
+			refused.Add("generate-write", "%v", err)
+		}
 	}
 	return out, refused
 }
@@ -188,7 +201,13 @@ func withoutAStep(built plan.Plan) (Output, refusal.List) {
 
 	out.Islands = map[string][]islands.Entry{}
 	for _, mount := range built.IslandsMounts {
-		entries, _, problems := contributed(built, mount)
+		// The raw listing, and git is not asked at all. This branch used to
+		// call the same function the shipped step calls, which opens git and
+		// prefers tracked content when the source happens to be a
+		// repository -- so a composition that declares no generation step
+		// still had git knowledge in it, and the fallback it documents was
+		// not the fallback it ran.
+		entries, problems := listed(built, mount)
 		refused.Extend(problems)
 		out.Islands[mount.Target.String()] = entries
 		out.Notes = append(out.Notes,
@@ -198,6 +217,23 @@ func withoutAStep(built plan.Plan) (Output, refusal.List) {
 				"islands")
 	}
 	return out, refused
+}
+
+// listed derives the islands from the source's raw directory listing.
+//
+// Every entry, tracked or not: without a generation step there is nothing
+// that knows what a repository contributes, and camp's core carries no
+// git of its own. The note beside it says so, because a raw listing is a
+// usable answer and not an equivalent one -- the source's own runtime
+// files become islands under it.
+func listed(built plan.Plan, mount plan.Islands) ([]islands.Entry, refusal.List) {
+	var refused refusal.List
+	infos, err := pathx.ReadDirBeneath(built.Config.Env, mount.SourceParts)
+	if err != nil {
+		refused.Add("generate-listing", "listing %s failed: %v.", mount.Source, err)
+		return nil, refused
+	}
+	return toEntries(infos), refused
 }
 
 // expandedChecks re-runs the rules that could not be checked before the
