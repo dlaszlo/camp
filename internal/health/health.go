@@ -197,13 +197,28 @@ func leftoverWork(cfg config.Config) []Note {
 
 // worktrees lists registrations git will prune while nobody is looking.
 func worktrees(cfg config.Config) []Note {
-	code, isGit := gitwire.Open(cfg.UpperPath())
-	if !isGit {
+	code, state, err := gitwire.Open(cfg.UpperPath())
+	if state == gitwire.Unreadable {
+		return []Note{{
+			Subject: "worktrees",
+			Detail: fmt.Sprintf("not checked: git could not say whether %s is a "+
+				"working tree (%v)", cfg.UpperPath(), err),
+			Action: "a check that did not run reads like a check that found " +
+				"nothing, so it says so instead. Repair the repository, or check " +
+				"that git is installed and can read it.",
+		}}
+	}
+	if state != gitwire.InWorkTree {
 		return nil
 	}
 	registered, err := code.Worktrees()
 	if err != nil {
-		return nil
+		return []Note{{
+			Subject: "worktrees",
+			Detail:  fmt.Sprintf("not checked: git could not list them (%v)", err),
+			Action: "a check that did not run reads like a check that found " +
+				"nothing, so it says so instead.",
+		}}
 	}
 
 	var notes []Note

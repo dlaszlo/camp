@@ -75,7 +75,22 @@ func contributed(built plan.Plan, mount plan.Islands) ([]islands.Entry, bool, re
 	var refused refusal.List
 
 	repository := built.Config.RepositoryPath(mount.Repository)
-	if repo, isGit := gitwire.Open(repository); isGit {
+	repo, state, err := gitwire.Open(repository)
+	if state == gitwire.Unreadable {
+		// Never the raw listing in this case. The listing is a usable answer
+		// when the source is not a repository at all; here git exists and
+		// could not answer, and falling back would hand out islands to the
+		// source's own runtime junk -- which is what the islands mount is
+		// for keeping out -- while looking like an ordinary composition.
+		refused.Add("generate-git",
+			"git could not say whether %s is a working tree: %v.\n"+
+				"The islands are derived from what the repository tracks there. A "+
+				"raw listing would include the source's own untracked files, which "+
+				"is exactly what this mount exists to keep out of the composed "+
+				"tree, so camp stops instead.", repository, err)
+		return nil, true, refused
+	}
+	if state == gitwire.InWorkTree {
 		infos, err := repo.Contributes(mount.Relative)
 		if err != nil {
 			refused.Add("generate-git",

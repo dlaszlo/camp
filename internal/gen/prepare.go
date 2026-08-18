@@ -203,18 +203,36 @@ func withoutAStep(built plan.Plan) (Output, refusal.List) {
 // expandedChecks re-runs the rules that could not be checked before the
 // islands were known.
 func expandedChecks(built plan.Plan, out Output) refusal.List {
+	var refused refusal.List
 	expanded := Expand(built, out)
+
+	repo, state, err := gitwire.Open(built.Config.UpperPath())
+	if state == gitwire.Unreadable {
+		refused.Add("git-unreadable",
+			"git could not say whether %s is a working tree: %v.\n"+
+				"The expanded mounts are checked against what the code repository "+
+				"tracks, because no mount may cover tracked content. Without an "+
+				"answer that check cannot run.", built.Config.UpperPath(), err)
+		return refused
+	}
+
 	var tracks func(string) []string
-	if repo, isGit := gitwire.Open(built.Config.UpperPath()); isGit {
+	if state == gitwire.InWorkTree {
 		tracks = func(path string) []string {
 			tracked, err := repo.TracksUnder(path)
 			if err != nil {
+				// Carried out rather than swallowed: the caller is holding the
+				// list this refusal belongs to.
+				refused.Add("git-unreadable",
+					"git could not say what %s tracks under %q: %v.",
+					built.Config.UpperPath(), path, err)
 				return nil
 			}
 			return tracked
 		}
 	}
-	return ValidateExpanded(expanded, tracks)
+	refused.Extend(ValidateExpanded(expanded, tracks))
+	return refused
 }
 
 // scaffold creates the attachment points the islands need, after their

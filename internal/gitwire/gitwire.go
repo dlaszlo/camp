@@ -20,6 +20,7 @@ package gitwire
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -67,33 +68,74 @@ func Available() error {
 	return nil
 }
 
-// Open reports whether a directory is inside a git working tree, and
-// returns a handle for reading it.
+// State is what a directory turned out to be.
 //
-// A directory that is not is not an error: a composition need not be
-// git-based at all, and camp says so rather than failing.
+// Three answers and not two, because the third used to be folded into the
+// second and they mean opposite things. "This is not a working tree" is
+// an ordinary answer -- a composition need not be git-based at all. "git
+// could not tell me" is a check that did not run: no git on PATH, a
+// damaged repository, a killed process, a directory that could not be
+// read. Reading the second as the first turns every one of those into a
+// composition that quietly skips the rule about covering tracked content,
+// which is the rule that keeps 'git commit -a' from recording deletions
+// nobody made.
+type State int
+
+const (
+	// NotAWorkTree: git answered, and the answer is no. This is where a
+	// bare repository and the inside of a .git directory land too.
+	NotAWorkTree State = iota
+	// InWorkTree: it is inside one, and the handle reads it.
+	InWorkTree
+	// Unreadable: git could not answer. Never the same as no.
+	Unreadable
+)
+
+// Open reports what a directory is, and returns a handle for reading it.
 //
 // Both facts come from one call. --is-inside-work-tree is the question
 // that must be answered before anything else is asked -- it is false in a
 // bare repository and inside a .git directory, where the reads below mean
 // nothing -- and --show-prefix is the frame every later question needs.
 // Asking them together also makes them one answer about one moment.
-func Open(path string) (*Repo, bool) {
+//
+// The two failures are told apart by git's own exit code and its message
+// under LC_ALL=C, which is why every call in this package sets it: 128
+// with "not a git repository" is git saying no, and anything else is git
+// not answering.
+func Open(path string) (*Repo, State, error) {
 	repo := &Repo{Path: path}
 	out, err := repo.run("rev-parse", "--is-inside-work-tree", "--show-prefix")
 	if err != nil {
-		return nil, false
+		if notARepository(err) {
+			return nil, NotAWorkTree, nil
+		}
+		return nil, Unreadable, err
 	}
 	inside, prefix, split := strings.Cut(string(out), "\n")
 	if !split || inside != "true" {
-		return nil, false
+		return nil, NotAWorkTree, nil
 	}
 	// --show-prefix prints the location with a trailing slash, and an empty
 	// line at the root. Only the final newline is git's -- a directory name
 	// may legally contain one -- so exactly one is removed, and then the
 	// separator git adds.
 	repo.prefix = strings.TrimSuffix(strings.TrimSuffix(prefix, "\n"), "/")
-	return repo, true
+	return repo, InWorkTree, nil
+}
+
+// notARepository reports whether git's failure was git saying no.
+//
+// Its exit code alone cannot: 128 is git's general fatal code. The
+// message is matched too, and it is safe to match because every command
+// here runs under LC_ALL=C -- which is the reason that habit exists.
+func notARepository(err error) bool {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 128 {
+		return false
+	}
+	return strings.Contains(err.Error(), "not a git repository") ||
+		strings.Contains(err.Error(), "this operation must be run in a work tree")
 }
 
 // scoped turns a path relative to the opened directory into one relative

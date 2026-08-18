@@ -76,8 +76,24 @@ func (c *checker) run() (Plan, refusal.List) {
 	c.checkRootTypes(lowerRoot)
 	c.checkAllowedDirectories(lowerRoot, upperRoot)
 
-	if repo, isGit := gitwire.Open(c.upper); isGit {
+	// Whether the code repository is a git working tree decides whether
+	// the tracked-content rule can be checked at all. A directory that is
+	// not one is an ordinary answer; git failing to say is not, and the
+	// composition stops rather than going ahead with that check silently
+	// not running.
+	switch repo, state, err := gitwire.Open(c.upper); state {
+	case gitwire.InWorkTree:
 		c.code = repo
+	case gitwire.Unreadable:
+		c.refused.Add("git-unreadable",
+			"git could not say whether %s is a working tree: %v.\n"+
+				"camp asks git one question there -- what the code repository "+
+				"tracks -- and refuses any mount that would cover it, because "+
+				"covering tracked content makes git report those files deleted and "+
+				"'git commit -a' records the deletion. Without an answer that check "+
+				"cannot run, and a composition that skips it silently is the "+
+				"failure it exists to prevent. Repair the repository, or check that "+
+				"git is installed and can read it.", c.upper, err)
 	}
 
 	built := Build(c.cfg, c.mode, c.live, Hash(c.live), lowerRoot, upperRoot)

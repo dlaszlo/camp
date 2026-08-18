@@ -75,9 +75,9 @@ func shapes(t *testing.T) map[string]func(*testing.T) string {
 
 func open(t *testing.T, directory string) *gitwire.Repo {
 	t.Helper()
-	repo, isGit := gitwire.Open(directory)
-	if !isGit {
-		t.Fatalf("%s was not recognised as being in a git working tree", directory)
+	repo, state, err := gitwire.Open(directory)
+	if state != gitwire.InWorkTree {
+		t.Fatalf("%s was not recognised as being in a git working tree: %v", directory, err)
 	}
 	return repo
 }
@@ -217,8 +217,8 @@ func TestADirectoryInNoRepositoryIsNotOpened(t *testing.T) {
 	testenv.MkDir(t, directory)
 	fixture(t, directory)
 
-	if _, isGit := gitwire.Open(directory); isGit {
-		t.Fatalf("%s is in no git working tree and was opened as one", directory)
+	if _, state, err := gitwire.Open(directory); state != gitwire.NotAWorkTree {
+		t.Fatalf("%s is in no git working tree and answered %v (%v)", directory, state, err)
 	}
 }
 
@@ -238,7 +238,41 @@ func TestABareRepositoryIsNotAWorkingTree(t *testing.T) {
 		t.Fatalf("creating a bare repository: %v\n%s", err, out)
 	}
 
-	if _, isGit := gitwire.Open(directory); isGit {
-		t.Fatalf("%s has no working tree and was opened as one", directory)
+	if _, state, err := gitwire.Open(directory); state != gitwire.NotAWorkTree {
+		t.Fatalf("%s has no working tree and answered %v (%v)", directory, state, err)
+	}
+}
+
+// git failing to answer and git answering "no" are opposite facts, and
+// they used to be the same value.
+//
+// Everything camp asks git guards one rule: no mount may cover content
+// the code repository tracks, because covering it makes git report those
+// files deleted and 'git commit -a' records the deletion. A composition
+// where git could not run must not go ahead with that rule quietly not
+// checked -- so the two answers are told apart here, at the one place
+// that can tell them apart.
+func TestGitFailingIsNotTheSameAsGitSayingNo(t *testing.T) {
+	root := testenv.Root(t)
+	t.Setenv("GIT_CEILING_DIRECTORIES", root)
+
+	plain := filepath.Join(root, "plain")
+	testenv.MkDir(t, plain)
+	if _, state, err := gitwire.Open(plain); state != gitwire.NotAWorkTree {
+		t.Errorf("a plain directory answered %v (%v)", state, err)
+	}
+
+	// The same directory, with no git to ask. Nothing about the directory
+	// changed; what changed is that the question cannot be answered.
+	t.Setenv("PATH", filepath.Join(root, "nothing-here"))
+	repo, state, err := gitwire.Open(plain)
+	if state != gitwire.Unreadable {
+		t.Fatalf("with no git on PATH the answer was %v, wanted Unreadable", state)
+	}
+	if repo != nil {
+		t.Error("a handle came back for a directory git could not read")
+	}
+	if err == nil {
+		t.Error("nothing said why it could not be read")
 	}
 }

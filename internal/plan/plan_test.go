@@ -454,3 +454,25 @@ func TestWorkAndStorageDoNotShareAParent(t *testing.T) {
 		t.Errorf("storage landed outside the environment's camp directory: %s", built.Storage)
 	}
 }
+
+// A composition whose git cannot be read does not start.
+//
+// The rule that no mount may cover tracked content is the one thing camp
+// asks git during planning. Reading a failed git as "tracks nothing" made
+// that rule pass without running, which is how a mount that hides tracked
+// files -- and a 'git commit -a' that records them as deleted -- would
+// have been accepted.
+func TestGitFailingDuringPlanningStopsTheComposition(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+
+	// Everything the fixture needed git for is done. From here there is no
+	// git to ask, and the code repository is unchanged.
+	t.Setenv("PATH", filepath.Join(env.Path, "nothing-here"))
+
+	_, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Has("git-unreadable") {
+		t.Fatalf("the composition was not refused for an unanswerable git; it "+
+			"answered %v", refused.Rules())
+	}
+}

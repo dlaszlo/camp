@@ -74,10 +74,18 @@ func Scan(built plan.Plan) Report {
 		return report
 	}
 
-	code, isGit := gitwire.Open(built.Config.UpperPath())
-	if isGit {
+	// A scan that could not run is said, never left out: an omitted scan
+	// reads exactly like a scan that found nothing, and these run at the
+	// moment the cause is still fresh.
+	code, state, err := gitwire.Open(built.Config.UpperPath())
+	switch state {
+	case gitwire.InWorkTree:
 		report.worktrees(built, code)
 		report.leaks(built, code)
+	case gitwire.Unreadable:
+		report.Failures = append(report.Failures, fmt.Sprintf(
+			"the worktree and leak scans did not run: git could not say whether "+
+				"%s is a working tree (%v)", built.Config.UpperPath(), err))
 	}
 
 	report.gate(built)
