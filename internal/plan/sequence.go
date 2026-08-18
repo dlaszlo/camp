@@ -287,7 +287,20 @@ func (c *checker) checkTracked(mount Mount) {
 		return
 	}
 	tracked, err := c.code.TracksUnder(mount.Rel.String())
-	if err != nil || len(tracked) == 0 {
+	if err != nil {
+		// Carried out rather than swallowed. git answering "this is a
+		// working tree" and then failing the question that matters is still
+		// git failing, and reading that as "tracks nothing" is the rule
+		// below not running -- silently, on the one path it exists to guard.
+		c.refused.Add("git-unreadable",
+			"git could not say what %s tracks under %q: %v.\n"+
+				"No mount may cover content the code repository tracks, because "+
+				"git then reports those files deleted and 'git commit -a' records "+
+				"the deletion. Without an answer that check cannot run.",
+			c.upper, mount.Rel.String(), err)
+		return
+	}
+	if len(tracked) == 0 {
 		return
 	}
 	shown := tracked

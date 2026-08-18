@@ -477,6 +477,35 @@ func TestGitFailingDuringPlanningStopsTheComposition(t *testing.T) {
 	}
 }
 
+// git answering one question and failing the next is still git failing.
+//
+// The frame question is answered from .git and needs no index, so a
+// repository whose index cannot be read opens as an ordinary working
+// tree -- and the question the rule turns on, what it tracks under a
+// mount point, fails. Read as "tracks nothing", that failure is the
+// tracked-content rule not running, on the one path it exists to guard:
+// a mount over tracked content makes git report those files deleted and
+// 'git commit -a' record the deletion.
+func TestATrackedContentAnswerThatFailsStopsTheComposition(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+
+	index := filepath.Join(env.Code, ".git", "index")
+	if err := os.Chmod(index, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(index, 0o644) })
+
+	_, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Has("git-unreadable") {
+		t.Fatalf("a code repository that could not answer what it tracks was "+
+			"accepted; the rules that fired were %v", refused.Rules())
+	}
+	if !strings.Contains(refused.Error(), "index file open failed") {
+		t.Errorf("the refusal does not carry git's own reason:\n%s", refused.Error())
+	}
+}
+
 // allow_overlap exempts a name from the overlap gate. It does not make
 // the name expressible, and it does not make a socket or a symlink
 // something camp can stand over.

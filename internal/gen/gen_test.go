@@ -466,9 +466,9 @@ func TestARecordLeftBehindByAHalfFinishedRetirementIsStruck(t *testing.T) {
 // tracked content -- and covering tracked content is what makes git
 // report those files deleted and 'git commit -a' record the deletion.
 //
-// Both passes are asked, because either may be the one that refuses: today
-// it is the generation pass, whose tracked-content callback carries the
-// error out.
+// Both passes are asked, because either may be the one that refuses:
+// today it is the planning pass, whose tracked-content check carries the
+// error out; the generation pass carries it out too, from its own.
 func TestACodeRepositoryWhoseIndexCannotBeReadStopsTheComposition(t *testing.T) {
 	env := testenv.NewEnv(t)
 	cfg := env.Config(t, "")
