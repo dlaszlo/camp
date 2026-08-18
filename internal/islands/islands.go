@@ -135,8 +135,15 @@ func (m *Manifest) Add(relative string, kind pathx.Type) error {
 	if existing, known := m.entries[relative]; known && existing == kind {
 		return nil
 	}
+	// Saved first, remembered second. What is on disk is the provenance;
+	// what is in this map is a copy of it, and a copy that ran ahead of a
+	// failed write would have camp believe it owns something no record
+	// claims.
+	if err := m.saveWith(relative, kind); err != nil {
+		return err
+	}
 	m.entries[relative] = kind
-	return m.save()
+	return nil
 }
 
 // Remove strikes an entry from the manifest.
@@ -144,13 +151,38 @@ func (m *Manifest) Remove(relative string) error {
 	if _, known := m.entries[relative]; !known {
 		return nil
 	}
+	if err := m.saveWithout(relative); err != nil {
+		return err
+	}
 	delete(m.entries, relative)
-	return m.save()
+	return nil
 }
 
-func (m *Manifest) save() error {
-	lines := make([]string, 0, len(m.entries))
-	for relative, kind := range m.entries {
+// saveWith and saveWithout write the manifest as it would be with one
+// entry added or removed, without changing what this process believes
+// until the write has landed.
+func (m *Manifest) saveWith(relative string, kind pathx.Type) error {
+	next := make(map[string]pathx.Type, len(m.entries)+1)
+	for name, existing := range m.entries {
+		next[name] = existing
+	}
+	next[relative] = kind
+	return m.write(next)
+}
+
+func (m *Manifest) saveWithout(relative string) error {
+	next := make(map[string]pathx.Type, len(m.entries))
+	for name, existing := range m.entries {
+		if name != relative {
+			next[name] = existing
+		}
+	}
+	return m.write(next)
+}
+
+func (m *Manifest) write(entries map[string]pathx.Type) error {
+	lines := make([]string, 0, len(entries))
+	for relative, kind := range entries {
 		lines = append(lines, enc.Line(string(kind), relative))
 	}
 	enc.Sort(lines)
@@ -294,6 +326,16 @@ func untouched(path string, kind pathx.Type) (bool, error) {
 // permits. A modified one is left where it is, struck from the manifest
 // and reported -- it has become ordinary water content, which is the
 // user's.
+//
+// The order and the errors are the whole of the care here, because what
+// is at stake is provenance. The object goes first and the record after
+// it: a crash in between leaves a record for something that is not there,
+// which the next run simply creates again, while the other order would
+// leave an object in the user's storage that camp could no longer prove
+// was its own -- and the collision rule would then refuse the composition
+// on the strength of camp's own scaffolding. An error that is not "it is
+// gone" is never read as "it is gone" either: a permission or an I/O
+// failure used to make camp disclaim an object that still exists.
 func retire(storage fsx.Area, manifest *Manifest, expansion Expansion) []string {
 	var notes []string
 
@@ -314,25 +356,56 @@ func retire(storage fsx.Area, manifest *Manifest, expansion Expansion) []string 
 		path := filepath.Join(expansion.Store, name)
 
 		unchanged, err := untouched(path, kind)
-		if err != nil {
-			// It is gone already; strike the record and move on.
-			_ = manifest.Remove(relative)
-			continue
-		}
-		if !unchanged {
-			_ = manifest.Remove(relative)
+		switch {
+		case os.IsNotExist(err):
+			// It is gone already, so only the record is left to strike.
+			if err := manifest.Remove(relative); err != nil {
+				notes = append(notes, fmt.Sprintf(
+					"%s is gone and camp could not strike it from its own record: "+
+						"%v. The record is what tells camp's objects from yours, so "+
+						"it is kept rather than half-written.", path, err))
+			}
+		case err != nil:
+			// Something else: a permission, an I/O error. camp does not know
+			// what is there, so it keeps claiming it and says so.
+			notes = append(notes, fmt.Sprintf(
+				"%s was camp's attachment point for an entry the source no longer "+
+					"contributes, and camp could not look at it: %v. It stays in "+
+					"camp's record until it can -- disclaiming something that may "+
+					"still be there would leave an object nothing can account for.",
+				path, err))
+		case !unchanged:
+			if err := manifest.Remove(relative); err != nil {
+				notes = append(notes, fmt.Sprintf(
+					"%s is no longer camp's and camp could not strike it from its "+
+						"own record: %v.", path, err))
+				continue
+			}
 			notes = append(notes, fmt.Sprintf(
 				"%s was camp's attachment point for an entry the source no "+
 					"longer contributes, and it is no longer empty -- so it is now "+
 					"ordinary content of yours in machine-local storage. camp has "+
 					"stopped claiming it and left it exactly where it is.", path))
-			continue
+		default:
+			// The object first, the record second: a crash in between leaves a
+			// record for something that is not there, which the next run
+			// creates again. Removed through the storage area and by component
+			// -- the same route it was created by -- so camp's own object is
+			// the only thing this can reach.
+			if err := storage.Remove(append(expansion.Target.Components(), name)...); err != nil {
+				notes = append(notes, fmt.Sprintf(
+					"%s is camp's own attachment point for an entry the source no "+
+						"longer contributes, and it could not be removed: %v. It "+
+						"stays in camp's record.", path, err))
+				continue
+			}
+			if err := manifest.Remove(relative); err != nil {
+				notes = append(notes, fmt.Sprintf(
+					"%s was removed and camp could not strike it from its own "+
+						"record: %v. The next run recreates it and strikes it "+
+						"again.", path, err))
+			}
 		}
-		_ = manifest.Remove(relative)
-		// Removed through the storage area and by component -- the same route
-		// the attachment point was created by -- so that camp's own object is
-		// the only thing this can ever reach.
-		_ = storage.Remove(append(expansion.Target.Components(), name)...)
 	}
 	return notes
 }

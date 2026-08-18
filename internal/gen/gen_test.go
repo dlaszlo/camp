@@ -680,3 +680,50 @@ printf '%s' "$RECORDS" > "$CAMP_GEN_OUT/islands/.claude.list"
 		})
 	}
 }
+
+// An attachment point camp cannot look at stays camp's.
+//
+// Retirement is about provenance: the manifest is what tells camp's own
+// objects from the user's machine-local files, and a permission or an I/O
+// error used to be read as "it is gone already" -- so camp disclaimed
+// something that still existed, and the next run met an object nothing
+// could account for and refused the composition on the strength of camp's
+// own scaffolding.
+func TestAnAttachmentPointCampCannotLookAtIsNotDisclaimed(t *testing.T) {
+	env := testenv.NewEnv(t)
+	built, _, refused := prepared(t, env, "")
+	if !refused.Empty() {
+		t.Fatalf("generation was refused:\n%v", refused)
+	}
+
+	// The source stops contributing the directory, so the next run would
+	// retire its attachment point.
+	if err := os.RemoveAll(filepath.Join(env.Workspace, ".claude", "agents")); err != nil {
+		t.Fatal(err)
+	}
+	testenv.Commit(t, env.Workspace, "the agents are gone")
+
+	point := filepath.Join(built.Storage, ".claude", "agents")
+	if err := os.Chmod(point, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(point, 0o755) })
+
+	out, problems := gen.Prepare(built)
+	if !problems.Empty() {
+		t.Fatalf("the second run was refused:\n%v", problems)
+	}
+	if !strings.Contains(strings.Join(out.Notes, "\n"), "could not look at it") {
+		t.Errorf("nothing was said about the attachment point camp could not "+
+			"look at:\n%v", out.Notes)
+	}
+
+	manifest, err := islands.LoadManifest(fsx.Storage(built.Config.Env, built.Hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, recorded := manifest.Records(".claude/agents"); !recorded {
+		t.Error("camp disclaimed an object it could not look at, so the next " +
+			"run will meet it as content nothing can account for")
+	}
+}
