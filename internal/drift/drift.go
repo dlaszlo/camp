@@ -221,21 +221,59 @@ func (r *Report) gate(built plan.Plan) {
 
 func (r *Report) inventory(built plan.Plan) {
 	current := inventory.Take(built.LowerRoot, built.UpperRoot)
-	r.Inventory = inventory.Report(built.Config.Env, current)
+	text, err := inventory.Report(built.Config.Env, current)
+	if err != nil {
+		// A snapshot that is missing or damaged is the comparison not
+		// running, and it is named here rather than reported as no
+		// differences -- which is what an empty string would read as.
+		r.Failures = append(r.Failures, fmt.Sprintf(
+			"the comparison against the accepted snapshot did not run: %v", err))
+		return
+	}
+	r.Inventory = text
 }
 
 // Refresh re-reads both roots and runs the whole pass. Used at the end of
 // a session, when the listings camp started with may be stale -- a name
 // born during the session is exactly what this is looking for.
 func Refresh(built plan.Plan) Report {
+	var failures []string
+	// A root that cannot be re-read is said, and the stale listing is not
+	// used in its place. The whole point of this pass is what changed
+	// during the session, so answering it from the listing the session
+	// started with would report "nothing changed" on the strength of the
+	// failure that stopped camp looking.
 	lower, err := pathx.ReadDirBeneath(built.Config.LowerPath(), nil)
-	if err == nil {
-		built.LowerRoot = lower
+	if err != nil {
+		failures = append(failures, fmt.Sprintf(
+			"the workspace root %s could not be read, so the gate and inventory "+
+				"comparisons did not run: %v", built.Config.LowerPath(), err))
 	}
-	upper, err := pathx.ReadDirBeneath(built.Config.UpperPath(), nil)
-	if err == nil {
-		built.UpperRoot = upper
+	upper, upperErr := pathx.ReadDirBeneath(built.Config.UpperPath(), nil)
+	if upperErr != nil {
+		failures = append(failures, fmt.Sprintf(
+			"the code repository's root %s could not be read, so the gate and "+
+				"inventory comparisons did not run: %v",
+			built.Config.UpperPath(), upperErr))
 	}
+	if err != nil || upperErr != nil {
+		// The two comparisons that need the roots do not run, and the one
+		// that does not still does: a worktree registered inside the
+		// composed tree dies at down whatever the roots say.
+		report := Report{Failures: failures}
+		code, state, gitErr := gitwire.Open(built.Config.UpperPath())
+		switch state {
+		case gitwire.InWorkTree:
+			report.worktrees(built, code)
+		case gitwire.Unreadable:
+			report.Failures = append(report.Failures, fmt.Sprintf(
+				"the worktree scan did not run: git could not say whether %s is "+
+					"a working tree (%v)", built.Config.UpperPath(), gitErr))
+		}
+		return report
+	}
+
+	built.LowerRoot, built.UpperRoot = lower, upper
 	return Scan(built)
 }
 

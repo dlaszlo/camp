@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dlaszlo/camp/internal/drift"
+	"github.com/dlaszlo/camp/internal/inventory"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/testenv"
 )
@@ -220,5 +221,47 @@ func TestNothingToSayMeansNothingIsSaid(t *testing.T) {
 	}
 	if found.String() != "" {
 		t.Error("an empty report should render as nothing at all")
+	}
+}
+
+// A scan that could not run says so. An omitted scan reads exactly like a
+// scan that found nothing, and these run at the end of a session -- the
+// one moment when the cause of a mid-session change is still fresh.
+func TestAScanThatCouldNotRunIsSaidRatherThanOmitted(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+	built, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Empty() {
+		t.Fatalf("the fixture was refused:\n%v", refused)
+	}
+
+	// The accepted snapshot is damaged. The comparison against it is the
+	// one that names a workspace root entry born during the session.
+	if err := os.WriteFile(inventory.Path(cfg.Env), []byte("not a record\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report := drift.Refresh(built)
+	if len(report.Failures) == 0 {
+		t.Fatalf("a damaged snapshot was reported as nothing to say:\n%s", report.String())
+	}
+	if !strings.Contains(report.String(), "did not run") {
+		t.Errorf("the report does not say the comparison did not run:\n%s", report.String())
+	}
+
+	// And a root that cannot be read is not answered from the listing camp
+	// started with, which is exactly the listing this pass exists to
+	// question.
+	if err := os.Chmod(cfg.LowerPath(), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(cfg.LowerPath(), 0o755) })
+	report = drift.Refresh(built)
+	if len(report.Failures) == 0 {
+		t.Fatalf("an unreadable workspace root was reported as nothing to "+
+			"say:\n%s", report.String())
+	}
+	if !strings.Contains(report.String(), cfg.LowerPath()) {
+		t.Errorf("the report does not name the root it could not read:\n%s",
+			report.String())
 	}
 }

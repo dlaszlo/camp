@@ -312,14 +312,27 @@ func unaccepted(kind, env string) refusal.Group {
 
 // Report renders the comparison for down and for the end of a session,
 // where it never blocks -- only tells.
-func Report(env string, current Snapshot) string {
+//
+// A snapshot that is missing or damaged comes back as an error and never
+// as an empty report: the caller prints what this returns, and empty
+// reads as "nothing has changed" -- which is a statement about the two
+// repositories made on the strength of not having looked at them.
+func Report(env string, current Snapshot) (string, error) {
 	accepted, found, err := Load(env)
-	if err != nil || !found {
-		return ""
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("the accepted snapshot at %s could not be read: "+
+			"%w.\nIt is what camp compares the two repositories against, so "+
+			"nothing can be said about what changed until it can be read or "+
+			"taken again with 'camp accept'", Path(env), err)
+	case !found:
+		return "", fmt.Errorf("there is no accepted snapshot at %s, so there is "+
+			"nothing to compare the two repositories against. 'camp accept' "+
+			"takes one", Path(env))
 	}
 	differences := Compare(accepted, current)
 	if len(differences) == 0 {
-		return ""
+		return "", nil
 	}
 
 	var b strings.Builder
@@ -330,5 +343,5 @@ func Report(env string, current Snapshot) string {
 	}
 	b.WriteString("  This is reported now, while the cause is fresh. " +
 		"'camp accept' takes a new snapshot once you have looked at it.\n")
-	return b.String()
+	return b.String(), nil
 }
