@@ -237,13 +237,24 @@ camp doctor
 The line to look for is:
 
 ```
-  ok   user namespaces  permitted, and a mount inside one succeeds
+  ok   user namespaces  permitted, and a real overlay in one mounts, copies up and whiteouts, with userxattr
 ```
 
 `doctor` does not read the switches and guess — it creates a namespace
-with the same identity mapping a real session uses and tries to mount
-something inside it. If it cannot, it says which restriction stopped it
-and what to do about it.
+with the same identity mapping a real session uses, builds a real overlay
+inside it, writes through it and removes through it. If any of that
+fails, it says which restriction stopped it and what to do about it. The
+scratch tree it uses lives inside that namespace and goes with it.
+
+The system-wide mode is reported as far as it can honestly be:
+
+```
+  ok   privileged behaviour  not tested; it needs a terminal
+```
+
+Answering that one would mean running `sudo` to find out whether `sudo`
+works. What that mode does on this machine is measured the first time you
+run `camp up`.
 
 Run it with no configuration anywhere and it reports only the machine;
 run it inside an environment and it also reports that environment.
