@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -156,6 +157,17 @@ var (
 			"empty directory, so put a placeholder file in it -- or correct the " +
 			"target.",
 	}
+	shadowedTargets = refusal.Group{
+		Rule: "target-shadowed",
+		One: "a mount point cannot exist in the composed tree, because " +
+			"something on the way to it is not a directory:",
+		Many: "%d mount points cannot exist in the composed tree, because " +
+			"something on the way to each is not a directory:",
+		Detail: "Directories merge and files do not: a file in the code " +
+			"repository where the workspace has a directory covers that whole " +
+			"directory, and nothing under it is reachable in the composed tree. " +
+			"Move or rename one of the two, or correct the target.",
+	}
 	targetTypes = refusal.Group{
 		Rule: "target-type",
 		One:  "a mount would put one kind of thing over another:",
@@ -206,7 +218,12 @@ func (c *checker) checkSource(mount Mount) pathx.Type {
 // source.
 func (c *checker) checkTarget(mount Mount, sourceType pathx.Type, tree *virtual) {
 	targetType, err := tree.at(mount.Rel)
-	if err != nil {
+	switch {
+	case errors.Is(err, pathx.ErrNotDirectory):
+		c.refused.Group(shadowedTargets, "%q (%s): %v",
+			mount.Rel.String(), describeOrigin(mount), err)
+		return
+	case err != nil:
 		c.refused.Group(unreadableTargets, "%s (%s): %v",
 			mount.Target, describeOrigin(mount), err)
 		return

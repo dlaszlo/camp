@@ -59,6 +59,19 @@ var ErrSymlinkInPath = errors.New("a component of the path is a symbolic link")
 // ErrEscapes is returned when resolution would leave the base directory.
 var ErrEscapes = errors.New("the path leaves the directory it is resolved against")
 
+// ErrNotDirectory is returned when a component on the way down is not a
+// directory, so nothing below it can exist.
+//
+// It is deliberately not the same answer as absence, and the difference
+// decides a real case. The composed tree's paper walk asks the code
+// repository first and the workspace second: a file where the workspace
+// has a directory shadows that whole directory, files being what does not
+// merge -- so reading the code side's ENOTDIR as "nothing there" made the
+// walk consult the workspace, find the directory, and accept a mount
+// point the real overlay cannot reach. The mount then failed at midnight
+// instead of during validation.
+var ErrNotDirectory = errors.New("a component of the path is not a directory")
+
 // openDirBeneath opens base and then walks parts, refusing to follow any
 // symlink and refusing to leave base.
 //
@@ -90,6 +103,8 @@ func translate(err error, base, part string) error {
 		return fmt.Errorf("%w: %s in %s", ErrSymlinkInPath, part, base)
 	case errors.Is(err, unix.EXDEV):
 		return fmt.Errorf("%w: %s in %s", ErrEscapes, part, base)
+	case errors.Is(err, unix.ENOTDIR):
+		return fmt.Errorf("%w: %s in %s", ErrNotDirectory, part, base)
 	default:
 		return err
 	}
@@ -140,8 +155,13 @@ func statAt(dirfd int, name, full string) (Info, error) {
 	return info, nil
 }
 
+// isAbsent is the one error that means the name is simply not there.
+//
+// ENOTDIR is not in it. A component that is a file rather than a
+// directory is a different fact about the tree, and one the composed
+// tree's paper walk has to be able to tell apart -- see ErrNotDirectory.
 func isAbsent(err error) bool {
-	return errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR)
+	return errors.Is(err, unix.ENOENT)
 }
 
 func typeOf(mode uint32) Type {

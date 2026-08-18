@@ -68,6 +68,15 @@ func (v *virtual) at(rel pathx.Rel) (pathx.Type, error) {
 // wins outright, and the lower is only consulted where the upper has
 // nothing. That is the kernel's rule, and reproducing it here is what
 // makes the paper walk agree with the real one.
+//
+// A file on the code side where the workspace has a directory is the
+// case this has to get right, and the one it used to get wrong: files do
+// not merge, so the code repository's file shadows the workspace's whole
+// directory and nothing under it is reachable. Reading that as "the code
+// side has nothing there" sent the walk to the workspace, found the
+// directory, and accepted a mount point the real overlay cannot reach --
+// which then failed at mount time, after generation and after earlier
+// mounts had been made.
 func (v *virtual) overlay(rel pathx.Rel) (pathx.Type, error) {
 	parts := rel.Components()
 	upper, err := pathx.StatBeneath(v.upper, parts)
