@@ -3,6 +3,7 @@ package mountinfo_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dlaszlo/camp/internal/mountinfo"
@@ -181,5 +182,41 @@ func TestUnderAndContaining(t *testing.T) {
 	on, ok = mountinfo.Containing(entries, "/var/log")
 	if !ok || on.Point != "/" {
 		t.Errorf("/var/log was placed on %q", on.Point)
+	}
+}
+
+// A line camp cannot read stops the whole table.
+//
+// Everything camp asks the table decides by what is not in it:
+// completeness compares the mounts that exist with the mounts that were
+// planned, the residue scan refuses to build on what is already there,
+// the steady-state guard looks for another composition on this upper, and
+// a teardown walks what a record says is mounted. A dropped line is a
+// partial answer handed over as a complete one, and every one of those
+// checks would read it as good news.
+func TestAnUnreadableLineRejectsTheWholeTable(t *testing.T) {
+	good := "23 1 0:22 / / rw,relatime shared:1 - ext4 /dev/sda1 rw"
+	for _, damaged := range []string{
+		"23 1 0:22 / /",
+		"23 1 0:22 / / rw,relatime shared:1 ext4 /dev/sda1 rw",
+		"x 1 0:22 / / rw,relatime shared:1 - ext4 /dev/sda1 rw",
+		"23 y 0:22 / / rw,relatime shared:1 - ext4 /dev/sda1 rw",
+		"23 1 zero / / rw,relatime shared:1 - ext4 /dev/sda1 rw",
+		"23 1 0:22 / / rw,relatime shared:1 - ext4",
+	} {
+		path := filepath.Join(t.TempDir(), "mountinfo")
+		body := good + "\n" + damaged + "\n" + good + "\n"
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := mountinfo.Read(path)
+		if err == nil {
+			t.Errorf("the damaged line %q was dropped and %d entries came back "+
+				"as the table", damaged, len(entries))
+			continue
+		}
+		if !strings.Contains(err.Error(), "line 2") {
+			t.Errorf("the error does not say which line it was: %v", err)
+		}
 	}
 }

@@ -94,11 +94,24 @@ func Read(path string) ([]Entry, error) {
 	var entries []Entry
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	number := 0
 	for scanner.Scan() {
-		entry, ok := parse(scanner.Text())
-		if ok {
-			entries = append(entries, entry)
+		number++
+		entry, err := parse(scanner.Text())
+		if err != nil {
+			// The whole snapshot goes, and camp says why. A dropped line is a
+			// partial answer presented as a complete one: the line camp could
+			// not read may be the mount that completeness, the residue scan,
+			// the guard against a second composition or a teardown needed to
+			// see, and every one of those decides by what the table does not
+			// contain.
+			return nil, fmt.Errorf("the mount table %s could not be read: line "+
+				"%d does not parse: %w.\n%s\ncamp reads the whole table or none "+
+				"of it: a line it cannot read may be the mount a check is looking "+
+				"for, and dropping it would turn a partial answer into a complete "+
+				"one", path, number, err, scanner.Text())
 		}
+		entries = append(entries, entry)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("reading the mount table %s: %w", path, err)
@@ -112,10 +125,11 @@ func Read(path string) ([]Entry, error) {
 // fstype source superoptions. The optional fields are what make this
 // worth a parser rather than a field index -- there may be none, and the
 // separator is the only thing that says where they end.
-func parse(line string) (Entry, bool) {
+func parse(line string) (Entry, error) {
 	fields := strings.Fields(line)
 	if len(fields) < 10 {
-		return Entry{}, false
+		return Entry{}, fmt.Errorf("a record has at least ten fields and this "+
+			"one has %d", len(fields))
 	}
 
 	separator := -1
@@ -125,15 +139,26 @@ func parse(line string) (Entry, bool) {
 			break
 		}
 	}
-	if separator == -1 || separator+3 > len(fields) {
-		return Entry{}, false
+	if separator == -1 {
+		return Entry{}, fmt.Errorf("there is no \"-\" separating the optional " +
+			"fields from the filesystem type")
+	}
+	if separator+3 > len(fields) {
+		return Entry{}, fmt.Errorf("the separator is followed by %d fields and "+
+			"a record needs three after it", len(fields)-separator-1)
 	}
 
-	id, err1 := strconv.Atoi(fields[0])
-	parent, err2 := strconv.Atoi(fields[1])
-	major, minor, err3 := device(fields[2])
-	if err1 != nil || err2 != nil || err3 != nil {
-		return Entry{}, false
+	id, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return Entry{}, fmt.Errorf("the mount id %q is not a number", fields[0])
+	}
+	parent, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return Entry{}, fmt.Errorf("the parent id %q is not a number", fields[1])
+	}
+	major, minor, err := device(fields[2])
+	if err != nil {
+		return Entry{}, fmt.Errorf("the device field %q: %w", fields[2], err)
 	}
 
 	entry := Entry{
@@ -156,7 +181,7 @@ func parse(line string) (Entry, bool) {
 			entry.Super[key] = value
 		}
 	}
-	return entry, true
+	return entry, nil
 }
 
 func device(field string) (int, int, error) {
