@@ -10,16 +10,22 @@ import (
 // watching, and the log that keeps it.
 //
 // It exists because a line has two destinations with different rules. The
-// terminal gets it as a person reads it. The log gets the same words with
-// a timestamp in front of them, which is a thing about the line's sink and
-// not about the line, and so belongs here rather than in the sentence a
-// check composed.
+// terminal gets it as a person reads it, with the marker coloured when
+// this really is a terminal. The log gets the same words with a timestamp
+// in front of them and no colour at all. Both of those are properties of
+// the sink rather than of the line, which is why they are put on here and
+// never baked into the sentence a check composed: a marker with escape
+// codes inside it would be in the file too, where nothing renders them and
+// every later reader has to know about them.
 //
 // It is line-oriented on purpose. A timestamp belongs to a line, so the
 // log has to be handed whole lines; a partial write waits here until its
 // newline arrives, and Close says the last one out.
 type Sink struct {
 	terminal io.Writer
+	// colour is decided once, when the sink is made: whether the stream on
+	// the other end is a terminal cannot change during a run.
+	colour bool
 	// log is nil until a command has found a configuration -- the log lives
 	// under the environment's own .camp, and before that there is nowhere
 	// for it to be.
@@ -33,7 +39,7 @@ type Sink struct {
 
 // To returns the sink a command writes its narration to.
 func To(terminal io.Writer) *Sink {
-	return &Sink{terminal: terminal}
+	return &Sink{terminal: terminal, colour: Colour(terminal)}
 }
 
 // Keep attaches the log. Everything said after this reaches it; what a
@@ -78,14 +84,14 @@ func (s *Sink) Close() error {
 // line is one whole line, to the terminal as it is read and to the log as
 // it is kept.
 func (s *Sink) line(text string) {
-	fmt.Fprintf(s.terminal, "%s\n", text)
+	fmt.Fprintf(s.terminal, "%s\n", s.paint(text))
 	if s.log == nil || s.complained {
 		return
 	}
 	if _, err := s.log.Write([]byte(text + "\n")); err != nil {
 		s.complained = true
-		fmt.Fprintf(s.terminal, "%s\n", Marked(MarkWarn,
+		fmt.Fprintf(s.terminal, "%s\n", s.paint(Marked(MarkWarn,
 			fmt.Sprintf("this run is not being written to camp's log: %v. "+
-				"Nothing else about the run changes.", err)))
+				"Nothing else about the run changes.", err))))
 	}
 }
