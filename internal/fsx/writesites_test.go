@@ -24,7 +24,7 @@ import (
 //
 // This does not replace reading the code once. It keeps the answer true
 // afterwards, which is the part a person cannot do by hand every time.
-var writeCalls = regexp.MustCompile(`\b(os\.(Create|CreateTemp|WriteFile|Mkdir|MkdirAll|MkdirTemp|Remove|RemoveAll|Rename|Chmod|Chown|Lchown|Truncate|Symlink|Link)|unix\.(Mkdir|Mkdirat|Unlink|Unlinkat|Rmdir|Renameat|Fchmod|Fchmodat|Fchown|Fchownat|Symlink|Symlinkat|Link|Linkat))\(`)
+var writeCalls = regexp.MustCompile(`\b(os\.(Create|CreateTemp|WriteFile|Mkdir|MkdirAll|MkdirTemp|Remove|RemoveAll|Rename|Chmod|Chown|Lchown|Truncate|Symlink|Link)|unix\.(Mkdir|Mkdirat|Unlink|Unlinkat|Rmdir|Renameat|Chmod|Fchmod|Fchmodat|Fchown|Fchownat|Symlink|Symlinkat|Link|Linkat))\(`)
 
 // openWrite catches os.OpenFile with a writing flag, which the pattern
 // above cannot see from the name alone.

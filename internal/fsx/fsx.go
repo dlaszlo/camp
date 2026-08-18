@@ -408,14 +408,24 @@ func (a Area) RemoveTree(parts ...string) error {
 }
 
 func removeTreeAt(dir int, name string) error {
-	var st unix.Stat_t
-	if err := unix.Fstatat(dir, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+	// Opened before anything is decided about it, following no symlink at
+	// the final name, so the type check and the mode change below act on
+	// this one inode and never on the name -- which the owner can point
+	// elsewhere between two syscalls.
+	fd, err := unix.Openat(dir, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
 		if isAbsent(err) {
 			return nil
 		}
 		return fmt.Errorf("looking at %s: %w", name, err)
 	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
+		return fmt.Errorf("looking at %s: %w", name, err)
+	}
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		unix.Close(fd)
 		if err := unix.Unlinkat(dir, name, 0); err != nil && !isAbsent(err) {
 			return fmt.Errorf("removing %s: %w", name, err)
 		}
@@ -423,12 +433,16 @@ func removeTreeAt(dir int, name string) error {
 	}
 
 	// The kernel's leftover is mode 000; without this it cannot even be
-	// listed, let alone emptied.
+	// listed, let alone emptied. Changed through the descriptor opened
+	// above, so a symlink swapped in at the name after the type check is
+	// changed on nothing: this descriptor holds the directory itself.
 	if st.Mode&0o300 != 0o300 {
-		if err := unix.Fchmodat(dir, name, 0o700, 0); err != nil {
+		if err := chmodFd(fd, 0o700); err != nil {
+			unix.Close(fd)
 			return fmt.Errorf("making %s removable: %w", name, err)
 		}
 	}
+	unix.Close(fd)
 	child, err := openAt(dir, name, unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
 		if isAbsent(err) {
@@ -594,13 +608,26 @@ func makeAt(dir int, name string, last bool, mode os.FileMode) (int, error) {
 	}
 	if last {
 		// Put the mode back if it drifted, and undo whatever the umask took
-		// off at creation.
-		if err := unix.Fchmodat(dir, name, uint32(mode.Perm()), 0); err != nil {
+		// off at creation. Through the descriptor just opened, not the name:
+		// a symlink swapped in at the name after the open is changed on
+		// nothing.
+		if err := chmodFd(fd, mode); err != nil {
 			unix.Close(fd)
 			return -1, fmt.Errorf("setting the mode of %s: %w", name, err)
 		}
 	}
 	return fd, nil
+}
+
+// chmodFd changes the mode of exactly the inode a descriptor holds.
+//
+// The descriptor is opened O_PATH, which fchmod cannot act on directly, so
+// the change is addressed through the descriptor's own /proc/self/fd name.
+// That name resolves to the inode the descriptor holds, whatever the
+// original name points at now -- which is the whole point: a symlink
+// swapped in at the name after the type was checked is changed on nothing.
+func chmodFd(fd int, mode os.FileMode) error {
+	return unix.Chmod(fmt.Sprintf("/proc/self/fd/%d", fd), uint32(mode.Perm()))
 }
 
 // unlink removes one name below the area.
