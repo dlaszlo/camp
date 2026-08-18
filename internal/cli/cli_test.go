@@ -168,3 +168,32 @@ func TestPlanStillPrintsThePlanBesideTheRefusal(t *testing.T) {
 		t.Errorf("the refusal is on stdout, where the plan is:\n%s", out)
 	}
 }
+
+// init writes the skeleton into camp's own directory inside the
+// environment, and there was nothing holding it there.
+//
+// It took the configuration's path and went one directory up for the base
+// -- which is $ENV/.camp, camp's own directory, not the environment. So
+// the area became $ENV/.camp/.camp: the command needed a directory it was
+// supposed to create, failed on a fresh environment for that reason, and
+// on an environment where .camp happened to exist would have written the
+// three files a level too deep while printing the path it did not write.
+func TestInitWritesTheSkeletonIntoTheEnvironment(t *testing.T) {
+	env := t.TempDir()
+
+	out, errOut, code := run(t, "init", env)
+	if code != 0 {
+		t.Fatalf("init exited %d in an empty directory:\n%s\n%s", code, out, errOut)
+	}
+	for _, name := range []string{"config.yml", ".gitignore", "README.md"} {
+		if _, err := os.Stat(filepath.Join(env, config.Dir, name)); err != nil {
+			t.Errorf("%s is not where init said it wrote it: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(env, config.Dir, config.Dir)); err == nil {
+		t.Errorf("init made a second %s inside camp's own directory", config.Dir)
+	}
+	if !strings.Contains(out, config.Path(env)) {
+		t.Errorf("init did not name the file it wrote:\n%s", out)
+	}
+}

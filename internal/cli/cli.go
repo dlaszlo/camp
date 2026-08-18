@@ -344,11 +344,11 @@ func cmdInit(ctx *context, args []string) error {
 	// from the name it was handed. This one command opens its own: there is
 	// no configuration yet to have opened it -- writing the configuration is
 	// the whole job.
-	root, err := pathx.OpenRoot(filepath.Dir(target))
+	root, err := pathx.OpenRoot(env)
 	if err != nil {
 		return failure(ExitPrecondition,
 			"create the directory first, or run 'camp init' from inside it",
-			"%s could not be opened: %v", filepath.Dir(target), err)
+			"%s could not be opened: %v", env, err)
 	}
 	defer root.Close()
 
