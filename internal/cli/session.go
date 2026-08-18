@@ -65,9 +65,13 @@ func enter(ctx *context, file string, argv []string) error {
 		Exclude: composition.Generated.Exclude,
 		Argv:    argv,
 		Locks:   composition.Locks,
-		Stdin:   os.Stdin,
-		Stdout:  os.Stdout,
-		Stderr:  os.Stderr,
+		// The workload's own three streams, passed through untouched. They
+		// are the program's, not camp's: what runs inside a session writes
+		// to the terminal it was started from, and camp neither reads nor
+		// keeps a copy of it.
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
 	})
 	if err != nil {
 		var single refusal.R

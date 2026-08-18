@@ -53,7 +53,8 @@ five minutes.
 │   ├── config.yml            the configuration — the only file you write
 │   ├── inventory             the accepted snapshot of both repositories' roots
 │   ├── work/<id>/            disposable: the overlay's workdir, generated files
-│   └── storage/<id>/         persistent: machine-local files, worktrees
+│   ├── storage/<id>/         persistent: machine-local files, worktrees
+│   └── logs/                 every line camp printed here, with timestamps
 ├── shop/                     the code repository       (writes land here)
 ├── shop-env/                 the workspace repository  (read-only inside)
 ├── shop-records/             a third repository        (writable, its own)

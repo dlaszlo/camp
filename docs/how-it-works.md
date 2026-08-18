@@ -18,7 +18,8 @@ $ENV/
 │   ├── inventory             the accepted snapshot of both repositories' root entries
 │   ├── work/<id>/            DISPOSABLE: the overlay's workdir, generated files, staging
 │   ├── storage/<id>/         PERSISTENT: machine-local files, worktrees — never removed
-│   └── reports/              what a session found, waiting to be read once
+│   ├── reports/              what a session found, waiting to be read once
+│   └── logs/                 every line camp wrote to stderr, timestamped and rotated
 ├── <workspace repository>    the lower layer
 ├── <code repository>         the upper layer
 └── <merged>                  the composed tree

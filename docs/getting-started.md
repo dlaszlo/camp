@@ -99,14 +99,20 @@ mounted.
 
 ### One file is yours
 
-`.camp/` will end up holding five things, and `config.yml` is the only one
+`.camp/` will end up holding six things, and `config.yml` is the only one
 you edit. The others are camp's working material: the `inventory` it
-compares against, and three directories of scratch, machine-local state
-and session output.
+compares against, and four directories of scratch, machine-local state,
+session output and camp's own log.
+
+The log is always written. Every line camp prints to a terminal is
+written to `.camp/logs/camp.log` as well, with the time in front of it,
+and the file rotates by size so it cannot grow without bound. Nothing
+switches it on, because a log you have to remember to switch on is
+missing on exactly the run that surprised you.
 
 If you had run `camp init` instead of writing the file by hand, camp
 would have left a `README.md` in there saying exactly that, and a
-`.gitignore` that keeps the three directories out of version control
+`.gitignore` that keeps the four directories out of version control
 while leaving `config.yml` and `inventory` in. Worth doing:
 
 ```

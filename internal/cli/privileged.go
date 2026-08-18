@@ -65,8 +65,12 @@ func cmdUp(ctx *context, args []string) error {
 		Tool:        Version,
 		ConfigBytes: configBytes,
 		Sudo:        []string{"sudo"},
-		Stderr:      os.Stderr,
-		Say:         say,
+		// The helper's own stream, and the terminal's rather than camp's
+		// sink: sudo writes its password prompt here without a newline
+		// after it, and a line-oriented sink would hold that prompt until
+		// the line it never finishes.
+		Stderr: os.Stderr,
+		Say:    say,
 	})
 	if !refused.Empty() {
 		// Said as plainly as the steps that led here. A run that ends with a
@@ -134,6 +138,8 @@ func cmdDown(ctx *context, args []string) error {
 				"here.")
 	}
 
+	// os.Stderr and not camp's sink, for the reason cmdUp gives: this is
+	// where sudo asks for a password.
 	reply, refused := privileged.Down(record, []string{"sudo"}, os.Stderr)
 	if !refused.Empty() {
 		return failure(ExitFailure, "", "%s", strings.TrimRight(report.Refusals(refused), "\n"))
