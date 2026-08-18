@@ -1,9 +1,12 @@
 package gen
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/enc"
 	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/gitwire"
 	"github.com/dlaszlo/camp/internal/islands"
@@ -180,10 +183,99 @@ func Adopt(built plan.Plan) (Output, refusal.List) {
 		out = produced
 		out.Patterns = want.Patterns
 		out.ExcludeFile = want.ExcludeFile
+		// Collected rather than returned on: the syntax checks below run
+		// too, so one run reports everything wrong with the output instead
+		// of one thing per round.
+		refused.Extend(matchIslands(built, want, out))
 	}
 
 	refused.Extend(Validate(built, out, want.Exclude))
 	return out, refused
+}
+
+// matchIslands compares a generator's islands with what camp derived
+// itself, target by target, exactly.
+//
+// The syntax checks alone are not enough, and the two ways past them are
+// opposite. An entry left out turns a path the source contributes into
+// water: it stops being a read-only island and becomes writable
+// machine-local storage, so an edit that should have failed loudly
+// succeeds and exists in no repository -- the design's worst failure
+// shape. An entry added is a name that exists but that the source does
+// not contribute -- the source's own runtime junk, or a file somebody
+// dropped there -- and mounting it is the generator steering a mount that
+// root makes in the privileged mode.
+//
+// camp has the right answer in its hand either way: it derives the same
+// set independently, from what the repository tracks, which is what
+// "contributes" means. So the comparison is exact rather than a set of
+// rules about what a generator may add.
+func matchIslands(built plan.Plan, want, got Output) refusal.List {
+	var refused refusal.List
+	for _, mount := range built.IslandsMounts {
+		target := mount.Target.String()
+		expected := byName(want.Islands[target])
+		produced := byName(got.Islands[target])
+
+		var missing, extra []string
+		for name, kind := range expected {
+			if produced[name] != kind {
+				missing = append(missing, fmt.Sprintf("%s (%s)", name, kind))
+			}
+		}
+		for name, kind := range produced {
+			if expected[name] != kind {
+				extra = append(extra, fmt.Sprintf("%s (%s)", name, kind))
+			}
+		}
+		enc.SortNames(missing)
+		enc.SortNames(extra)
+
+		if len(missing) > 0 {
+			refused.Add("generate-islands-missing",
+				"the generation step left %d of the islands at %q out: %s.\n"+
+					"An entry the source contributes and the step does not name "+
+					"stops being a read-only island and becomes water -- writable, "+
+					"machine-local storage -- so an edit that should fail loudly "+
+					"would succeed and land in no repository. camp derives the same "+
+					"set itself, from what the source tracks, and the two have to "+
+					"agree.\ncamp's own list: %s",
+				len(missing), target, strings.Join(missing, ", "),
+				strings.Join(names(expected), ", "))
+		}
+		if len(extra) > 0 {
+			refused.Add("generate-islands-extra",
+				"the generation step named %d islands at %q that the source does "+
+					"not contribute: %s.\n"+
+					"An island stands for content the source repository tracks. A "+
+					"name that merely exists there -- the source's own runtime file, "+
+					"something somebody dropped in -- would be mounted on camp's "+
+					"say-so, by root in the privileged mode.\ncamp's own list: %s",
+				len(extra), target, strings.Join(extra, ", "),
+				strings.Join(names(expected), ", "))
+		}
+	}
+	return refused
+}
+
+func byName(entries []islands.Entry) map[string]pathx.Type {
+	out := make(map[string]pathx.Type, len(entries))
+	for _, entry := range entries {
+		out[entry.Name] = entry.Type
+	}
+	return out
+}
+
+func names(entries map[string]pathx.Type) []string {
+	out := make([]string, 0, len(entries))
+	for name, kind := range entries {
+		out = append(out, fmt.Sprintf("%s (%s)", name, kind))
+	}
+	enc.SortNames(out)
+	if len(out) == 0 {
+		return []string{"(nothing)"}
+	}
+	return out
 }
 
 // withoutAStep is the shape of a composition that generates nothing.

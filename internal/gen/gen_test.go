@@ -612,3 +612,71 @@ func TestInsideAnAllowListedDirectoryTheExcludeNamesEachWorkspacePath(t *testing
 		t.Errorf("the code repository's own file was excluded: %v", out.Patterns)
 	}
 }
+
+// A generator's islands are compared with camp's own derivation, exactly.
+//
+// The two ways past the syntax checks are opposite and both matter. An
+// entry left out stops being a read-only island and becomes water --
+// writable machine-local storage -- so an edit that should fail loudly
+// succeeds and lands in no repository. An entry added is a name that
+// exists but that the source does not contribute, mounted on the
+// generator's say-so, by root in the privileged mode.
+func TestAGeneratorsIslandsMustMatchWhatTheSourceContributes(t *testing.T) {
+	cases := []struct {
+		name    string
+		records string
+		rule    string
+		says    string
+	}{
+		{
+			name:    "an entry left out",
+			records: "file\tsettings.json\n",
+			rule:    "generate-islands-missing",
+			says:    "agents",
+		},
+		{
+			name: "an entry the source does not track",
+			records: "file\tsettings.json\ndirectory\tagents\n" +
+				"file\tsettings.local.json\n",
+			rule: "generate-islands-extra",
+			says: "settings.local.json",
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			env := testenv.NewEnv(t)
+			// Present in the source and not tracked by it: the source's own
+			// runtime file, which is exactly what the islands mount exists to
+			// keep out of the composed tree.
+			testenv.Write(t, filepath.Join(env.Workspace, ".claude", "settings.local.json"), "{}\n")
+
+			script := filepath.Join(env.Path, "generator.sh")
+			testenv.Write(t, script, `#!/bin/sh
+set -e
+mkdir -p "$CAMP_GEN_OUT/islands"
+cat "$CAMP_GEN_IN/upper-exclude.current" > "$CAMP_GEN_OUT/exclude"
+printf '%s' "$RECORDS" > "$CAMP_GEN_OUT/islands/.claude.list"
+`)
+			if err := os.Chmod(script, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("RECORDS", test.records)
+
+			yaml := strings.Replace(env.YAML(), "  - git_exclude\n",
+				"  - generate: { command: [\""+script+"\"] }\n", 1)
+			_, _, refused := prepared(t, env, yaml)
+
+			if !refused.Has(test.rule) {
+				t.Fatalf("the rules that fired were %v\n%v", refused.Rules(), refused.Error())
+			}
+			if !strings.Contains(refused.Error(), test.says) {
+				t.Errorf("the refusal does not name %q:\n%v", test.says, refused.Error())
+			}
+			if !strings.Contains(refused.Error(), "camp's own list") {
+				t.Errorf("the refusal does not show what camp derived itself:\n%v",
+					refused.Error())
+			}
+		})
+	}
+}
