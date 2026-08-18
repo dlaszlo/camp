@@ -28,7 +28,38 @@ import (
 // overlap, allow_overlap holds one name, and the gate's real job is to
 // notice the day something changes.
 func Gate(cfg config.Config, lowerRoot, upperRoot []pathx.Info) refusal.List {
+	refused, _ := compare(cfg, lowerRoot, upperRoot)
+	return refused
+}
+
+// LowerOnlyInsideAllowed lists what only the workspace contributes inside
+// an allow-listed directory, as paths relative to the merged root.
+//
+// This is the one place the specification asks for file-level
+// enumeration, and the reason is the shape of an allow-listed directory:
+// it is the only place where the two repositories' content genuinely
+// mixes in one directory, so the coarse root line that covers every other
+// workspace name would cover the code repository's own files there too.
+// Without these lines the workspace's files inside such a directory are
+// in no exclude at all -- 'git status' in the composed tree lists them as
+// untracked and 'git add .' stages the workspace's content into the code
+// repository, which is exactly what the exclude exists to stop.
+//
+// A directory only the workspace has yields one line for the whole
+// subtree, so a file born in it mid-session is covered without camp
+// re-reading anything. Only where both sides have a directory does the
+// walk go deeper, because only there can the mixing continue.
+func LowerOnlyInsideAllowed(cfg config.Config, lowerRoot, upperRoot []pathx.Info) []string {
+	_, only := compare(cfg, lowerRoot, upperRoot)
+	return only
+}
+
+// compare is the one walk both of those read: the gate's refusals and the
+// exclude's lines come out of the same traversal of the same two trees,
+// so they cannot start describing different sets.
+func compare(cfg config.Config, lowerRoot, upperRoot []pathx.Info) (refusal.List, []string) {
 	var refused refusal.List
+	var lowerOnly []string
 
 	covered := rootTargets(cfg)
 	upperByName := map[string]pathx.Info{}
@@ -55,15 +86,17 @@ func Gate(cfg config.Config, lowerRoot, upperRoot []pathx.Info) refusal.List {
 		}
 
 		if cfg.AllowsOverlap(lower.Name) {
-			refused.Extend(descend(cfg, lowerPath, upperPath,
-				pathx.Rel{}.Append(lower.Name), lower, upper))
+			problems, only := descend(cfg, lowerPath, upperPath,
+				pathx.Rel{}.Append(lower.Name), lower, upper)
+			refused.Extend(problems)
+			lowerOnly = append(lowerOnly, only...)
 			continue
 		}
 
 		refused = append(refused, overlapRefusal(cfg, lowerPath, upperPath,
 			pathx.Rel{}.Append(lower.Name), lower, upper))
 	}
-	return refused
+	return refused, lowerOnly
 }
 
 // descend compares the two sides inside an allow-listed directory.
@@ -73,19 +106,20 @@ func Gate(cfg config.Config, lowerRoot, upperRoot []pathx.Info) refusal.List {
 // share, where one copy now shadows the other. That is the thing most
 // worth catching, and it is why allowing an overlap does not switch the
 // check off, only move it one level down.
-func descend(cfg config.Config, lowerPath, upperPath string, rel pathx.Rel, lower, upper pathx.Info) refusal.List {
+func descend(cfg config.Config, lowerPath, upperPath string, rel pathx.Rel, lower, upper pathx.Info) (refusal.List, []string) {
 	var refused refusal.List
+	var lowerOnly []string
 	if lower.Type != pathx.Dir || upper.Type != pathx.Dir {
-		return nil
+		return nil, nil
 	}
 
 	lowerEntries, err := pathx.ReadDirBeneath(lowerPath, rel.Components())
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	upperEntries, err := pathx.ReadDirBeneath(upperPath, rel.Components())
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	upperByName := map[string]pathx.Info{}
@@ -93,18 +127,25 @@ func descend(cfg config.Config, lowerPath, upperPath string, rel pathx.Rel, lowe
 		upperByName[entry.Name] = entry
 	}
 	for _, entry := range lowerEntries {
+		child := rel.Append(entry.Name)
 		other, both := upperByName[entry.Name]
 		if !both {
+			// Only the workspace has it, so it is the workspace's content
+			// standing in a directory the two share. One line covers it,
+			// whatever it is: a file, or a whole subtree with everything born
+			// in it later.
+			lowerOnly = append(lowerOnly, child.String())
 			continue
 		}
-		child := rel.Append(entry.Name)
 		if entry.Type == pathx.Dir && other.Type == pathx.Dir {
-			refused.Extend(descend(cfg, lowerPath, upperPath, child, entry, other))
+			problems, only := descend(cfg, lowerPath, upperPath, child, entry, other)
+			refused.Extend(problems)
+			lowerOnly = append(lowerOnly, only...)
 			continue
 		}
 		refused = append(refused, overlapRefusal(cfg, lowerPath, upperPath, child, entry, other))
 	}
-	return refused
+	return refused, lowerOnly
 }
 
 // The overlap gate's two refusals, in the shape a rule that fires many

@@ -88,6 +88,25 @@ func ExcludeLines(cfg config.Config, built plan.Plan) ([]string, refusal.List) {
 		add(entry.Name)
 	}
 
+	// The one place the coarse shape does not hold, and the specification
+	// says so: inside an allow-listed directory the two repositories'
+	// content genuinely mixes, so the workspace's own files there need
+	// lines of their own. Without them those files are in no exclude at
+	// all -- they are not covered by a root line, because the root name is
+	// allow-listed and excluding it would hide the code repository's files
+	// in the same directory.
+	for _, path := range plan.LowerOnlyInsideAllowed(cfg, built.LowerRoot, built.UpperRoot) {
+		if strings.ContainsAny(path, "\n\r") {
+			refused.Add("exclude-name-newline",
+				"the workspace path %q inside an allow-listed directory contains "+
+					"a line break and cannot be written as a gitignore pattern at "+
+					"all. The attempt would silently ignore that name and hide two "+
+					"unrelated ones instead.", path)
+			continue
+		}
+		add(path)
+	}
+
 	for _, mount := range built.Mounts {
 		if !mount.InLive || mount.Rel.Empty() {
 			continue

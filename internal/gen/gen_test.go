@@ -491,3 +491,61 @@ func TestTheShippedStepRefusesWhenGitIsNotInstalled(t *testing.T) {
 		t.Error("the refusal should say what the alternative is")
 	}
 }
+
+// The one place the coarse shape does not hold: inside an allow-listed
+// directory, where the two repositories' content genuinely mixes.
+//
+// The root line that covers every other workspace name cannot be written
+// here -- it would hide the code repository's own files in the same
+// directory -- so the workspace's files inside it need lines of their
+// own. Without them they are in no exclude at all: 'git status' in the
+// composed tree lists them as untracked and 'git add .' stages the
+// workspace's content into the code repository, which is the whole thing
+// the exclude exists to stop.
+func TestInsideAnAllowListedDirectoryTheExcludeNamesEachWorkspacePath(t *testing.T) {
+	env := testenv.NewEnv(t)
+	// A directory both repositories have, allowed on purpose: the
+	// workspace contributes notes, the code repository its own file, and
+	// no name is on both sides -- so the gate lets the composition start.
+	testenv.Write(t, filepath.Join(env.Workspace, "shared", "env.md"), "the environment's own note\n")
+	testenv.Write(t, filepath.Join(env.Workspace, "shared", "deep", "more.md"), "deeper\n")
+	testenv.Write(t, filepath.Join(env.Code, "shared", "code.md"), "the product's own note\n")
+
+	yaml := strings.Replace(env.YAML(), "allow_overlap: [.gitignore]",
+		"allow_overlap: [.gitignore, shared]", 1)
+	built, out, refused := prepared(t, env, yaml)
+	if !refused.Empty() {
+		t.Fatalf("generation was refused:\n%v", refused)
+	}
+	_ = built
+
+	has := func(pattern string) bool {
+		for _, got := range out.Patterns {
+			if got == pattern {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("/shared/env.md") {
+		t.Errorf("the workspace's file inside the allow-listed directory is in "+
+			"no exclude line: %v", out.Patterns)
+	}
+	if !has("/shared/deep") {
+		t.Errorf("a directory only the workspace has inside an allow-listed one "+
+			"should be one line for the whole subtree, so that a file born in it "+
+			"mid-session is covered too: %v", out.Patterns)
+	}
+	if has("/shared/deep/more.md") {
+		t.Errorf("the walk went inside a directory only the workspace has, "+
+			"which turns a subtree line into an enumeration that goes stale: %v",
+			out.Patterns)
+	}
+	if has("/shared") {
+		t.Errorf("the allow-listed directory itself was excluded, which hides "+
+			"the code repository's own files in it: %v", out.Patterns)
+	}
+	if has("/shared/code.md") {
+		t.Errorf("the code repository's own file was excluded: %v", out.Patterns)
+	}
+}

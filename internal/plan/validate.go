@@ -74,6 +74,7 @@ func (c *checker) run() (Plan, refusal.List) {
 		return Plan{}, c.refused
 	}
 	c.checkRootTypes(lowerRoot)
+	c.checkAllowedDirectories(lowerRoot, upperRoot)
 
 	if repo, isGit := gitwire.Open(c.upper); isGit {
 		c.code = repo
@@ -451,6 +452,44 @@ func (c *checker) rootListings() ([]pathx.Info, []pathx.Info, bool) {
 		return nil, nil, false
 	}
 	return lowerRoot, upperRoot, true
+}
+
+// checkAllowedDirectories says what an allow-listed directory costs.
+//
+// It is the one hole in the arrangement, and it is in the specification
+// on purpose: a directory allowed on both sides is a merge, so it gets no
+// read-only bind -- one would hide the code repository's own files in it
+// -- and what the workspace provides there is therefore writable, and a
+// write copies it up. camp catches the trace afterwards rather than
+// preventing it: the gate looks inside such a directory at every up, and
+// the exclude names each workspace path in it one by one.
+//
+// A warning and not a refusal, because the specification allows the
+// arrangement and somebody chose it by writing the name in
+// allow_overlap. What it must not be is silent: the steady state has no
+// allow-listed directories, and somebody who has one should know which
+// promise does not hold there.
+func (c *checker) checkAllowedDirectories(lowerRoot, upperRoot []pathx.Info) {
+	upperByName := map[string]pathx.Info{}
+	for _, entry := range upperRoot {
+		upperByName[entry.Name] = entry
+	}
+	covered := rootTargets(c.cfg)
+	for _, entry := range lowerRoot {
+		other, both := upperByName[entry.Name]
+		if !both || covered[entry.Name] || !c.cfg.AllowsOverlap(entry.Name) {
+			continue
+		}
+		if entry.Type != pathx.Dir || other.Type != pathx.Dir {
+			continue
+		}
+		c.warn("%q is allow-listed and is a directory in both repositories, so "+
+			"the two merge there: what the workspace provides inside it is "+
+			"writable through the composed tree, and a write copies it into the "+
+			"code repository. camp names each of those paths in the exclude and "+
+			"the gate looks inside the directory at every up, which catches the "+
+			"trace rather than preventing it.", entry.Name)
+	}
 }
 
 // checkRootTypes refuses a workspace root entry camp cannot protect.
