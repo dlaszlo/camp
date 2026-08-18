@@ -18,6 +18,7 @@ package verify
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -429,22 +430,62 @@ func completeness(in Input) refusal.List {
 // privileged mode the temptation for it to end up root-owned is real:
 // the helper runs as root. It creates nothing there, and this is what
 // proves it.
+//
+// Every path camp made there is checked, not only the root: the store of
+// each islands mount, and the attachment point of each island. Those are
+// the objects the helper could have created as root, and one of them
+// root-owned is a mount camp guarantees writable that nobody can write.
+// What is deliberately not walked is everything else under storage --
+// worktrees, machine-local files, a person's own work -- because that is
+// the user's, it can be enormous, and its ownership is not camp's claim
+// to make.
 func ownership(in Input) refusal.List {
 	var refused refusal.List
 	if in.Storage == "" {
 		return refused
 	}
+	for _, mount := range in.Plan.Mounts {
+		if mount.Role != plan.Store && mount.Role != plan.Island {
+			continue
+		}
+		if mount.Source == "" || !strings.HasPrefix(mount.Source, in.Storage) {
+			continue
+		}
+		refused.Extend(owns(mount.Source, in))
+	}
+	refused.Extend(owns(in.Storage, in))
+	return refused
+}
+
+// owns is the one question, asked of one path.
+func owns(path string, in Input) refusal.List {
+	var refused refusal.List
 	var st unix.Stat_t
-	if err := unix.Stat(in.Storage, &st); err != nil {
-		return refused // it need not exist; a composition may use no storage
+	if err := unix.Stat(path, &st); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			// It need not exist: a composition may use no storage at all, and
+			// then there is nothing to own.
+			return refused
+		}
+		// Anything else is the check not running, which is not the same as
+		// the check passing. This is the one path the design guarantees
+		// writable, and the one the privileged helper must never have
+		// created.
+		refused.Add("verify-storage-unreadable",
+			"camp's storage path %s could not be looked at: %v.\n"+
+				"That directory holds worktrees and machine-local files you have "+
+				"to be able to write, and camp checks at every start that it is "+
+				"still yours. A check that cannot run is not a check that passed.",
+			path, err)
+		return refused
 	}
 	if int(st.Uid) != in.UID || int(st.Gid) != in.GID {
 		refused.Add("verify-storage-owner",
-			"camp's storage %s is owned by uid %d gid %d and should belong to "+
-				"uid %d gid %d.\nThat directory holds worktrees and machine-local "+
+			"camp's storage path %s is owned by uid %d gid %d and should belong "+
+				"to uid %d gid %d.\nStorage holds worktrees and machine-local "+
 				"files you have to be able to write. The privileged helper creates "+
 				"nothing there for exactly this reason.",
-			in.Storage, st.Uid, st.Gid, in.UID, in.GID)
+			path, st.Uid, st.Gid, in.UID, in.GID)
 	}
 	return refused
 }

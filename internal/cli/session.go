@@ -93,8 +93,13 @@ func enter(ctx *context, file string, argv []string) error {
 // prove is its own.
 func sweep(say *report.Narrator, cfg config.Config) {
 	swept, kept := compose.Sweep(cfg.Env, func(live string) bool {
+		// Only absence proves the session is over. Every other error --
+		// a permission, an I/O failure -- says camp could not find out, and
+		// removing a work directory on the strength of not knowing would
+		// take away the overlay's own work area from a session that is still
+		// running.
 		if _, err := os.Stat(live); err != nil {
-			return true // the composed tree is gone; so is its session
+			return os.IsNotExist(err)
 		}
 		held, err := locks.Take(locks.Live, "/", strings.Split(strings.TrimPrefix(live, "/"), "/"), live)
 		if err != nil {
