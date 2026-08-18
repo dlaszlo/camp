@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -72,13 +71,20 @@ var ErrEscapes = errors.New("the path leaves the directory it is resolved agains
 // instead of during validation.
 var ErrNotDirectory = errors.New("a component of the path is not a directory")
 
-// openDirBeneath opens base and then walks parts, refusing to follow any
-// symlink and refusing to leave base.
+// openDirFrom walks parts from a directory already held open, refusing to
+// follow any symlink and refusing to leave that directory.
 //
-// The last component is deliberately not opened: lstat of the final name
-// is what the caller wants, and opening it would mean following it.
-func openDirBeneath(base string, parts []string) (int, error) {
-	fd, err := unix.Open(base, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+// This is the whole resolution, and there is one of it: a Root starts it
+// at the descriptor it pinned, and the string-based helpers below open a
+// Root on the name they were handed and start it there. The last
+// component is deliberately not opened: lstat of the final name is what
+// the caller wants, and opening it would mean following it.
+//
+// The starting descriptor is reopened rather than used directly, because
+// the walk closes what it steps off and the caller's Root has to survive
+// the call.
+func openDirFrom(dirfd int, base string, parts []string) (int, error) {
+	fd, err := unix.Openat(dirfd, ".", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, fmt.Errorf("opening %s: %w", base, err)
 	}
@@ -113,6 +119,18 @@ func translate(err error, base, part string) error {
 // StatBeneath looks at base/parts without following a symlink anywhere,
 // including the final component.
 //
+// **The base is resolved by name, in this call and again in the next
+// one.** That is what this and its two neighbours are for: asking a
+// question about a directory camp holds no capability for -- a workspace,
+// a repository root, a store somebody named. Anything that writes,
+// mounts, or runs with privilege asks the same question of a Root
+// instead, whose base was resolved once and is held open, because a name
+// resolved twice is a name that can be two directories.
+//
+// With no parts at all the base's own name is what is looked at, and a
+// symlink there is reported as a symlink rather than followed: callers
+// ask this to find out what a name is.
+//
 // An absent name is not an error: it returns Info{Type: Absent}, because
 // "is it there" is the question most callers are asking and a missing
 // name is an ordinary answer to it.
@@ -120,15 +138,15 @@ func StatBeneath(base string, parts []string) (Info, error) {
 	if len(parts) == 0 {
 		return statAt(unix.AT_FDCWD, base, base)
 	}
-	dir, err := openDirBeneath(base, parts[:len(parts)-1])
+	root, err := OpenRoot(base)
 	if err != nil {
 		if isAbsent(err) {
 			return Info{Name: parts[len(parts)-1]}, nil
 		}
 		return Info{}, err
 	}
-	defer unix.Close(dir)
-	return statAt(dir, parts[len(parts)-1], strings.Join(append([]string{base}, parts...), "/"))
+	defer root.Close()
+	return root.Stat(parts)
 }
 
 func statAt(dirfd int, name, full string) (Info, error) {
@@ -186,45 +204,42 @@ func typeOf(mode uint32) Type {
 // OpenBeneath opens base/parts with the given flags, following no
 // symlink anywhere and never leaving base.
 //
+// The base is resolved by name at every call, as in StatBeneath, and for
+// the same callers. Where the descriptor is what a write, a mount or a
+// privileged step hangs off, it comes from a Root instead.
+//
 // The descriptor is what later work hangs off: the flock that guarantees
 // one composition per directory, and the mount made by descriptor so that
 // the object checked is the object mounted.
 func OpenBeneath(base string, parts []string, flags int) (int, error) {
-	if len(parts) == 0 {
-		return unix.Open(base, flags|unix.O_CLOEXEC, 0)
-	}
-	dir, err := openDirBeneath(base, parts[:len(parts)-1])
+	root, err := OpenRoot(base)
 	if err != nil {
 		return -1, err
 	}
-	defer unix.Close(dir)
-
-	how := &unix.OpenHow{
-		Flags:   uint64(flags) | unix.O_CLOEXEC,
-		Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_BENEATH,
-	}
-	fd, err := unix.Openat2(dir, parts[len(parts)-1], how)
-	if err != nil {
-		return -1, translate(err, base, parts[len(parts)-1])
-	}
-	return fd, nil
+	defer root.Close()
+	return root.Open(parts, flags)
 }
 
 // ReadDirBeneath lists base/parts, following no symlink on the way and
-// reporting each entry's own type without following it either.
+// reporting each entry's own type without following it either. Its base
+// is resolved by name at every call, like StatBeneath's.
 //
 // Sorted by name bytes, never by locale: a locale sort and a byte sort
 // silently disagree, and every comparison camp makes -- the gate, the
 // inventory, the exclude -- has to be the same order or two of them will
 // quietly describe different sets.
 func ReadDirBeneath(base string, parts []string) ([]Info, error) {
-	fd, err := openDirBeneath(base, parts)
+	root, err := OpenRoot(base)
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(fd)
+	defer root.Close()
+	return root.ReadDir(parts)
+}
 
-	names, err := readNames(fd, strings.Join(append([]string{base}, parts...), "/"))
+// listDir is the listing itself, from a descriptor of the directory.
+func listDir(fd int, label string) ([]Info, error) {
+	names, err := readNames(fd, label)
 	if err != nil {
 		return nil, err
 	}

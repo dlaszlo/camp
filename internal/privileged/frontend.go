@@ -76,9 +76,21 @@ type UpInput struct {
 // choose, so it is checked rather than confined.
 func recordsOutsideRepositories(built plan.Plan) *refusal.R {
 	directory := state.Dir()
+	// Where the records would really land, not where the path spells it. A
+	// lexical compare misses a symlinked XDG_STATE_HOME: the link aliases
+	// the state directory into a repository while every lexical check stays
+	// green. state resolved that base once and holds it open, so this is
+	// the same directory the write will use rather than a second resolution
+	// of the same name. If it could not be opened at all the writes will
+	// fail with their own message, and the lexical path is the most this
+	// check can honestly say.
+	resolved := directory
+	if real, err := state.Location(); err == nil {
+		resolved = real
+	}
 	for _, repository := range built.Config.Repositories {
 		root := repository.Path.Join(built.Config.Env)
-		if !pathx.Under(directory, root) {
+		if !pathx.Under(resolved, root) {
 			continue
 		}
 		problem := refusal.New("state-in-repository",
@@ -131,7 +143,7 @@ func Up(in UpInput) (Left, refusal.List) {
 		return Clean, refused
 	}
 
-	work := fsx.Work(built.Config.Env, built.Hash)
+	work := fsx.Work(built.Config.Root, built.Hash)
 	staging, err := work.MkdirAllMode(0o700, "staging")
 	if err != nil {
 		refused.Add("staging", "%v", err)

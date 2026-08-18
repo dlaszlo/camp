@@ -307,7 +307,7 @@ func TestAnUnrecordedFileInTheWaterRefusesTheIsland(t *testing.T) {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}
 
-	store := fsx.Storage(built.Config.Env, built.Hash)
+	store := fsx.Storage(built.Config.Root, built.Hash)
 	if _, err := store.MkdirAll(".claude"); err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestAnUnrecordedFileInTheWaterRefusesTheIsland(t *testing.T) {
 	if err != nil || string(body) != "mine\n" {
 		t.Errorf("the file camp cannot account for was not left alone: %q, %v", body, err)
 	}
-	manifest, err := islands.LoadManifest(fsx.Storage(built.Config.Env, built.Hash))
+	manifest, err := islands.LoadManifest(fsx.Storage(built.Config.Root, built.Hash))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +385,7 @@ func TestARecordedAttachmentPointThatIsNotThereIsRecreated(t *testing.T) {
 	if err := os.Remove(point); err != nil {
 		t.Fatal(err)
 	}
-	before, err := islands.LoadManifest(fsx.Storage(built.Config.Env, built.Hash))
+	before, err := islands.LoadManifest(fsx.Storage(built.Config.Root, built.Hash))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +399,7 @@ func TestARecordedAttachmentPointThatIsNotThereIsRecreated(t *testing.T) {
 	if _, err := os.Lstat(point); err != nil {
 		t.Errorf("the attachment point was not created again: %v", err)
 	}
-	after, err := islands.LoadManifest(fsx.Storage(built.Config.Env, built.Hash))
+	after, err := islands.LoadManifest(fsx.Storage(built.Config.Root, built.Hash))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +439,7 @@ func TestARecordLeftBehindByAHalfFinishedRetirementIsStruck(t *testing.T) {
 	if !problems.Empty() {
 		t.Fatalf("the run after the crash was refused:\n%v", problems)
 	}
-	manifest, err := islands.LoadManifest(fsx.Storage(built.Config.Env, built.Hash))
+	manifest, err := islands.LoadManifest(fsx.Storage(built.Config.Root, built.Hash))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -877,7 +877,7 @@ func TestAnAttachmentPointCampCannotLookAtIsNotDisclaimed(t *testing.T) {
 			"look at:\n%v", out.Notes)
 	}
 
-	manifest, err := islands.LoadManifest(fsx.Storage(built.Config.Env, built.Hash))
+	manifest, err := islands.LoadManifest(fsx.Storage(built.Config.Root, built.Hash))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/dlaszlo/camp/internal/health"
 	"github.com/dlaszlo/camp/internal/logs"
 	"github.com/dlaszlo/camp/internal/mountinfo"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/refusal"
@@ -56,7 +57,7 @@ func (c *context) printf(format string, args ...any) {
 // report, because a record silently not being kept is worse than no
 // record.
 func (c *context) keep(cfg config.Config) {
-	c.attach(cfg.Env)
+	c.attach(cfg.Root)
 }
 
 // keepUnder starts the log of the environment a configuration path
@@ -69,17 +70,29 @@ func (c *context) keepUnder(source string) {
 		return
 	}
 	// $ENV/.camp/config.yml, so the environment root is two above it.
-	c.attach(filepath.Dir(filepath.Dir(source)))
+	// Opened here because there is no configuration to have opened it, and
+	// left open for the same reason the configuration's is: the log is
+	// written for the whole command.
+	root, err := pathx.OpenRoot(filepath.Dir(filepath.Dir(source)))
+	if err != nil {
+		c.cannotKeep(err)
+		return
+	}
+	c.attach(root)
 }
 
-func (c *context) attach(env string) {
-	file, err := logs.Open(env)
+func (c *context) attach(root pathx.Root) {
+	file, err := logs.Open(root)
 	if err != nil {
-		report.Narrate(c.err).Warn("camp's log is not being written: %v. "+
-			"Nothing else about this run changes.", err)
+		c.cannotKeep(err)
 		return
 	}
 	c.err.Keep(file)
+}
+
+func (c *context) cannotKeep(err error) {
+	report.Narrate(c.err).Warn("camp's log is not being written: %v. "+
+		"Nothing else about this run changes.", err)
 }
 
 func commands() []command {
@@ -187,7 +200,7 @@ func resolve(ctx *context, file string) (config.Config, error) {
 	// A namespace session leaves its findings in a file, because by the
 	// time its last window closes there is nobody to print them to. This
 	// is where they reach somebody: once, and then marked as read.
-	reports.Show(cfg.Env, func(text string) {
+	reports.Show(cfg.Root, func(text string) {
 		fmt.Fprintf(ctx.err, "%s\n", text)
 	})
 	return cfg, nil
@@ -326,7 +339,20 @@ func cmdInit(ctx *context, args []string) error {
 				"configuration somebody wrote",
 			"%s already exists", target)
 	}
-	area := fsx.Camp(filepath.Dir(target))
+	// Opened before anything is written under it, so that camp's own
+	// directory is created from a directory this command holds rather than
+	// from the name it was handed. This one command opens its own: there is
+	// no configuration yet to have opened it -- writing the configuration is
+	// the whole job.
+	root, err := pathx.OpenRoot(filepath.Dir(target))
+	if err != nil {
+		return failure(ExitPrecondition,
+			"create the directory first, or run 'camp init' from inside it",
+			"%s could not be opened: %v", filepath.Dir(target), err)
+	}
+	defer root.Close()
+
+	area := fsx.Camp(root)
 	if err := area.Ensure(0o755); err != nil {
 		return wrap(err, ExitFailure, "")
 	}

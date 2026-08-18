@@ -27,13 +27,14 @@ import (
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/fsx"
+	"github.com/dlaszlo/camp/internal/pathx"
 )
 
 // SeenSuffix marks a report that has been printed.
 const SeenSuffix = ".seen"
 
-// Dir is where reports live for an environment.
-func Dir(env string) string { return filepath.Join(env, config.Dir, "reports") }
+// Dir is where reports live for an environment, as a path for a message.
+func Dir(root pathx.Root) string { return filepath.Join(root.Name(), config.Dir, "reports") }
 
 // Write leaves one report behind.
 //
@@ -46,8 +47,8 @@ func Dir(env string) string { return filepath.Join(env, config.Dir, "reports") }
 // sessions of one composition ending in the same second produced one
 // name, and the second report replaced the first -- a report about a
 // session nobody would ever see, lost to make room for another.
-func Write(env, hash string, body string) (string, error) {
-	area := fsx.Reports(env)
+func Write(root pathx.Root, hash string, body string) (string, error) {
+	area := fsx.Reports(root)
 	if err := area.Ensure(0o755); err != nil {
 		return "", err
 	}
@@ -85,8 +86,8 @@ func claim(area fsx.Area, prefix string) (string, error) {
 }
 
 // Unseen returns the reports nobody has been shown yet, oldest first.
-func Unseen(env string) []string {
-	entries, err := os.ReadDir(Dir(env))
+func Unseen(root pathx.Root) []string {
+	entries, err := os.ReadDir(Dir(root))
 	if err != nil {
 		return nil
 	}
@@ -101,7 +102,7 @@ func Unseen(env string) []string {
 
 	paths := make([]string, 0, len(names))
 	for _, name := range names {
-		paths = append(paths, filepath.Join(Dir(env), name))
+		paths = append(paths, filepath.Join(Dir(root), name))
 	}
 	return paths
 }
@@ -121,12 +122,12 @@ func Read(path string) (string, error) {
 // and somebody may want to read it a second time. camp simply stops
 // putting it in front of them.
 //
-// The environment is passed rather than derived from the path, because
-// the write has to be addressed from a directory camp trusts down: a
-// report is named by whatever listed the directory, and camp does not
-// write to a place it worked out from a string it was handed.
-func MarkSeen(env, path string) error {
-	area := fsx.Reports(env)
+// The environment's own root is passed rather than derived from the path,
+// because the write has to be addressed from a directory camp holds
+// open: a report is named by whatever listed the directory, and camp does
+// not write to a place it worked out from a string it was handed.
+func MarkSeen(root pathx.Root, path string) error {
+	area := fsx.Reports(root)
 	name := filepath.Base(path)
 
 	// One rename in one directory, rather than a copy and a removal. The
@@ -165,15 +166,15 @@ func freeName(area fsx.Area, base, suffix string) (string, error) {
 }
 
 // Seen returns the reports that have been shown, for doctor to list.
-func Seen(env string) []string {
-	entries, err := os.ReadDir(Dir(env))
+func Seen(root pathx.Root) []string {
+	entries, err := os.ReadDir(Dir(root))
 	if err != nil {
 		return nil
 	}
 	var paths []string
 	for _, entry := range entries {
 		if strings.HasSuffix(entry.Name(), SeenSuffix) {
-			paths = append(paths, filepath.Join(Dir(env), entry.Name()))
+			paths = append(paths, filepath.Join(Dir(root), entry.Name()))
 		}
 	}
 	sort.Strings(paths)
@@ -186,8 +187,8 @@ func Seen(env string) []string {
 // session's findings reach whoever comes back to the environment next --
 // which, for a detached session, is the only moment there is anybody to
 // tell.
-func Show(env string, out func(string)) {
-	for _, path := range Unseen(env) {
+func Show(root pathx.Root, out func(string)) {
+	for _, path := range Unseen(root) {
 		body, err := Read(path)
 		if err != nil {
 			// Said rather than skipped: this file is the whole of what a
@@ -199,7 +200,7 @@ func Show(env string, out func(string)) {
 		}
 		out(fmt.Sprintf("a session that ended left this behind (%s):\n\n%s\n",
 			path, strings.TrimRight(body, "\n")))
-		if err := MarkSeen(env, path); err != nil {
+		if err := MarkSeen(root, path); err != nil {
 			out(fmt.Sprintf("that report could not be marked as read (%v), so "+
 				"the next camp command in this environment will print it again",
 				err))

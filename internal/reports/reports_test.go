@@ -5,14 +5,27 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/reports"
 )
+
+// environment is a scratch environment root, held open the way a parsed
+// configuration holds one.
+func environment(t *testing.T) pathx.Root {
+	t.Helper()
+	root, err := pathx.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	return root
+}
 
 // A namespace session has no down and leaves no state record, so what it
 // found has to reach somebody by another route: a file, printed once by
 // whichever camp command comes next in that environment.
 func TestAReportIsPrintedOnceAndThenMarked(t *testing.T) {
-	env := t.TempDir()
+	env := environment(t)
 
 	path, err := reports.Write(env, "abc123def456", "the session found something\n")
 	if err != nil {
@@ -57,7 +70,7 @@ func TestAReportIsPrintedOnceAndThenMarked(t *testing.T) {
 // Nothing to say means no file at all: an environment where every session
 // ended cleanly should not accumulate empty reports.
 func TestAnEnvironmentWithNoReportsIsQuiet(t *testing.T) {
-	env := t.TempDir()
+	env := environment(t)
 	if unseen := reports.Unseen(env); len(unseen) != 0 {
 		t.Errorf("found %v in an environment with no reports", unseen)
 	}
@@ -76,7 +89,7 @@ func TestAnEnvironmentWithNoReportsIsQuiet(t *testing.T) {
 // -- everything a session found, discarded to make room for what the next
 // one found.
 func TestSeveralReportsAreKeptApartAndOrdered(t *testing.T) {
-	env := t.TempDir()
+	env := environment(t)
 	for _, body := range []string{"first\n", "second\n"} {
 		if _, err := reports.Write(env, "abc123def456", body); err != nil {
 			t.Fatal(err)
@@ -101,7 +114,7 @@ func TestSeveralReportsAreKeptApartAndOrdered(t *testing.T) {
 // same text arriving at every camp command afterwards with nothing saying
 // why.
 func TestADeliveryThatFailsIsSaidRatherThanSkipped(t *testing.T) {
-	env := t.TempDir()
+	env := environment(t)
 	path, err := reports.Write(env, "abc123def456", "the session found something\n")
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +145,7 @@ func TestADeliveryThatFailsIsSaidRatherThanSkipped(t *testing.T) {
 // never made and a finding that then arrives at every camp command with
 // nothing saying why.
 func TestAReportThatCannotBeMarkedIsSaidAndDeliveredOnceItCanBe(t *testing.T) {
-	env := t.TempDir()
+	env := environment(t)
 	if _, err := reports.Write(env, "abc123def456", "the session found something\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +202,7 @@ func TestAReportThatCannotBeMarkedIsSaidAndDeliveredOnceItCanBe(t *testing.T) {
 // Marking is a rename in the same directory, so a .seen file that is
 // already there is never replaced.
 func TestMarkingNeverReplacesAReportSomebodyKept(t *testing.T) {
-	env := t.TempDir()
+	env := environment(t)
 	path, err := reports.Write(env, "abc123def456", "the first session\n")
 	if err != nil {
 		t.Fatal(err)

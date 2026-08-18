@@ -153,7 +153,18 @@ func clearWork(job Job) error {
 	// established the invoking user owns -- and by component, so that root
 	// removing and giving away a tree cannot be redirected by a symlink
 	// somewhere in it. The components were checked to be plain names.
-	area := fsx.At("work", job.Base, job.WorkParts...)
+	//
+	// Provisional: the base is resolved here, at the moment of use, which
+	// is one resolution of that name more than a privileged step may make.
+	// It belongs to the single confined root the helper opens once in
+	// confine and holds for the whole job. That is a separate repair; this
+	// stands until it lands.
+	root, err := pathx.OpenRoot(job.Base)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	area := fsx.In("work", root, job.WorkParts...)
 	if err := area.RemoveTree("work"); err != nil {
 		return err
 	}

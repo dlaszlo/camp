@@ -24,9 +24,12 @@ package inventory
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/enc"
@@ -123,9 +126,10 @@ func (s Snapshot) Bytes() []byte {
 	return append([]byte(Header), enc.Document(lines)...)
 }
 
-// Save writes the snapshot beside the configuration.
-func (s Snapshot) Save(env string) error {
-	area := fsx.Camp(env)
+// Save writes the snapshot beside the configuration, addressed from the
+// environment camp holds open rather than from its name.
+func (s Snapshot) Save(root pathx.Root) error {
+	area := fsx.Camp(root)
 	if err := area.Ensure(0o755); err != nil {
 		return err
 	}
@@ -137,18 +141,19 @@ func (s Snapshot) Save(env string) error {
 // Absence is reported separately from a parse failure: the first means
 // "run camp accept", the second means the file is damaged and camp will
 // not guess at what it used to say.
-func Load(env string) (Snapshot, bool, error) {
-	data, err := os.ReadFile(Path(env))
+func Load(root pathx.Root) (Snapshot, bool, error) {
+	path := Path(root.Name())
+	data, err := read(root)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Snapshot{}, false, nil
 		}
-		return Snapshot{}, false, fmt.Errorf("reading %s: %w", Path(env), err)
+		return Snapshot{}, false, fmt.Errorf("reading %s: %w", path, err)
 	}
 
 	records, err := enc.Parse(withoutHeader(data))
 	if err != nil {
-		return Snapshot{}, true, fmt.Errorf("%s: %w", Path(env), err)
+		return Snapshot{}, true, fmt.Errorf("%s: %w", path, err)
 	}
 
 	snapshot := Snapshot{}
@@ -156,7 +161,7 @@ func Load(env string) (Snapshot, bool, error) {
 		if len(record) < 3 {
 			return Snapshot{}, true, fmt.Errorf("%s line %d has %d fields and "+
 				"a record has three, or four for a symlink",
-				Path(env), number+1, len(record))
+				path, number+1, len(record))
 		}
 		entry := Entry{Side: Side(record[0]), Type: pathx.Type(record[1]), Name: record[2]}
 		if len(record) > 3 {
@@ -165,6 +170,20 @@ func Load(env string) (Snapshot, bool, error) {
 		snapshot.Entries = append(snapshot.Entries, entry)
 	}
 	return snapshot, true, nil
+}
+
+// read takes the file from the environment camp holds, by component, so
+// that the snapshot camp compares against is the one inside the
+// environment it opened and not one reached through a link left at that
+// name.
+func read(root pathx.Root) ([]byte, error) {
+	fd, err := root.Open([]string{config.Dir, FileName}, unix.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), Path(root.Name()))
+	defer file.Close()
+	return io.ReadAll(file)
 }
 
 // withoutHeader drops the comment block the file opens with.
@@ -254,8 +273,8 @@ func Compare(accepted, current Snapshot) []Difference {
 // A missing snapshot is refused rather than generated: an up that wrote
 // the file it was supposed to be checked against would swallow the signal
 // entirely.
-func Check(env string, current Snapshot) (refused refusal.List, warnings []string) {
-	accepted, found, err := Load(env)
+func Check(root pathx.Root, current Snapshot) (refused refusal.List, warnings []string) {
+	accepted, found, err := Load(root)
 	switch {
 	case err != nil:
 		refused.Add("inventory-unreadable",
@@ -276,7 +295,7 @@ func Check(env string, current Snapshot) (refused refusal.List, warnings []strin
 				"  camp accept\n"+
 				"camp does not write the file on its own: an up that generated the "+
 				"snapshot it was supposed to check against would swallow the "+
-				"signal the file exists to raise.", Path(env))
+				"signal the file exists to raise.", Path(root.Name()))
 		return refused, nil
 	}
 
@@ -285,7 +304,7 @@ func Check(env string, current Snapshot) (refused refusal.List, warnings []strin
 			warnings = append(warnings, difference.Describe())
 			continue
 		}
-		refused.Group(unaccepted(difference.Kind, env), "%s", difference.Describe())
+		refused.Group(unaccepted(difference.Kind, root.Name()), "%s", difference.Describe())
 	}
 	return refused, warnings
 }
@@ -317,18 +336,18 @@ func unaccepted(kind, env string) refusal.Group {
 // as an empty report: the caller prints what this returns, and empty
 // reads as "nothing has changed" -- which is a statement about the two
 // repositories made on the strength of not having looked at them.
-func Report(env string, current Snapshot) (string, error) {
-	accepted, found, err := Load(env)
+func Report(root pathx.Root, current Snapshot) (string, error) {
+	accepted, found, err := Load(root)
 	switch {
 	case err != nil:
 		return "", fmt.Errorf("the accepted snapshot at %s could not be read: "+
 			"%w.\nIt is what camp compares the two repositories against, so "+
 			"nothing can be said about what changed until it can be read or "+
-			"taken again with 'camp accept'", Path(env), err)
+			"taken again with 'camp accept'", Path(root.Name()), err)
 	case !found:
 		return "", fmt.Errorf("there is no accepted snapshot at %s, so there is "+
 			"nothing to compare the two repositories against. 'camp accept' "+
-			"takes one", Path(env))
+			"takes one", Path(root.Name()))
 	}
 	differences := Compare(accepted, current)
 	if len(differences) == 0 {

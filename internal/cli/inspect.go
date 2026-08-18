@@ -93,7 +93,7 @@ func cmdAccept(ctx *context, args []string) error {
 	}
 	current := inventory.Take(lower, upper)
 
-	if previous, found, err := inventory.Load(cfg.Env); err == nil && found {
+	if previous, found, err := inventory.Load(cfg.Root); err == nil && found {
 		differences := inventory.Compare(previous, current)
 		if len(differences) == 0 {
 			ctx.printf("nothing has changed since the last snapshot.\n")
@@ -105,7 +105,7 @@ func cmdAccept(ctx *context, args []string) error {
 		}
 	}
 
-	if err := current.Save(cfg.Env); err != nil {
+	if err := current.Save(cfg.Root); err != nil {
 		return wrap(err, ExitFailure, "")
 	}
 	ctx.printf("wrote %s: %d root entries across both repositories.\n"+

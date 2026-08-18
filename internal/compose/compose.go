@@ -25,6 +25,7 @@ import (
 	"github.com/dlaszlo/camp/internal/holders"
 	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/mountx"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/verify"
@@ -67,13 +68,13 @@ func (s Setup) Target(mount plan.Mount) string {
 // mount.
 //
 // Nothing here is inside a repository, and nothing here can be. The paths
-// come from fsx areas, and an area is a base camp trusts with the
+// come from fsx areas, and an area is a root camp holds open with the
 // components below it: every one of them is resolved by the kernel,
-// following no symlink and never leaving the base, in the call that
+// following no symlink and never leaving the root, in the call that
 // creates the directory. A link planted at .camp/work does not redirect
 // this; it stops it.
 func Directories(p plan.Plan) error {
-	work := fsx.Work(p.Config.Env, p.Hash)
+	work := fsx.Work(p.Config.Root, p.Hash)
 	if _, err := work.MkdirAll(); err != nil {
 		return err
 	}
@@ -92,7 +93,7 @@ func Directories(p plan.Plan) error {
 	}
 
 	if len(p.IslandsMounts) > 0 || hasStores(p) {
-		storage := fsx.Storage(p.Config.Env, p.Hash)
+		storage := fsx.Storage(p.Config.Root, p.Hash)
 		if _, err := storage.MkdirAll(); err != nil {
 			return err
 		}
@@ -105,7 +106,7 @@ func Directories(p plan.Plan) error {
 		if mount.Role != plan.Store {
 			continue
 		}
-		storage := fsx.Storage(p.Config.Env, p.Hash)
+		storage := fsx.Storage(p.Config.Root, p.Hash)
 		if _, err := storage.MkdirDeep(mount.Rel.Components()); err != nil {
 			return err
 		}
@@ -338,9 +339,10 @@ func errorText(err error) string {
 // because the one caller is the privileged teardown and it works from the
 // record: the configuration may have been edited, or deleted, while the
 // composition was up, and the record is what says where this composition
-// put things.
-func RemoveWorkDir(env, hash string) error {
-	area := fsx.Work(env, hash)
+// put things. That caller opens the root itself, from the path the record
+// carries.
+func RemoveWorkDir(root pathx.Root, hash string) error {
+	area := fsx.Work(root, hash)
 	entries, err := os.ReadDir(area.Root())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -387,9 +389,9 @@ func Residue(live string) ([]string, error) {
 //
 // The current run never sweeps its own entry: it holds that live lock
 // itself.
-func Sweep(env string, isLive func(string) bool) (swept []string, kept []string) {
-	root := filepath.Join(env, config.Dir, "work")
-	entries, err := os.ReadDir(root)
+func Sweep(root pathx.Root, isLive func(string) bool) (swept []string, kept []string) {
+	work := filepath.Join(root.Name(), config.Dir, "work")
+	entries, err := os.ReadDir(work)
 	if err != nil {
 		return nil, nil
 	}
@@ -397,7 +399,7 @@ func Sweep(env string, isLive func(string) bool) (swept []string, kept []string)
 		if !entry.IsDir() {
 			continue
 		}
-		directory := filepath.Join(root, entry.Name())
+		directory := filepath.Join(work, entry.Name())
 		live, _, err := ReadMarker(directory)
 		if err != nil {
 			kept = append(kept, fmt.Sprintf("%s (no readable %s: %v)",
@@ -407,11 +409,11 @@ func Sweep(env string, isLive func(string) bool) (swept []string, kept []string)
 		if !isLive(live) {
 			continue
 		}
-		if err := fsx.Work(env, entry.Name()).RemoveTree("work"); err != nil {
+		if err := fsx.Work(root, entry.Name()).RemoveTree("work"); err != nil {
 			kept = append(kept, fmt.Sprintf("%s (%v)", directory, err))
 			continue
 		}
-		if err := removeIfEmpty(fsx.Work(env, entry.Name()), directory); err != nil {
+		if err := removeIfEmpty(fsx.Work(root, entry.Name()), directory); err != nil {
 			kept = append(kept, fmt.Sprintf("%s (%v)", directory, err))
 			continue
 		}

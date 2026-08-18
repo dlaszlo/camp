@@ -118,7 +118,7 @@ func Prepare(built plan.Plan) (Output, refusal.List) {
 	}
 
 	if has {
-		if err := fsx.Work(built.Config.Env, built.Hash).Write("exclude", out.Exclude, 0o644); err != nil {
+		if err := fsx.Work(built.Config.Root, built.Hash).Write("exclude", out.Exclude, 0o644); err != nil {
 			refused.Add("generate-write", "%v", err)
 		}
 	}
@@ -371,7 +371,7 @@ func scaffold(built plan.Plan, out Output, notes *[]string) refusal.List {
 		return refused
 	}
 
-	storage := fsx.Storage(built.Config.Env, built.Hash)
+	storage := fsx.Storage(built.Config.Root, built.Hash)
 	manifest, err := islands.LoadManifest(storage)
 	if err != nil {
 		refused.Add("islands-manifest",

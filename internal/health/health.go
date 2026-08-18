@@ -244,8 +244,8 @@ func worktrees(cfg config.Config) []Note {
 // sessionReports lists what namespace sessions have left behind.
 func sessionReports(cfg config.Config) []Note {
 	var notes []Note
-	unseen := reports.Unseen(cfg.Env)
-	seen := reports.Seen(cfg.Env)
+	unseen := reports.Unseen(cfg.Root)
+	seen := reports.Seen(cfg.Root)
 
 	if len(unseen) > 0 {
 		notes = append(notes, Note{
@@ -257,7 +257,7 @@ func sessionReports(cfg config.Config) []Note {
 	if len(seen) > 0 {
 		notes = append(notes, Note{
 			Subject: "session reports",
-			Detail:  fmt.Sprintf("%d already read, kept at %s", len(seen), reports.Dir(cfg.Env)),
+			Detail:  fmt.Sprintf("%d already read, kept at %s", len(seen), reports.Dir(cfg.Root)),
 		})
 	}
 	return notes

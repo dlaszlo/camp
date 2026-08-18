@@ -92,7 +92,7 @@ func enter(ctx *context, file string, argv []string) error {
 // be read is reported and left alone -- camp removes only what it can
 // prove is its own.
 func sweep(say *report.Narrator, cfg config.Config) {
-	swept, kept := compose.Sweep(cfg.Env, func(live string) bool {
+	swept, kept := compose.Sweep(cfg.Root, func(live string) bool {
 		// Only absence proves the session is over. Every other error --
 		// a permission, an I/O failure -- says camp could not find out, and
 		// removing a work directory on the strength of not knowing would

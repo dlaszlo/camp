@@ -233,7 +233,7 @@ func (e *Env) Accept(t *testing.T, cfg config.Config) {
 	if err != nil {
 		return
 	}
-	if err := inventory.Take(lower, upper).Save(cfg.Env); err != nil {
+	if err := inventory.Take(lower, upper).Save(cfg.Root); err != nil {
 		t.Fatalf("writing the fixture inventory: %v", err)
 	}
 }

@@ -16,8 +16,9 @@
 //     directory, and a check that compares strings would let exactly the
 //     configuration mistake through that corrupts an upper layer.
 //
-// Nothing here follows a symlink except the one deliberate resolution of
-// the environment root at startup.
+// Nothing here follows a symlink except the one deliberate resolution a
+// Root performs when it is opened -- once per root, after which the
+// descriptor is the base and the name is only a string for messages.
 package pathx
 
 import (
@@ -183,9 +184,10 @@ func IdentityOf(path string) (Identity, error) {
 
 // Real resolves a path to its canonical form, following symlinks.
 //
-// Used in exactly one place by design: the environment root, once, at
-// startup. Everything below it is then addressed relative to the resolved
-// root and opened without following anything.
+// This is the resolution OpenRoot performs, and that is the design: a
+// root is resolved once, when it is opened, and everything below it is
+// then addressed from the descriptor and opened without following
+// anything.
 func Real(path string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {

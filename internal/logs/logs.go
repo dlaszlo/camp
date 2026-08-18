@@ -33,6 +33,7 @@ import (
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/fsx"
+	"github.com/dlaszlo/camp/internal/pathx"
 )
 
 // DirName is the directory under .camp, and Name the file camp writes.
@@ -76,9 +77,9 @@ type Log struct {
 	file      *os.File
 }
 
-// Path is where the log lives for an environment.
-func Path(env string) string {
-	return filepath.Join(env, config.Dir, DirName, Name)
+// Path is where the log lives for an environment, for a message about it.
+func Path(root pathx.Root) string {
+	return filepath.Join(root.Name(), config.Dir, DirName, Name)
 }
 
 // Open prepares the log for one environment.
@@ -86,8 +87,8 @@ func Path(env string) string {
 // A failure to open it is returned rather than swallowed, and the caller
 // decides -- which is always to carry on without a log and say so once. A
 // command that cannot write its own record still has work to do.
-func Open(env string) (*Log, error) {
-	area := fsx.Logs(env)
+func Open(root pathx.Root) (*Log, error) {
+	area := fsx.Logs(root)
 	if err := area.Ensure(0o755); err != nil {
 		return nil, err
 	}
@@ -100,7 +101,7 @@ func Open(env string) (*Log, error) {
 		directory.Close()
 		return nil, err
 	}
-	return &Log{area: area, path: Path(env), directory: directory, file: file}, nil
+	return &Log{area: area, path: Path(root), directory: directory, file: file}, nil
 }
 
 // Write records whole lines, one timestamp each.

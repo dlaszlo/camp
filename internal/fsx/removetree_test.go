@@ -28,7 +28,7 @@ func TestRemoveTreeDoesNotFollowLinksOrChangeOutsideModes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	area := fsx.Work(env, "cbfbbb63ee0d")
+	area := fsx.Work(environment(t, env), "cbfbbb63ee0d")
 	if err := area.Ensure(0o755); err != nil {
 		t.Fatal(err)
 	}

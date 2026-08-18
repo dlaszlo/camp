@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dlaszlo/camp/internal/fsx"
+	"github.com/dlaszlo/camp/internal/pathx"
 )
 
 // The invariant this file guards: camp writes inside the places it owns
@@ -34,7 +35,7 @@ func TestASymlinkInTheAreasOwnPathIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	area := fsx.Work(env, "cbfbbb63ee0d")
+	area := fsx.Work(environment(t, env), "cbfbbb63ee0d")
 	err := area.Ensure(0o755)
 	if err == nil {
 		t.Fatal("the area was created through a symlink into a repository")
@@ -55,7 +56,7 @@ func TestNothingIsWrittenThroughASymlinkInsideAnArea(t *testing.T) {
 	outside := filepath.Join(env, "elsewhere")
 	mkdir(t, outside)
 
-	area := fsx.Work(env, "cbfbbb63ee0d")
+	area := fsx.Work(environment(t, env), "cbfbbb63ee0d")
 	if err := area.Ensure(0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func TestNothingIsWrittenThroughASymlinkInsideAnArea(t *testing.T) {
 // the caller gets a message about its own mistake.
 func TestAComponentThatClimbsOutIsRefused(t *testing.T) {
 	env := t.TempDir()
-	area := fsx.Work(env, "cbfbbb63ee0d")
+	area := fsx.Work(environment(t, env), "cbfbbb63ee0d")
 	if err := area.Ensure(0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +111,7 @@ func TestASwapAfterTheLookIsStillRefused(t *testing.T) {
 	outside := filepath.Join(env, "elsewhere")
 	mkdir(t, outside)
 
-	area := fsx.Work(env, "cbfbbb63ee0d")
+	area := fsx.Work(environment(t, env), "cbfbbb63ee0d")
 	if err := area.Ensure(0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -147,12 +148,25 @@ func TestTheStateAreaIsConfinedTheSameWay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := (fsx.State(base, "camp")).Ensure(0o700); err == nil {
+	if err := (fsx.State(environment(t, base), "camp")).Ensure(0o700); err == nil {
 		t.Fatal("records would be written into a repository through a link")
 	}
 	if entries, _ := os.ReadDir(repository); len(entries) != 0 {
 		t.Errorf("the repository was written into: %v", entries)
 	}
+}
+
+// environment opens a directory the way a parsed configuration opens the
+// environment root: once, held for as long as anything addresses areas
+// from it.
+func environment(t *testing.T, path string) pathx.Root {
+	t.Helper()
+	root, err := pathx.OpenRoot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	return root
 }
 
 func mkdir(t *testing.T, path string) {

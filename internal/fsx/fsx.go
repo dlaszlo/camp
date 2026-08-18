@@ -13,21 +13,26 @@
 //	reports  $ENV/.camp/reports          what a namespace session leaves behind
 //	logs     $ENV/.camp/logs             every line camp wrote to stderr
 //
-// **An area is a base and the components below it, and every one of those
-// components is resolved by the kernel, in the call that acts on it,
-// following no symlink and never leaving the base.** That is what makes
-// the invariant true rather than merely intended. Joining strings and
-// calling MkdirAll would follow whatever a symlink at $ENV/.camp/work
+// **An area is a pinned root and the components below it, and every one
+// of those components is resolved by the kernel, in the call that acts on
+// it, following no symlink and never leaving the root.** That is what
+// makes the invariant true rather than merely intended. Joining strings
+// and calling MkdirAll would follow whatever a symlink at $ENV/.camp/work
 // pointed at -- into a repository, if somebody put it there -- and no
 // check made beforehand could help, because the check and the write would
 // be two resolutions of the same name with a gap between them. There is
 // no gap here: openat2 resolves and acts at once, and refuses a symlink
 // and an escape itself.
 //
-// What camp trusts is the base. The environment root is resolved once,
-// when the configuration is read, and it is the only path camp ever
-// follows symlinks through; everything below it is camp's own and is
-// resolved the strict way.
+// The root is the one thing camp trusts, and it is a descriptor, not a
+// string. The environment root is resolved once, when the configuration
+// is read, and held open for the whole command; the state directory and
+// the probe's scratch tree are resolved once each in the same way. A root
+// kept as a name would be resolved again at every write, and its owner
+// can rename it away and leave a symlink at the old name between camp's
+// validation and camp's write -- which is the whole class of attack the
+// strict walk below it already refuses. Everything below the root is
+// camp's own and is resolved the strict way.
 //
 // The one thing camp deletes outside these areas is the kernel's own
 // leftover work directory inside its work area, which is inside work
@@ -52,10 +57,13 @@ type Area struct {
 	// Kind names the area for a message: "work", "storage", "state",
 	// "reports", "logs".
 	Kind string
-	// base is the directory camp trusts, and parts are the components
-	// below it that make up this area. They are kept apart because the
-	// base is the point resolution starts from and never leaves.
-	base  string
+	// root is the directory camp trusts, held open, and parts are the
+	// components below it that make up this area. They are kept apart
+	// because the root is the point resolution starts from and never
+	// leaves -- and it is a descriptor rather than a string because a
+	// string is resolved again in every call that uses it, which is the
+	// one place a symlink could still be swapped in.
+	root  pathx.Root
 	parts []string
 }
 
@@ -64,36 +72,44 @@ type Area struct {
 // writing somewhere plausible.
 var ErrOutside = errors.New("the path leaves the area camp may write in")
 
-// At builds an area from a base camp trusts and the components below it.
+// In builds an area from a root camp holds open and the components below
+// it.
 //
-// The base is where the confinement starts, so a caller passes the
+// The root is where the confinement starts, so a caller passes the
 // highest directory it has already established is not a repository and
 // not reached through anybody's symlink -- the environment root, for
-// everything under .camp.
-func At(kind, base string, parts ...string) Area {
-	return Area{Kind: kind, base: base, parts: append([]string(nil), parts...)}
+// everything under .camp. It is passed already open because opening it
+// can fail, and a constructor that could fail would put that failure at
+// every place an area is built rather than at the handful of places where
+// a root is resolved.
+func In(kind string, root pathx.Root, parts ...string) Area {
+	return Area{Kind: kind, root: root, parts: append([]string(nil), parts...)}
 }
 
 // Work is the disposable area for one composition.
-func Work(env, hash string) Area { return At("work", env, config.Dir, "work", hash) }
+func Work(root pathx.Root, hash string) Area {
+	return In("work", root, config.Dir, "work", hash)
+}
 
 // Storage is the persistent area for one composition. camp never removes
 // it: it holds unfinished worktrees and machine-local state.
-func Storage(env, hash string) Area { return At("storage", env, config.Dir, "storage", hash) }
+func Storage(root pathx.Root, hash string) Area {
+	return In("storage", root, config.Dir, "storage", hash)
+}
 
-// State is where the privileged mode's records live. Its base is the
+// State is where the privileged mode's records live. Its root is the
 // user's own state directory, which is not camp's to vouch for; camp's
 // own directory below it is.
-func State(base, name string) Area { return At("state", base, name) }
+func State(root pathx.Root, name string) Area { return In("state", root, name) }
 
 // Reports is where a namespace session leaves its end-of-session report.
-func Reports(env string) Area { return At("reports", env, config.Dir, "reports") }
+func Reports(root pathx.Root) Area { return In("reports", root, config.Dir, "reports") }
 
 // Logs is where camp keeps what it said. It is the one area written by
 // appending rather than by replacing: a log is a record of a sequence,
 // and rewriting the file to add a line to it would lose the sequence at
 // every crash.
-func Logs(env string) Area { return At("logs", env, config.Dir, "logs") }
+func Logs(root pathx.Root) Area { return In("logs", root, config.Dir, "logs") }
 
 // Live is the composed tree's own directory, and the only Area that is
 // not somewhere camp keeps files: nothing is ever written inside it --
@@ -105,7 +121,7 @@ func Logs(env string) Area { return At("logs", env, config.Dir, "logs") }
 // inside a repository: the validation refuses that outright, and the one
 // caller checks the same thing again before it creates anything, because
 // it runs before the validation does.
-func Live(env string, parts ...string) Area { return At("live", env, parts...) }
+func Live(root pathx.Root, parts ...string) Area { return In("live", root, parts...) }
 
 // Scratch makes a directory that belongs to nobody else and returns it as
 // an area, with the call that removes it again.
@@ -116,13 +132,31 @@ func Live(env string, parts ...string) Area { return At("live", env, parts...) }
 // through the one door like everything else -- and because the door is
 // the only place that writes, the probe's tree cannot be anywhere near a
 // repository either.
-func Scratch(prefix string) (Area, func(), error) {
-	root, err := os.MkdirTemp("", prefix)
+//
+// The base is /tmp and never os.TempDir(), which honours $TMPDIR: a person
+// may have pointed that at a repository, and the invariant is that camp
+// writes into no repository, not that it usually removes what it wrote
+// afterward. /tmp is the fixed, non-repository place the probe already used
+// whenever $TMPDIR was unset. The cleanup returns its failure rather than
+// dropping it, because a scratch tree left behind is still a write.
+func Scratch(prefix string) (Area, func() error, error) {
+	directory, err := os.MkdirTemp("/tmp", prefix)
 	if err != nil {
-		return Area{}, func() {}, fmt.Errorf("making a scratch directory: %w", err)
+		return Area{}, func() error { return nil }, fmt.Errorf("making a scratch directory: %w", err)
 	}
-	area := Area{Kind: "scratch", base: root}
-	return area, func() { _ = removeTree(root) }, nil
+	root, err := pathx.OpenRoot(directory)
+	if err != nil {
+		_ = removeTree(directory)
+		return Area{}, func() error { return nil }, fmt.Errorf("making a scratch directory: %w", err)
+	}
+	area := Area{Kind: "scratch", root: root}
+	return area, func() error {
+		err := removeTree(directory)
+		if closed := root.Close(); err == nil {
+			err = closed
+		}
+		return err
+	}, nil
 }
 
 // removeTree is Scratch's own cleanup: the whole directory, including
@@ -139,15 +173,15 @@ func removeTree(root string) error {
 // Camp is $ENV/.camp itself: the configuration, and the stores below it.
 // Only 'camp init' writes here, and only the files a person asked camp to
 // create.
-func Camp(env string) Area { return At("camp", env, config.Dir) }
+func Camp(root pathx.Root) Area { return In("camp", root, config.Dir) }
 
 // Root returns the area's own directory, as a path.
 //
 // For messages, and for handing to the kernel as a mount operand. camp's
 // own writes never go through it: they are addressed by component from
-// the base, which is the whole point of the type.
+// the root camp holds open, which is the whole point of the type.
 func (a Area) Root() string {
-	return filepath.Join(append([]string{a.base}, a.parts...)...)
+	return filepath.Join(append([]string{a.root.Name()}, a.parts...)...)
 }
 
 // Path resolves a relative path inside the area, refusing anything that
@@ -156,7 +190,7 @@ func (a Area) Root() string {
 // The same caveat as Root: what comes back is a name for a message or an
 // operand for the kernel, and never the way camp writes.
 func (a Area) Path(parts ...string) (string, error) {
-	if a.base == "" {
+	if !a.root.Valid() {
 		return "", fmt.Errorf("an empty %s area was used", a.Kind)
 	}
 	if err := components(parts); err != nil {
@@ -171,16 +205,16 @@ func (a Area) Sub(parts ...string) (Area, error) {
 	if err := a.usable(parts); err != nil {
 		return Area{}, err
 	}
-	return Area{Kind: a.Kind, base: a.base, parts: a.below(parts...)}, nil
+	return Area{Kind: a.Kind, root: a.root, parts: a.below(parts...)}, nil
 }
 
 // Ensure creates the area's own directory, and every directory above it
-// down from the base, with a mode of its own for the area itself.
+// down from the root, with a mode of its own for the area itself.
 //
 // The state directory is 0700 and its records are 0600: a record names
 // every path of a composition, and that is nobody else's business.
 func (a Area) Ensure(mode os.FileMode) error {
-	if a.base == "" {
+	if !a.root.Valid() {
 		return fmt.Errorf("an empty %s area was used", a.Kind)
 	}
 	fd, err := a.make(nil, mode)
@@ -194,7 +228,7 @@ func (a Area) Ensure(mode os.FileMode) error {
 // RemoveSelf removes the area's own directory once it is empty.
 func (a Area) RemoveSelf() error {
 	if len(a.parts) == 0 {
-		return fmt.Errorf("the %s area's own base is not camp's to remove", a.Kind)
+		return fmt.Errorf("the %s area's own root is not camp's to remove", a.Kind)
 	}
 	return a.unlink(nil, unix.AT_REMOVEDIR)
 }
@@ -529,7 +563,7 @@ func chownTreeAt(dir int, name string, uid, gid int) error {
 // usable reports whether this area and these components can be addressed
 // at all.
 func (a Area) usable(parts []string) error {
-	if a.base == "" {
+	if !a.root.Valid() {
 		return fmt.Errorf("an empty %s area was used", a.Kind)
 	}
 	return components(parts)
@@ -556,30 +590,29 @@ func (a Area) below(parts ...string) []string {
 }
 
 // parent opens the directory holding the last component, resolved from
-// the base downwards, and returns it with that name.
+// the root downwards, and returns it with that name.
 func (a Area) parent(parts []string) (int, string, error) {
 	whole := a.below(parts...)
 	if len(whole) == 0 {
-		return -1, "", fmt.Errorf("the %s area's own base is not camp's to write", a.Kind)
+		return -1, "", fmt.Errorf("the %s area's own root is not camp's to write", a.Kind)
 	}
-	fd, err := pathx.OpenBeneath(a.base, whole[:len(whole)-1],
-		unix.O_PATH|unix.O_DIRECTORY)
+	fd, err := a.root.Open(whole[:len(whole)-1], unix.O_PATH|unix.O_DIRECTORY)
 	if err != nil {
 		return -1, "", fmt.Errorf("opening the %s area: %w", a.Kind, err)
 	}
 	return fd, whole[len(whole)-1], nil
 }
 
-// make creates every directory from the base down to the named one, and
+// make creates every directory from the root down to the named one, and
 // returns a descriptor for the last.
 //
 // The intermediate directories get the ordinary 0755; the mode asked for
 // belongs to the one the caller named, which is the one that carries a
 // meaning -- the state directory is 0700 because of what is in it.
 func (a Area) make(parts []string, mode os.FileMode) (int, error) {
-	fd, err := unix.Open(a.base, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	fd, err := a.root.Open(nil, unix.O_PATH|unix.O_DIRECTORY)
 	if err != nil {
-		return -1, fmt.Errorf("opening %s: %w", a.base, err)
+		return -1, err
 	}
 	whole := a.below(parts...)
 	for index, part := range whole {

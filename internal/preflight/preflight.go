@@ -313,12 +313,18 @@ const overlayLine = "overlay: "
 // behaviours doctor claims when it says the mode is available, and this
 // is the only way to claim them honestly: do them, in a directory that
 // exists for a moment inside a namespace nothing else can see.
-func probeOverlay() string {
+func probeOverlay() (result string) {
 	area, remove, err := fsx.Scratch("camp-probe-")
 	if err != nil {
 		return "no scratch directory to build one in: " + err.Error()
 	}
-	defer remove()
+	// Its removal is reported, not dropped: a scratch tree left behind is
+	// still a write, and the probe's whole claim is that it leaves nothing.
+	defer func() {
+		if err := remove(); err != nil {
+			result += " (its scratch directory could not be removed: " + err.Error() + ")"
+		}
+	}()
 
 	for _, name := range []string{"lower", "upper", "work", "merged"} {
 		if _, err := area.MkdirAll(name); err != nil {

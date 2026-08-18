@@ -133,7 +133,7 @@ func TestTheSnapshotIsSortedByBytesAndSurvivesHostileNames(t *testing.T) {
 	testenv.Write(t, filepath.Join(env.Workspace, "two\tcolumns"), "x\n")
 	env.Accept(t, cfg)
 
-	snapshot, found, err := inventory.Load(cfg.Env)
+	snapshot, found, err := inventory.Load(cfg.Root)
 	if err != nil || !found {
 		t.Fatalf("the snapshot did not read back: found=%v err=%v", found, err)
 	}

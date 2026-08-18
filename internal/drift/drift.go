@@ -226,7 +226,7 @@ func (r *Report) gate(built plan.Plan) {
 
 func (r *Report) inventory(built plan.Plan) {
 	current := inventory.Take(built.LowerRoot, built.UpperRoot)
-	text, err := inventory.Report(built.Config.Env, current)
+	text, err := inventory.Report(built.Config.Root, current)
 	if err != nil {
 		// A snapshot that is missing or damaged is the comparison not
 		// running, and it is named here rather than reported as no

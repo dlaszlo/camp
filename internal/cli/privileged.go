@@ -10,6 +10,7 @@ import (
 	"github.com/dlaszlo/camp/internal/drift"
 	"github.com/dlaszlo/camp/internal/holders"
 	"github.com/dlaszlo/camp/internal/locks"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/privileged"
@@ -249,7 +250,10 @@ func cmdDown(ctx *context, args []string) error {
 			"run did not remove it. The next 'camp up' here sweeps it.",
 			plan.WorkDir(record.Env, record.Hash), record.Live))
 	} else {
-		err := compose.RemoveWorkDir(record.Env, record.Hash)
+		// The record's environment, opened here: a teardown works from the
+		// record and never from a configuration, so there is no cfg.Root to
+		// borrow and this is the one place the path becomes a capability.
+		err := removeWorkDir(record)
 		held.Release()
 		if err != nil {
 			say.LeftAlone(fmt.Sprintf("%s could not be removed: %v",
@@ -268,4 +272,20 @@ func cmdDown(ctx *context, args []string) error {
 	}
 	_ = state.Forget(record.Hash)
 	return nil
+}
+
+// removeWorkDir clears one composition's work directory from the
+// environment the record names.
+//
+// The path is resolved and opened once, here, and the removal is
+// addressed from that descriptor: a teardown runs long after the
+// composition went up, which is all the time anybody needs to rename the
+// environment away and leave a link at its name.
+func removeWorkDir(record state.Record) error {
+	root, err := pathx.OpenRoot(record.Env)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return compose.RemoveWorkDir(root, record.Hash)
 }

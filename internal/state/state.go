@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -42,6 +43,7 @@ import (
 	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/mountx"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 )
 
@@ -163,8 +165,74 @@ func where() (string, string) {
 	return filepath.Join(home, ".local", "state"), "camp"
 }
 
+// held is the state base, resolved once and kept open, and the name it
+// was opened from.
+//
+// The base comes from the ambient environment rather than from any
+// caller, so there is nowhere else to open it and nobody to hand it to:
+// the package resolves it the first time a record is written and keeps
+// the capability for the rest of the process. Reopening it per write
+// would resolve XDG_STATE_HOME again every time, which is the hole this
+// closes -- a link swapped in at that name between two records would put
+// the second one somewhere else.
+var (
+	heldMutex sync.Mutex
+	held      pathx.Root
+	heldName  string
+)
+
+// root is the state base as a capability: resolved once, held open.
+//
+// The base has to exist already, which is not a new condition -- writing
+// a record opened the base before creating anything below it -- but the
+// failure is named here, because "camp could not open your state
+// directory" is a sentence about a specific directory and the reader has
+// to be told which.
+func root() (pathx.Root, error) {
+	base, _ := where()
+	heldMutex.Lock()
+	defer heldMutex.Unlock()
+	if held.Valid() && heldName == base {
+		return held, nil
+	}
+	opened, err := pathx.OpenRoot(base)
+	if err != nil {
+		return pathx.Root{}, fmt.Errorf("camp keeps its records in %s, which "+
+			"could not be opened: %w", base, err)
+	}
+	// Only a process that was pointed somewhere else mid-run gets here
+	// twice -- the environment does not change under a command -- and the
+	// capability it held for the old name is of no further use.
+	_ = held.Close()
+	held, heldName = opened, base
+	return held, nil
+}
+
+// Location is where the records really land: camp's own directory below
+// the state base as the kernel resolved it, rather than as the
+// environment spells it.
+//
+// A symlinked XDG_STATE_HOME names one directory and writes into another,
+// and the check that the records are not inside a repository has to be
+// made against the second one.
+func Location() (string, error) {
+	base, err := root()
+	if err != nil {
+		return "", err
+	}
+	_, name := where()
+	return filepath.Join(base.Name(), name), nil
+}
+
 // area is where camp's records are written.
-func area() fsx.Area { return fsx.State(where()) }
+func area() (fsx.Area, error) {
+	base, err := root()
+	if err != nil {
+		return fsx.Area{}, err
+	}
+	_, name := where()
+	return fsx.State(base, name), nil
+}
 
 // Path is one record's file.
 func Path(hash string) string { return filepath.Join(Dir(), hash+".json") }
@@ -221,7 +289,10 @@ func FromPlan(built plan.Plan, tool, configDigest, inventoryDigest string, uid, 
 // nobody else's business.
 func (r Record) Save() error {
 	r.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	area := area()
+	area, err := area()
+	if err != nil {
+		return err
+	}
 	if err := area.Ensure(0o700); err != nil {
 		return err
 	}
@@ -409,7 +480,11 @@ func All() []Listing {
 // Forget removes one record and nothing else. Not a repository, not the
 // storage, not the composed tree -- one file.
 func Forget(hash string) error {
-	return area().Remove(hash + ".json")
+	area, err := area()
+	if err != nil {
+		return err
+	}
+	return area.Remove(hash + ".json")
 }
 
 // Presence is what the machine says about one recorded mount.

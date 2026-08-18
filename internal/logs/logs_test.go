@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dlaszlo/camp/internal/logs"
+	"github.com/dlaszlo/camp/internal/pathx"
 )
 
 // Every line is kept, and every line says when it was said.
@@ -115,9 +116,13 @@ func TestAWriterFollowsSomebodyElsesRotation(t *testing.T) {
 	}
 }
 
-func open(t *testing.T) (*logs.Log, string) {
+func open(t *testing.T) (*logs.Log, pathx.Root) {
 	t.Helper()
-	env := t.TempDir()
+	env, err := pathx.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { env.Close() })
 	log, err := logs.Open(env)
 	if err != nil {
 		t.Fatalf("opening the log: %v", err)

@@ -53,6 +53,13 @@ type Config struct {
 	// Env is the environment root: absolute, and the one path camp ever
 	// resolves through symlinks.
 	Env string
+	// Root is that same directory, resolved once and held open for the
+	// whole command. Env is the recorded, reported path; Root is the
+	// capability every write, mount and privileged step is addressed from,
+	// so that a rename of the environment between validation and use
+	// cannot redirect camp to somebody else's directory. It is beside Env
+	// rather than instead of it: a great many things read the path.
+	Root pathx.Root
 	// Merged is where the composed tree appears, relative to Env.
 	Merged pathx.Rel
 
@@ -405,7 +412,7 @@ func Parse(data []byte, source string) (Config, error) {
 	cfg := Config{Source: source}
 	var refused refusal.List
 
-	cfg.Env = parseEnv(document.Env, &refused)
+	cfg.Env, cfg.Root = parseEnv(document.Env, &refused)
 	cfg.Merged = parseMerged(document.Merged, &refused)
 	cfg.Repositories = parseRepositories(document.Repositories, &refused)
 	cfg.Lower, cfg.Upper = parseOverlay(document.Overlayfs, cfg.Repositories, &refused)
@@ -416,7 +423,16 @@ func Parse(data []byte, source string) (Config, error) {
 
 	checkGenerationSteps(cfg.Steps, &refused)
 
-	return cfg, refused.Err()
+	if err := refused.Err(); err != nil {
+		// A configuration that was refused hands back no capability: nothing
+		// is entitled to write in an environment camp has just declined to
+		// work in, and a descriptor nobody may use is a descriptor nobody
+		// closes.
+		_ = cfg.Root.Close()
+		cfg.Root = pathx.Root{}
+		return cfg, err
+	}
+	return cfg, nil
 }
 
 // goType matches the YAML reader's way of naming the structure it was
@@ -433,18 +449,26 @@ func readable(err error) string {
 	return goType.ReplaceAllString(err.Error(), "")
 }
 
-func parseEnv(value string, refused *refusal.List) string {
+// parseEnv reads env: and opens it.
+//
+// This is the moment the environment stops being a string. It is resolved
+// once, through symlinks -- the one place camp does that -- and the
+// resolved directory is opened and held, so that everything the command
+// goes on to do is addressed from that descriptor and not from the name
+// again. Nobody closes it: it is the capability the command runs on, and
+// the process is one command.
+func parseEnv(value string, refused *refusal.List) (string, pathx.Root) {
 	if value == "" {
 		refused.Add("env-missing",
 			"env: is missing. It names the directory the repositories and the "+
 				"composed tree live in, and it is the one absolute path in the "+
 				"file -- every other path is relative to it.")
-		return ""
+		return "", pathx.Root{}
 	}
 	expanded, err := pathx.ExpandHome(value)
 	if err != nil {
 		refused.Add("env-home", "%v", err)
-		return ""
+		return "", pathx.Root{}
 	}
 	if !filepath.IsAbs(expanded) {
 		refused.Add("env-relative",
@@ -452,16 +476,16 @@ func parseEnv(value string, refused *refusal.List) string {
 				"start with ~/ -- camp resolves it once at startup and addresses "+
 				"everything else beneath it, so it cannot depend on where the "+
 				"command was run from.", value)
-		return ""
+		return "", pathx.Root{}
 	}
-	real, err := pathx.Real(expanded)
+	root, err := pathx.OpenRoot(expanded)
 	if err != nil {
 		refused.Add("env-missing-dir",
 			"env: is %s, which camp could not resolve: %v.\n"+
 				"Create the directory, or correct the path.", expanded, err)
-		return expanded
+		return expanded, pathx.Root{}
 	}
-	return real
+	return root.Name(), root
 }
 
 func parseMerged(value string, refused *refusal.List) pathx.Rel {
