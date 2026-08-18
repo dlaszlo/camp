@@ -81,6 +81,26 @@ func (h *Held) FD() int { return int(h.file.Fd()) }
 // File returns the open directory, for passing through exec.
 func (h *Held) File() *os.File { return h.file }
 
+// Identity is the device and inode the lock actually sits on, read from
+// the descriptor rather than from the path.
+//
+// It exists for the process that inherited the lock and then worked out
+// for itself what it is about to mount. The lock is on an inode; the plan
+// names a path; and between the moment the launcher locked and the moment
+// the init reads the configuration again, the file could say something
+// else. Comparing the two is what stops a session mounting one upper
+// while camp holds the lock for another.
+func (h *Held) Identity() (pathx.Identity, error) {
+	if h == nil || h.file == nil {
+		return pathx.Identity{}, fmt.Errorf("the %s lock is not held", h.Role)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(int(h.file.Fd()), &st); err != nil {
+		return pathx.Identity{}, fmt.Errorf("looking at the %s lock: %w", h.Role, err)
+	}
+	return pathx.Identity{Device: uint64(st.Dev), Inode: st.Ino}, nil
+}
+
 // Release drops the lock and closes the descriptor.
 func (h *Held) Release() {
 	if h == nil || h.file == nil {

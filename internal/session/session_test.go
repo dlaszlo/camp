@@ -89,14 +89,12 @@ func prepareWith(t *testing.T, env *testenv.Env, yaml string) *ready {
 // start runs the session and returns the workload's exit status.
 func (r *ready) start(argv []string, stdin, stdout, stderr *os.File) (int, error) {
 	return session.Launch(session.Options{
-		Config:  r.Config,
-		Plan:    r.Plan,
-		Exclude: r.Exclude,
-		Argv:    argv,
-		Locks:   r.Locks,
-		Stdin:   stdin,
-		Stdout:  stdout,
-		Stderr:  stderr,
+		Config: r.Config,
+		Argv:   argv,
+		Locks:  r.Locks,
+		Stdin:  stdin,
+		Stdout: stdout,
+		Stderr: stderr,
 	})
 }
 
@@ -576,4 +574,39 @@ func TestADaemonisedWorkloadReturnsWhileTheInitHoldsTheLocks(t *testing.T) {
 			"workload keeping them")
 	}
 
+}
+
+// The configuration is read twice: once by the launcher, which takes the
+// locks from it, and once by the init, which mounts from it. A file
+// edited in between would have the init compose one tree while camp holds
+// the locks for another -- two compositions on one upper, which is what
+// the locks exist to make impossible.
+//
+// The init cannot answer that by trusting the launcher: it is the process
+// that mounts, so it derives the plan itself. What it can do is ask the
+// two lock descriptors it inherited what they are on.
+func TestASessionRefusesToMountSomethingItsLocksAreNotOn(t *testing.T) {
+	ready := prepare(t)
+
+	// Another empty composed tree, and a configuration that names it. The
+	// locks were taken on the first one a moment ago.
+	elsewhere := filepath.Join(ready.Env.Path, "live-elsewhere")
+	testenv.MkDir(t, elsewhere)
+	swapped := strings.Replace(ready.Env.YAML(), "merged: live", "merged: live-elsewhere", 1)
+	if err := os.WriteFile(ready.Config.Source, []byte(swapped), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	quiet := devnull(t)
+	_, err := ready.start([]string{"/bin/sh", "-c", "true"}, quiet, quiet, quiet)
+	skipUnlessNamespaced(t, err)
+	if err == nil {
+		t.Fatal("the session composed a tree the locks it holds are not on")
+	}
+	if !strings.Contains(err.Error(), "lock this session holds") {
+		t.Errorf("the session failed for some other reason:\n%v", err)
+	}
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Errorf("something was mounted at the swapped tree: %v", entries)
+	}
 }

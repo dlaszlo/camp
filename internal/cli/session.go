@@ -60,11 +60,9 @@ func enter(ctx *context, file string, argv []string) error {
 	defer composition.release()
 
 	status, err := session.Launch(session.Options{
-		Config:  cfg,
-		Plan:    composition.Plan,
-		Exclude: composition.Generated.Exclude,
-		Argv:    argv,
-		Locks:   composition.Locks,
+		Config: cfg,
+		Argv:   argv,
+		Locks:  composition.Locks,
 		// The workload's own three streams, passed through untouched. They
 		// are the program's, not camp's: what runs inside a session writes
 		// to the terminal it was started from, and camp neither reads nor

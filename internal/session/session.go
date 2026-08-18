@@ -58,6 +58,7 @@ import (
 	"github.com/dlaszlo/camp/internal/locks"
 	"github.com/dlaszlo/camp/internal/logs"
 	"github.com/dlaszlo/camp/internal/nsx"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/report"
@@ -92,11 +93,17 @@ const (
 )
 
 // Options is what the launcher was asked to do.
+//
+// The plan and the generated payload are deliberately not here. The init
+// derives both again from the configuration, inside the namespace, and
+// that is the point: it is the process that mounts, so what it checked
+// and what it mounts cannot be two different things. Carrying the
+// launcher's copy across as well would be a second source of truth for
+// the same question, and the one that had not been re-checked. What the
+// init does check is that the plan it derived is about the directories
+// the inherited locks are on.
 type Options struct {
 	Config config.Config
-	Plan   plan.Plan
-	// Exclude is the validated payload, empty when nothing generates one.
-	Exclude []byte
 	// Argv is the workload. Empty means an interactive shell.
 	Argv []string
 	// Locks are held by the launcher and handed to the init.
@@ -247,6 +254,17 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 		refuse("%s", problems.Error())
 	}
 
+	// The plan this process derived has to be about the two directories
+	// the inherited locks are on, and that is a question only this process
+	// can answer: the launcher locked two inodes and then handed the
+	// descriptors over, and the configuration was read again in between.
+	// A file edited in that window would have this process mount one upper
+	// while camp holds the lock for another -- two compositions on one
+	// upper, which is the thing the locks exist to make impossible.
+	if err := locksMatch(built, upper, live); err != nil {
+		refuse("%v", err)
+	}
+
 	// The steps say what they did, in order, on this process's stderr --
 	// which is the user's terminal. They come from here rather than from
 	// the launcher because this is one sequential process, so the order
@@ -335,6 +353,43 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 
 	pipe.Close()
 	os.Exit(0)
+}
+
+// locksMatch compares the inherited locks with what the plan says.
+//
+// By identity and never by path: two names routinely mean one directory,
+// and the lock is on the inode. The lock descriptors were opened by the
+// launcher, so what they answer is what was locked, whatever the
+// configuration says now.
+func locksMatch(built plan.Plan, upper, live *locks.Held) error {
+	for _, pair := range []struct {
+		held *locks.Held
+		what string
+		path string
+	}{
+		{upper, "code repository", built.Config.UpperPath()},
+		{live, "composed tree's directory", built.Live},
+	} {
+		locked, err := pair.held.Identity()
+		if err != nil {
+			return err
+		}
+		now, err := pathx.StatBeneath(pair.path, nil)
+		if err != nil {
+			return fmt.Errorf("looking at the %s %s: %w", pair.what, pair.path, err)
+		}
+		if now.Ident != locked {
+			return fmt.Errorf(
+				"the %s this session would compose is %s, and the lock this "+
+					"session holds is on a different directory (%s against %s).\n"+
+					"The configuration was read once to take the locks and once "+
+					"again by the process that mounts, and it changed in between. "+
+					"Nothing has been mounted. Look at %s, and start the session "+
+					"again.",
+				pair.what, pair.path, now.Ident, locked, built.Config.Source)
+		}
+	}
+	return nil
 }
 
 // farewell runs the same read-only pass the privileged down runs, writes
