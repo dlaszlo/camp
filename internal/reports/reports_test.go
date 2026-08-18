@@ -122,6 +122,70 @@ func TestADeliveryThatFailsIsSaidRatherThanSkipped(t *testing.T) {
 	}
 }
 
+// A mark that cannot be made is said out loud, and the report survives to
+// be delivered when it can.
+//
+// The failure is injected where it can really happen: the reports
+// directory is made unwritable, so the rename that marks a report as read
+// fails. What must not happen is either silent half of it -- a report
+// swallowed because it could not be marked, or a mark claimed that was
+// never made and a finding that then arrives at every camp command with
+// nothing saying why.
+func TestAReportThatCannotBeMarkedIsSaidAndDeliveredOnceItCanBe(t *testing.T) {
+	env := t.TempDir()
+	if _, err := reports.Write(env, "abc123def456", "the session found something\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	directory := reports.Dir(env)
+	if err := os.Chmod(directory, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(directory, 0o755) })
+
+	var shown []string
+	collect := func(text string) { shown = append(shown, text) }
+
+	reports.Show(env, collect)
+	if len(shown) != 2 {
+		t.Fatalf("a report whose mark failed produced %d lines, wanted the "+
+			"report and the reason:\n%v", len(shown), shown)
+	}
+	if !strings.Contains(shown[0], "the session found something") {
+		t.Errorf("the finding did not come through:\n%s", shown[0])
+	}
+	if !strings.Contains(shown[1], "could not be marked") ||
+		!strings.Contains(shown[1], "print it again") {
+		t.Errorf("nothing said the mark failed and what follows from it:\n%s", shown[1])
+	}
+	if len(reports.Unseen(env)) != 1 {
+		t.Error("the report was dropped by the mark that failed")
+	}
+	if len(reports.Seen(env)) != 0 {
+		t.Error("something was marked as read although the rename failed")
+	}
+
+	// The obstruction is gone: the next command delivers it -- the repeat
+	// the line above promised -- marks it, and no command after that shows
+	// it again.
+	if err := os.Chmod(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shown = nil
+	reports.Show(env, collect)
+	if len(shown) != 1 || !strings.Contains(shown[0], "the session found something") {
+		t.Fatalf("the report was not delivered once the mark could be made:\n%v", shown)
+	}
+	shown = nil
+	reports.Show(env, collect)
+	if len(shown) != 0 {
+		t.Errorf("the report was shown again after it was marked: %v", shown)
+	}
+	if len(reports.Seen(env)) != 1 {
+		t.Errorf("%d marked reports, wanted the one", len(reports.Seen(env)))
+	}
+}
+
 // Marking is a rename in the same directory, so a .seen file that is
 // already there is never replaced.
 func TestMarkingNeverReplacesAReportSomebodyKept(t *testing.T) {
