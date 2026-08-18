@@ -11,6 +11,7 @@
 //	storage  $ENV/.camp/storage/<hash>   persistent, never removed by camp
 //	state    $XDG_STATE_HOME/camp        the privileged mode's records
 //	reports  $ENV/.camp/reports          what a namespace session leaves behind
+//	logs     $ENV/.camp/logs             every line camp wrote to stderr
 //
 // An Area refuses any path that would leave it, so no write target can be
 // derived from a repository path even by accident: there is no
@@ -55,6 +56,12 @@ func State(root string) Area { return Area{Kind: "state", root: root} }
 
 // Reports is where a namespace session leaves its end-of-session report.
 func Reports(root string) Area { return Area{Kind: "reports", root: root} }
+
+// Logs is where camp keeps what it said. It is the one area written by
+// appending rather than by replacing: a log is a record of a sequence,
+// and rewriting the file to add a line to it would lose the sequence at
+// every crash.
+func Logs(root string) Area { return Area{Kind: "logs", root: root} }
 
 // Live is the composed tree's own directory, and the only Area that is
 // not somewhere camp keeps files: nothing is ever written inside it --
@@ -193,6 +200,43 @@ func (a Area) Touch(parts ...string) (string, bool, error) {
 	}
 	file.Close()
 	return path, true, nil
+}
+
+// Append opens a file inside the area for appending, creating it if it is
+// not there.
+//
+// O_APPEND, so that a whole line written in one call cannot interleave
+// with another process's line: camp's launcher and a session's init write
+// to one log, and the kernel places an appending write at the end of the
+// file as one operation.
+func (a Area) Append(name string, mode os.FileMode) (*os.File, error) {
+	path, err := a.Path(name)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, mode)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	return file, nil
+}
+
+// Rename moves one name to another inside the area, which is how a log is
+// rotated: both ends are checked, so nothing can be renamed out of the
+// area or over something outside it.
+func (a Area) Rename(from, to string) error {
+	source, err := a.Path(from)
+	if err != nil {
+		return err
+	}
+	destination, err := a.Path(to)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(source, destination); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("renaming %s to %s: %w", source, destination, err)
+	}
+	return nil
 }
 
 // Write replaces a file inside the area, atomically.

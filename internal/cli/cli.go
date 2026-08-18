@@ -12,6 +12,7 @@ import (
 	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/health"
+	"github.com/dlaszlo/camp/internal/logs"
 	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
@@ -32,13 +33,52 @@ type command struct {
 
 // context is what every command is given. Keeping the streams here rather
 // than reaching for os.Stdout means the commands can be tested.
+//
+// The two streams are two different things and not two habits. stdout is
+// the command's product -- what a reader pipes: the plan, the description,
+// the listings. err is everything about the run, and it is a sink rather
+// than a stream because every line of it is also kept in camp's own log.
 type context struct {
 	out io.Writer
-	err io.Writer
+	err *report.Sink
 }
 
 func (c *context) printf(format string, args ...any) {
 	fmt.Fprintf(c.out, format, args...)
+}
+
+// keep starts writing this environment's log, and says so once if it
+// cannot.
+//
+// Always on: a log somebody has to switch on is missing on exactly the
+// run that surprised them. A run that cannot write one still has work to
+// do, so this reports and carries on rather than refusing -- but it does
+// report, because a record silently not being kept is worse than no
+// record.
+func (c *context) keep(cfg config.Config) {
+	c.attach(cfg.CampDir())
+}
+
+// keepUnder starts the log of the environment a configuration path
+// belongs to, whether or not that file still reads as a configuration:
+// the path of the file is enough to know which .camp it lived in, and a
+// teardown running against a broken configuration is a run whose record
+// somebody will want.
+func (c *context) keepUnder(source string) {
+	if source == "" {
+		return
+	}
+	c.attach(filepath.Dir(source))
+}
+
+func (c *context) attach(campDir string) {
+	file, err := logs.Open(campDir)
+	if err != nil {
+		report.Narrate(c.err).Warn("camp's log is not being written: %v. "+
+			"Nothing else about this run changes.", err)
+		return
+	}
+	c.err.Keep(file)
 }
 
 func commands() []command {
@@ -52,7 +92,9 @@ func commands() []command {
 
 // Main parses arguments, runs one command and returns an exit code.
 func Main(args []string, out, errOut io.Writer) int {
-	ctx := &context{out: out, err: errOut}
+	say := report.To(errOut)
+	defer say.Close()
+	ctx := &context{out: out, err: say}
 
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
 		usage(ctx)
@@ -68,13 +110,17 @@ func Main(args []string, out, errOut io.Writer) int {
 			continue
 		}
 		if err := candidate.run(ctx, args[1:]); err != nil {
-			fmt.Fprintln(errOut, render(err))
+			fmt.Fprintln(ctx.err, render(err))
+			// The log is closed here rather than left to the deferred call,
+			// because a command's last word is the one most worth keeping and
+			// some exits do not run deferred calls at all.
+			ctx.err.Close()
 			return exitCode(err)
 		}
 		return ExitOK
 	}
 
-	fmt.Fprintf(errOut, "error: no command called %q\n", args[0])
+	fmt.Fprintf(ctx.err, "error: no command called %q\n", args[0])
 	usage(ctx)
 	return ExitUsage
 }
@@ -106,7 +152,12 @@ func flagsFor(name string) (*flag.FlagSet, *string) {
 
 // resolve finds the composition a command should act on: the one named by
 // -f, or the one this directory belongs to.
-func resolve(file string) (config.Config, error) {
+//
+// It is also where the log is attached, because this is the moment camp
+// knows which environment it is working in: the log lives under that
+// environment's own .camp, and nothing before this point could have named
+// a file to write.
+func resolve(ctx *context, file string) (config.Config, error) {
 	path := file
 	if path == "" {
 		start, err := os.Getwd()
@@ -130,11 +181,13 @@ func resolve(file string) (config.Config, error) {
 		return config.Config{}, wrap(err, ExitUsage, "")
 	}
 
+	ctx.keep(cfg)
+
 	// A namespace session leaves its findings in a file, because by the
 	// time its last window closes there is nobody to print them to. This
 	// is where they reach somebody: once, and then marked as read.
 	reports.Show(cfg.CampDir(), func(text string) {
-		fmt.Fprintf(os.Stderr, "%s\n", text)
+		fmt.Fprintf(ctx.err, "%s\n", text)
 	})
 	return cfg, nil
 }
@@ -155,7 +208,7 @@ func cmdPlan(ctx *context, args []string) error {
 	if err := set.Parse(args); err != nil {
 		return wrap(err, ExitUsage, "")
 	}
-	cfg, err := resolve(*file)
+	cfg, err := resolve(ctx, *file)
 	if err != nil {
 		return err
 	}
@@ -207,7 +260,7 @@ func cmdDoctor(ctx *context, args []string) error {
 		ctx.printf("both modes are available.\n\n")
 	}
 
-	cfg, err := resolve(*file)
+	cfg, err := resolve(ctx, *file)
 	if err != nil {
 		fmt.Fprintf(ctx.err, "%s\n", render(err))
 		if len(usable) == 0 {

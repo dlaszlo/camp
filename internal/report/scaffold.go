@@ -26,6 +26,7 @@ const CampIgnore = `# camp's own directory. See README.md here for what each of 
 /work/
 /storage/
 /reports/
+/logs/
 `
 
 // CampReadme says which of the things in .camp belongs to the reader.
@@ -41,6 +42,7 @@ yours.**
 | ` + "`work/`" + ` | scratch for one composition | camp; swept when nothing is mounted |
 | ` + "`storage/`" + ` | machine-local files and git worktrees, kept between sessions | camp -- and **never removed** by it, because it holds unfinished work |
 | ` + "`reports/`" + ` | what a session found, printed once by the next camp command | camp |
+| ` + "`logs/`" + ` | every line camp wrote to a terminal here, with timestamps, rotated by size | camp, always |
 
 ## Editing
 
@@ -53,10 +55,16 @@ repository's root while you were not looking stops the composition instead
 of passing unnoticed -- and editing the file by hand defeats exactly that.
 When the change is one you meant, look at it and run ` + "`camp accept`" + `.
 
-` + "`work/`" + `, ` + "`storage/`" + ` and ` + "`reports/`" + ` are camp's
-own. If something in ` + "`storage/`" + ` matters to you -- a worktree, a
-machine-local settings file -- it is yours to move or delete, and camp will
-not do it for you. Everything else in those three is safe to lose.
+` + "`work/`" + `, ` + "`storage/`" + `, ` + "`reports/`" + ` and
+` + "`logs/`" + ` are camp's own. If something in ` + "`storage/`" + `
+matters to you -- a worktree, a machine-local settings file -- it is yours
+to move or delete, and camp will not do it for you. Everything else in
+those four is safe to lose.
+
+` + "`logs/`" + ` holds what camp said, one line per line it printed, with
+the time in front of it. It is written on every run and never switched
+off: a log you have to remember to turn on is missing on exactly the run
+that surprised you. It rotates by size, so it cannot grow without bound.
 
 You may also find a directory in ` + "`work/`" + ` that you cannot open, with
 no permissions at all. That one is the kernel's, not camp's: OverlayFS
@@ -66,6 +74,6 @@ yours, and the next run removes it.
 ## Version control
 
 ` + "`config.yml`" + ` and ` + "`inventory`" + ` are worth committing: the
-first is intent, the second has a diff meant to be read. The three
+first is intent, the second has a diff meant to be read. The four
 directories are not, and the ` + "`.gitignore`" + ` here says so.
 `

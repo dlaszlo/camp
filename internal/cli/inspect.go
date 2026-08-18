@@ -46,7 +46,7 @@ func cmdExplain(ctx *context, args []string) error {
 		}
 	}
 
-	cfg, err := resolve(*file)
+	cfg, err := resolve(ctx, *file)
 	if err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func cmdAccept(ctx *context, args []string) error {
 	if err := set.Parse(args); err != nil {
 		return wrap(err, ExitUsage, "")
 	}
-	cfg, err := resolve(*file)
+	cfg, err := resolve(ctx, *file)
 	if err != nil {
 		return err
 	}
@@ -152,7 +152,7 @@ func cmdStatus(ctx *context, args []string) error {
 // source there is, and it says one thing worth having: which tree to look
 // at.
 func statusFromConfiguration(ctx *context, file string, table []mountinfo.Entry) error {
-	cfg, err := resolve(file)
+	cfg, err := resolve(ctx, file)
 	if err != nil {
 		return err
 	}

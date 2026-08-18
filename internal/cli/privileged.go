@@ -26,7 +26,7 @@ func cmdUp(ctx *context, args []string) error {
 		return failure(ExitUsage, "", "%s", err)
 	}
 
-	cfg, err := resolve(*file)
+	cfg, err := resolve(ctx, *file)
 	if err != nil {
 		return err
 	}
@@ -116,6 +116,13 @@ func cmdDown(ctx *context, args []string) error {
 	record, found, err := selectRecord(*file, *live, *hash)
 	if err != nil {
 		return err
+	}
+	// A teardown may run with no readable configuration at all -- that is
+	// what the record is for -- so the log is opened from the record's own
+	// environment rather than from a file that may be gone. It is the run
+	// most worth having a record of: nothing else says what came down.
+	if found {
+		ctx.keepUnder(record.Config)
 	}
 	if !found {
 		return failure(ExitNotFound, "",

@@ -40,6 +40,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -55,6 +56,7 @@ import (
 	"github.com/dlaszlo/camp/internal/envx"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/locks"
+	"github.com/dlaszlo/camp/internal/logs"
 	"github.com/dlaszlo/camp/internal/nsx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
@@ -249,7 +251,18 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	// which is the user's terminal. They come from here rather than from
 	// the launcher because this is one sequential process, so the order
 	// they appear in is the order things happened in.
-	say := report.Narrate(os.Stderr)
+	//
+	// And into the same log the launcher writes: this half of a session
+	// says most of what a session says, and a log that stopped at the
+	// handover would hold the four lines before the interesting ones. Two
+	// processes append to one file, which is what the lock in the log is
+	// for.
+	stderr := report.To(os.Stderr)
+	defer stderr.Close()
+	if file, err := logs.Open(built.Config.CampDir()); err == nil {
+		stderr.Keep(file)
+	}
+	say := report.Narrate(stderr)
 	say.Identity(built.Config.Session)
 
 	// Resolved here, before anything is mounted, so that a reference the
@@ -318,7 +331,7 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	// what it found where somebody will meet it. This is the only moment
 	// anything can look -- there is no down here, and by the time a
 	// detached session empties, its terminal is long gone.
-	farewell(built, os.Stderr)
+	farewell(built, stderr)
 
 	pipe.Close()
 	os.Exit(0)
@@ -327,7 +340,7 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 // farewell runs the same read-only pass the privileged down runs, writes
 // it where the next camp command will find it, and prints it when there
 // is still a terminal attached.
-func farewell(built plan.Plan, stderr *os.File) {
+func farewell(built plan.Plan, stderr io.Writer) {
 	found := drift.Refresh(built)
 	if found.Empty() {
 		return

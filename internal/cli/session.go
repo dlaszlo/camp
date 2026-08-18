@@ -38,7 +38,7 @@ func cmdShell(ctx *context, args []string) error {
 // Nothing is left behind when the session ends: the kernel discards the
 // namespace and every mount in it. There is no down to run.
 func enter(ctx *context, file string, argv []string) error {
-	cfg, err := resolve(file)
+	cfg, err := resolve(ctx, file)
 	if err != nil {
 		return err
 	}
