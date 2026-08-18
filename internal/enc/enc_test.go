@@ -1,6 +1,7 @@
 package enc_test
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -141,5 +142,25 @@ func TestASymlinkTargetWithANewlineIsRepresentable(t *testing.T) {
 	}
 	if len(records) != 1 || records[0][3] != "/some/where\nelse" {
 		t.Errorf("the target came back as %q", records)
+	}
+}
+
+// A command camp prints is a command somebody pastes. "The exact command
+// that repairs it" with a bare path is a command that repairs something
+// else the moment the path holds a space -- and a space is the mildest of
+// what a Linux path may hold.
+func TestAShellArgumentSurvivesTheShell(t *testing.T) {
+	for _, argument := range []string{
+		"/home/x/a b", "/home/x/it's", `/home/x/back\slash`, "/home/x/two\nlines",
+		"/home/x/$HOME", "/home/x/`whoami`", "/home/x/*",
+	} {
+		quoted := enc.Shell(argument)
+		out, err := exec.Command("/bin/sh", "-c", "printf %s "+quoted).Output()
+		if err != nil {
+			t.Fatalf("the shell refused %s: %v", quoted, err)
+		}
+		if string(out) != argument {
+			t.Errorf("the shell read %s as %q and it is %q", quoted, out, argument)
+		}
 	}
 }

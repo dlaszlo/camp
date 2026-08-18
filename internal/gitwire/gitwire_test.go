@@ -276,3 +276,47 @@ func TestGitFailingIsNotTheSameAsGitSayingNo(t *testing.T) {
 		t.Error("nothing said why it could not be read")
 	}
 }
+
+// A checkout's path may hold a space, and git's line-oriented porcelain
+// quotes such a path -- or, for a newline, splits one record across what
+// reads as two lines. camp reads the NUL form, where a field is a field
+// and the path is exactly the bytes on disk.
+func TestAWorktreePathWithASpaceIsReadWhole(t *testing.T) {
+	root := testenv.Root(t)
+	t.Setenv("GIT_CEILING_DIRECTORIES", root)
+
+	main := filepath.Join(root, "code")
+	testenv.GitRepo(t, main)
+	testenv.Write(t, filepath.Join(main, "README.md"), "the product\n")
+	testenv.Commit(t, main, "the product")
+
+	checkout := filepath.Join(root, "a checkout with spaces")
+	command := exec.Command("git", "-C", main, "worktree", "add", "--quiet",
+		"-b", "side", checkout)
+	command.Env = append(os.Environ(), "LC_ALL=C",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("adding a worktree: %v\n%s", err, out)
+	}
+
+	worktrees, err := open(t, main).Worktrees()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, worktree := range worktrees {
+		if worktree.Path == checkout {
+			found = true
+			if worktree.Branch != "side" {
+				t.Errorf("the branch came back as %q", worktree.Branch)
+			}
+		}
+	}
+	if !found {
+		var paths []string
+		for _, worktree := range worktrees {
+			paths = append(paths, worktree.Path)
+		}
+		t.Errorf("the checkout at %q was not read back as itself: %q", checkout, paths)
+	}
+}

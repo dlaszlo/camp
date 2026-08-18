@@ -53,6 +53,22 @@ func Encode(value string) string {
 	return out.String()
 }
 
+// Shell renders one argument so that a shell reads it as exactly these
+// bytes.
+//
+// Single quotes, because inside them a shell interprets nothing at all --
+// no expansion, no escape, not even a backslash -- and the one character
+// that has to be handled is the quote itself: close, escape it outside,
+// open again. A newline inside single quotes is a literal newline, so
+// even a path containing one pastes correctly.
+//
+// It exists because a command camp prints is a command somebody pastes.
+// "the exact command that repairs it" with an unquoted path is a command
+// that repairs something else as soon as the path has a space in it.
+func Shell(argument string) string {
+	return "'" + strings.ReplaceAll(argument, "'", `'\''`) + "'"
+}
+
 // Decode reads one field back, byte for byte.
 func Decode(value string) (string, error) {
 	var out strings.Builder

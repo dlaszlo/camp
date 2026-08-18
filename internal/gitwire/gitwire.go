@@ -318,7 +318,13 @@ type Worktree struct {
 
 // Worktrees lists what the repository has registered.
 func (r *Repo) Worktrees() ([]Worktree, error) {
-	out, err := r.run("worktree", "list", "--porcelain")
+	// -z, and the reason is the same one that makes every comparison here
+	// byte-oriented: a checkout's path may contain a space, a tab, a
+	// newline or a quote, and git's line-oriented porcelain quotes such a
+	// path -- or, for a newline, splits one record across what looks like
+	// two. The NUL form has no such case: one field per NUL, one empty
+	// field between records, and the path exactly as it is on disk.
+	out, err := r.run("worktree", "list", "--porcelain", "-z")
 	if err != nil {
 		return nil, err
 	}
@@ -331,19 +337,23 @@ func (r *Repo) Worktrees() ([]Worktree, error) {
 			current = nil
 		}
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, field := range strings.Split(string(out), "\x00") {
 		switch {
-		case strings.HasPrefix(line, "worktree "):
+		case field == "":
+			// The empty field between records, and the tail after the last
+			// one.
 			flush()
-			current = &Worktree{Path: strings.TrimPrefix(line, "worktree ")}
+		case strings.HasPrefix(field, "worktree "):
+			flush()
+			current = &Worktree{Path: strings.TrimPrefix(field, "worktree ")}
 		case current == nil:
 			continue
-		case strings.HasPrefix(line, "branch "):
+		case strings.HasPrefix(field, "branch "):
 			current.Branch = strings.TrimPrefix(
-				strings.TrimPrefix(line, "branch "), "refs/heads/")
-		case strings.HasPrefix(line, "prunable"):
+				strings.TrimPrefix(field, "branch "), "refs/heads/")
+		case strings.HasPrefix(field, "prunable"):
 			current.Prunable = true
-			current.Reason = strings.TrimSpace(strings.TrimPrefix(line, "prunable"))
+			current.Reason = strings.TrimSpace(strings.TrimPrefix(field, "prunable"))
 		}
 	}
 	flush()

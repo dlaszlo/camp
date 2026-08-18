@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dlaszlo/camp/internal/enc"
 	"github.com/dlaszlo/camp/internal/gitwire"
 	"github.com/dlaszlo/camp/internal/inventory"
 	"github.com/dlaszlo/camp/internal/pathx"
@@ -119,8 +120,12 @@ func (r *Report) worktrees(built plan.Plan, code *gitwire.Repo) {
 		backing, found := Backing(built, worktree.Path)
 		entry := Worktree{Path: worktree.Path, Branch: worktree.Branch, Backing: backing}
 		if found {
+			// Quoted, because this is printed as a command to paste and a
+			// checkout's path may contain a space -- or a quote, or a newline,
+			// all of which are legal in a path and none of which a bare
+			// argument survives.
 			entry.Repair = fmt.Sprintf("git -C %s worktree repair %s",
-				built.Config.UpperPath(), backing)
+				enc.Shell(built.Config.UpperPath()), enc.Shell(backing))
 		}
 		r.Worktrees = append(r.Worktrees, entry)
 	}
@@ -287,9 +292,12 @@ func (r Report) String() string {
 	if len(r.Worktrees) > 0 {
 		b.WriteString("git worktrees registered inside the composed tree:\n")
 		for _, worktree := range r.Worktrees {
-			fmt.Fprintf(&b, "  %s", worktree.Path)
+			// Encoded for display: a path may hold a tab or a newline, and a
+			// report is read line by line. The encoding is the one the
+			// inventory uses, so what is shown can be read back.
+			fmt.Fprintf(&b, "  %s", enc.Encode(worktree.Path))
 			if worktree.Branch != "" {
-				fmt.Fprintf(&b, "  (branch %s)", worktree.Branch)
+				fmt.Fprintf(&b, "  (branch %s)", enc.Encode(worktree.Branch))
 			}
 			b.WriteString("\n")
 			if worktree.Repair != "" {
