@@ -107,6 +107,35 @@ func Logs(env string) Area { return At("logs", env, config.Dir, "logs") }
 // it runs before the validation does.
 func Live(env string, parts ...string) Area { return At("live", env, parts...) }
 
+// Scratch makes a directory that belongs to nobody else and returns it as
+// an area, with the call that removes it again.
+//
+// For the capability probe: it builds a real overlay somewhere harmless
+// to find out whether this machine can, inside a namespace that vanishes
+// with the process. It is still camp writing to a filesystem, so it goes
+// through the one door like everything else -- and because the door is
+// the only place that writes, the probe's tree cannot be anywhere near a
+// repository either.
+func Scratch(prefix string) (Area, func(), error) {
+	root, err := os.MkdirTemp("", prefix)
+	if err != nil {
+		return Area{}, func() {}, fmt.Errorf("making a scratch directory: %w", err)
+	}
+	area := Area{Kind: "scratch", base: root}
+	return area, func() { _ = removeTree(root) }, nil
+}
+
+// removeTree is Scratch's own cleanup: the whole directory, including
+// itself.
+func removeTree(root string) error {
+	parent, err := unix.Open(filepath.Dir(root), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(parent)
+	return removeTreeAt(parent, filepath.Base(root))
+}
+
 // Camp is $ENV/.camp itself: the configuration, and the stores below it.
 // Only 'camp init' writes here, and only the files a person asked camp to
 // create.

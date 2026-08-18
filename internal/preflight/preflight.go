@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,6 +25,9 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/capsx"
+	"github.com/dlaszlo/camp/internal/fsx"
+	"github.com/dlaszlo/camp/internal/mountx"
+	"github.com/dlaszlo/camp/internal/plan"
 )
 
 // Mode is the way a composition is going to be built, because the two
@@ -70,7 +74,7 @@ func Run(mode Mode) []Check {
 		// privileged helper calls mount(2) directly, the same way the
 		// namespace mode does, because the messages the binaries print are
 		// translated and their exit codes say less than the syscall's errno.
-		checks = append(checks, privilege())
+		checks = append(checks, privilege(), privilegedBehaviour())
 	}
 	return checks
 }
@@ -245,6 +249,30 @@ func privilege() Check {
 	}
 }
 
+// privilegedBehaviour says what this report does not know.
+//
+// The namespace mode is answered by doing it: a real overlay in a real
+// namespace, mounted and written to, in a directory that exists for a
+// moment. The privileged mode cannot be answered that way, because
+// answering it would mean running sudo -- asking somebody for a password
+// to satisfy a question they did not ask, and elevating to find out
+// whether elevating works.
+//
+// So it says so. What doctor knows about this mode is that sudo is
+// installed; whether root's overlay behaves is measured by 'camp up',
+// with a person at the terminal, and reported there.
+func privilegedBehaviour() Check {
+	return Check{
+		Name:   "privileged behaviour",
+		OK:     true,
+		Detail: "not tested; it needs a terminal",
+		Hint: "camp does not run sudo to answer a question. What this mode " +
+			"does on this machine is measured the first time you run 'camp up' " +
+			"-- which asks for a password, mounts, verifies at the live path, " +
+			"and says what it found.",
+	}
+}
+
 // ProbeArg is the hidden argument the capability probe is started with.
 //
 // The child does one thing: it tries to make mount propagation private
@@ -258,7 +286,8 @@ func privilege() Check {
 const ProbeArg = "__probe"
 
 // Probe is the body of that child. It reports through its exit status: 0
-// if a mount succeeded inside the namespace, 1 if it was refused.
+// if a mount succeeded inside the namespace, 1 if it was refused -- and
+// on stdout, in one line, what a real overlay did there.
 func Probe() int {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -267,7 +296,85 @@ func Probe() int {
 		}
 		return 1
 	}
+	fmt.Printf("%s%s\n", overlayLine, probeOverlay())
 	return 0
+}
+
+// overlayLine opens the line the child reports its overlay findings on.
+const overlayLine = "overlay: "
+
+// probeOverlay builds a real overlay and does to it the two things a
+// composition's life depends on.
+//
+// Reading /proc/filesystems says the module is there. It does not say
+// that a mount succeeds for this user in this namespace, that a write to
+// a lower-provided file copies up rather than failing, or that removing
+// one leaves the whiteout the design has to preclude. Those are the
+// behaviours doctor claims when it says the mode is available, and this
+// is the only way to claim them honestly: do them, in a directory that
+// exists for a moment inside a namespace nothing else can see.
+func probeOverlay() string {
+	area, remove, err := fsx.Scratch("camp-probe-")
+	if err != nil {
+		return "no scratch directory to build one in: " + err.Error()
+	}
+	defer remove()
+
+	for _, name := range []string{"lower", "upper", "work", "merged"} {
+		if _, err := area.MkdirAll(name); err != nil {
+			return err.Error()
+		}
+	}
+	lower, err := area.Sub("lower")
+	if err != nil {
+		return err.Error()
+	}
+	for _, name := range []string{"edited", "removed"} {
+		if err := lower.Write(name, []byte("from the lower layer\n"), 0o644); err != nil {
+			return err.Error()
+		}
+	}
+
+	merged, err := area.Sub("merged")
+	if err != nil {
+		return err.Error()
+	}
+	mount := plan.Mount{
+		Kind:   plan.Overlay,
+		Target: merged.Root(),
+		Lower:  []string{lower.Root()},
+		Upper:  filepath.Join(area.Root(), "upper"),
+		Work:   filepath.Join(area.Root(), "work"),
+		Xattr:  plan.Namespace.Xattr(),
+	}
+	if _, err := mountx.Mount(mount); err != nil {
+		return "a real overlay could not be mounted here: " + err.Error()
+	}
+	defer unix.Unmount(merged.Root(), 0)
+
+	// A write to a lower-provided file: the copy-up the whole arrangement
+	// is built to make impossible in a composition, and which has to work
+	// here for the arrangement to mean anything.
+	if err := merged.Write("edited", []byte("changed\n"), 0o644); err != nil {
+		return "a write through it failed: " + err.Error()
+	}
+	if _, err := os.Lstat(filepath.Join(area.Root(), "upper", "edited")); err != nil {
+		return "a write through it did not copy the file up: " + err.Error()
+	}
+
+	// And a removal, which leaves a character device 0:0 in the upper.
+	if err := merged.Remove("removed"); err != nil {
+		return "a removal through it failed: " + err.Error()
+	}
+	var st unix.Stat_t
+	if err := unix.Lstat(filepath.Join(area.Root(), "upper", "removed"), &st); err != nil {
+		return "a removal through it left no whiteout: " + err.Error()
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFCHR {
+		return fmt.Sprintf("a removal through it left a %#o where a whiteout "+
+			"was expected", st.Mode&unix.S_IFMT)
+	}
+	return "mounts, copies up and whiteouts, with " + mount.Xattr
 }
 
 // userNamespaces reports whether this process may create a user namespace,
@@ -292,7 +399,7 @@ func userNamespaces() Check {
 	created, detail := probeUserNamespace()
 	if created {
 		return Check{Name: "user namespaces", OK: true,
-			Detail: "permitted, and a mount inside one succeeds", Fatal: true}
+			Detail: "permitted, and a real overlay in one " + detail, Fatal: true}
 	}
 
 	// Only now, having established that it does not work, is it worth
@@ -305,17 +412,17 @@ func userNamespaces() Check {
 	}
 }
 
-// probeUserNamespace starts a child in a new user namespace, with the
-// same identity mapping and the same carried capabilities a real session
-// would use, and asks it to mount something.
-//
-// Not by reading the switches that could forbid it. There are at least
-// three, they interact, and one of them stays switched on system-wide
-// even when a profile grants this particular binary an exception -- a
-// check that reads that sysctl and concludes reports a confident FAIL on
-// a machine where the thing works perfectly. Attempting it answers for
-// whatever combination of kernel, LSM and policy this machine actually
-// has, including combinations that did not exist when this was written.
+// overlayFinding pulls the child's one line about the overlay out of what
+// it printed.
+func overlayFinding(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if rest, found := strings.CutPrefix(line, overlayLine); found {
+			return rest
+		}
+	}
+	return "said nothing about what an overlay did"
+}
+
 func probeUserNamespace() (bool, string) {
 	// The real path, not /proc/self/exe: a process already inside the new
 	// namespace is the one doing the execve, and where the namespace is
@@ -338,9 +445,12 @@ func probeUserNamespace() (bool, string) {
 		GidMappingsEnableSetgroups: false,
 		AmbientCaps:                capsx.ForMounting,
 	}
-	output, err := cmd.CombinedOutput()
+	var out, errOut strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	err = cmd.Run()
+	output := []byte(out.String() + errOut.String())
 	if err == nil {
-		return true, ""
+		return true, overlayFinding(out.String())
 	}
 	if strings.Contains(string(output), "unprivileged_userns") {
 		return false, "the namespace can be created, but this machine confines " +
