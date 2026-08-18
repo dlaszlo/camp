@@ -320,11 +320,42 @@ func Overlays(entries []Entry, upper string) []Entry {
 		if entry.FSType != "overlay" {
 			continue
 		}
-		if UnescapeOption(entry.Super["upperdir"]) == upper {
+		if UpperOf(entry) == upper {
 			found = append(found, entry)
 		}
 	}
 	return found
+}
+
+// AllOverlays returns every overlay in the table, whatever it is built
+// on.
+//
+// The caller decides which of them are about one upper, because that
+// question is about inodes and not about strings: two paths routinely
+// name one directory, and a bind alias of a repository is exactly how a
+// second composition would name the same upper differently. This package
+// parses; it does not stat.
+func AllOverlays(entries []Entry) []Entry {
+	var found []Entry
+	for _, entry := range entries {
+		if entry.FSType == "overlay" {
+			found = append(found, entry)
+		}
+	}
+	return found
+}
+
+// UpperOf returns an overlay's upper directory, whichever spelling the
+// kernel used.
+//
+// "upperdir" from the option string, and the same key from the mount API,
+// which reports the layers it was given as descriptors under the key that
+// sets them.
+func UpperOf(entry Entry) string {
+	if value, found := entry.Super["upperdir"]; found {
+		return UnescapeOption(value)
+	}
+	return UnescapeOption(entry.Super["upperdir+"])
 }
 
 // UnescapeOption undoes overlayfs's escaping inside a path option.

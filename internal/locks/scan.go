@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/dlaszlo/camp/internal/mountinfo"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/refusal"
 )
 
@@ -21,16 +22,47 @@ import (
 // The namespace mode needs none of this and gets none: another
 // namespace's mounts are invisible from here, which is exactly why the
 // primary guard had to be something held rather than something seen.
+//
+// It compares by inode and not by name. Two paths routinely name one
+// directory -- a bind mount of the repository somewhere else is the
+// obvious way -- and a scan that matched the upperdir string would let a
+// second composition through on an alias, which is precisely the case
+// that corrupts data. The string is still compared as well, for the
+// overlays whose upper camp cannot look at.
+//
+// An overlay whose upper cannot be looked at is not refused on that
+// account. Measured on this machine: a host running containers has dozens
+// of overlays whose upperdir lives under a root-only directory, and
+// failing closed on those would refuse every 'camp up' on such a machine.
+// They cannot be the composition's own upper either -- camp refuses to
+// run at all if it cannot read that.
 func ScanUpper(table []mountinfo.Entry, upper string) refusal.List {
 	var refused refusal.List
-	existing := mountinfo.Overlays(table, upper)
-	if len(existing) == 0 {
+
+	intended, err := pathx.StatBeneath(upper, nil)
+	if err != nil || !intended.Exists() {
+		// Nothing to compare against. The validation has a better message
+		// for a repository camp cannot look at, and it runs beside this.
 		return refused
 	}
 
-	points := make([]string, 0, len(existing))
-	for _, entry := range existing {
-		points = append(points, entry.Point)
+	var points []string
+	for _, entry := range mountinfo.AllOverlays(table) {
+		path := mountinfo.UpperOf(entry)
+		if path == "" {
+			continue
+		}
+		if path == upper {
+			points = append(points, entry.Point)
+			continue
+		}
+		if info, err := pathx.StatBeneath(path, nil); err == nil && info.Ident == intended.Ident {
+			points = append(points, fmt.Sprintf("%s (through %s, which is the "+
+				"same directory)", entry.Point, path))
+		}
+	}
+	if len(points) == 0 {
+		return refused
 	}
 	refused.Add("upper-already-composed",
 		"an overlay is already mounted on the code repository %s, at %s.\n"+

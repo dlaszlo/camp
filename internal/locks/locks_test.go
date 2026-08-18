@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dlaszlo/camp/internal/locks"
+	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/testenv"
 )
@@ -383,4 +384,72 @@ func TestTheHolderIsTheProcessThatHasItNowNotTheOneThatTookIt(t *testing.T) {
 		t.Errorf("the process actually holding the lock (pid %d) is not among "+
 			"the holders found: %v", holder.Process.Pid, found)
 	}
+}
+
+// The steady-state guard compares directories, not the strings that name
+// them.
+//
+// Between an up and a down no camp process is alive, so the flocks are
+// gone and the mount table is the only thing left that knows. A second
+// composition naming the same upper through a bind mount somewhere else
+// spells it differently, and a scan matching the upperdir string would
+// let it through -- two overlays on one upper, which the kernel permits
+// and which corrupts both.
+func TestTheUpperScanComparesDirectoriesAndNotNames(t *testing.T) {
+	root := t.TempDir()
+	upper := filepath.Join(root, "code")
+	if err := os.MkdirAll(upper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same directory, named another way: the path goes through a link
+	// to the environment root, the way a bind mount of the repository
+	// elsewhere would name it. Both spellings resolve to one inode, which
+	// is the only thing the scan may believe.
+	if err := os.Symlink(root, filepath.Join(root, "elsewhere-root")); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "elsewhere-root", "code")
+
+	line := "60 1 0:70 / " + filepath.Join(root, "live") +
+		" rw,relatime - overlay overlay rw,lowerdir=" + filepath.Join(root, "workspace") +
+		",upperdir=" + alias + ",workdir=" + filepath.Join(root, "work")
+	table, err := mountinfo.Read(writeTable(t, root, line))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	refused := locks.ScanUpper(table, upper)
+	if !refused.Has("upper-already-composed") {
+		t.Fatalf("an overlay on the same directory under another name was not "+
+			"seen: %v", refused.Rules())
+	}
+	if !strings.Contains(refused.Error(), "same directory") {
+		t.Errorf("the refusal does not say the two names are one directory:\n%v",
+			refused.Error())
+	}
+
+	// And an overlay on somebody else's upper is still not ours.
+	other := filepath.Join(root, "elsewhere")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line = strings.Replace(line, "upperdir="+alias, "upperdir="+other, 1)
+	table, err = mountinfo.Read(writeTable(t, root, line))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if problems := locks.ScanUpper(table, upper); !problems.Empty() {
+		t.Errorf("an unrelated overlay was taken for this composition's: %v",
+			problems.Rules())
+	}
+}
+
+func writeTable(t *testing.T, root, line string) string {
+	t.Helper()
+	path := filepath.Join(root, "mountinfo")
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
