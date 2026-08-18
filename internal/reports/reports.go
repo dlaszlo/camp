@@ -40,16 +40,48 @@ func Dir(env string) string { return filepath.Join(env, config.Dir, "reports") }
 // Named by the composition and the moment, so several sessions of the
 // same composition do not overwrite one another, and so the file itself
 // says when it was written.
+//
+// The moment is to the nanosecond and the name is claimed with O_EXCL
+// before anything is written into it. Seconds were not enough: two
+// sessions of one composition ending in the same second produced one
+// name, and the second report replaced the first -- a report about a
+// session nobody would ever see, lost to make room for another.
 func Write(env, hash string, body string) (string, error) {
 	area := fsx.Reports(env)
 	if err := area.Ensure(0o755); err != nil {
 		return "", err
 	}
-	name := fmt.Sprintf("%s-%d", hash, time.Now().Unix())
+	name, err := claim(area, hash)
+	if err != nil {
+		return "", err
+	}
 	if err := area.Write(name, []byte(body), 0o644); err != nil {
 		return "", err
 	}
 	return filepath.Join(area.Root(), name), nil
+}
+
+// claim reserves a name nothing else holds.
+//
+// O_EXCL decides it rather than a look beforehand: two sessions ending at
+// once would both find the name free and both write it. The nanosecond is
+// what makes a second attempt land somewhere else.
+func claim(area fsx.Area, prefix string) (string, error) {
+	var last error
+	for attempt := 0; attempt < 100; attempt++ {
+		name := fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+		_, created, err := area.Touch(name)
+		switch {
+		case err != nil:
+			last = err
+		case created:
+			return name, nil
+		}
+	}
+	if last == nil {
+		last = fmt.Errorf("every name tried was already taken")
+	}
+	return "", fmt.Errorf("naming a report for %s: %w", prefix, last)
 }
 
 // Unseen returns the reports nobody has been shown yet, oldest first.
@@ -96,14 +128,40 @@ func Read(path string) (string, error) {
 func MarkSeen(env, path string) error {
 	area := fsx.Reports(env)
 	name := filepath.Base(path)
-	data, err := os.ReadFile(path)
+
+	// One rename in one directory, rather than a copy and a removal. The
+	// copy could land on a .seen file of the same name -- replacing a
+	// report somebody kept -- and a crash between the two left the report
+	// to be delivered a second time.
+	marked, err := freeName(area, name, SeenSuffix)
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", path, err)
-	}
-	if err := area.Write(name+SeenSuffix, data, 0o644); err != nil {
 		return err
 	}
-	return area.Remove(name)
+	if err := area.Rename(name, marked); err != nil {
+		return fmt.Errorf("marking %s as read: %w", path, err)
+	}
+	return nil
+}
+
+// freeName finds a name in the directory that nothing holds yet, keeping
+// the suffix at the end -- it is what says the report has been read, and
+// a counter after it would hide the file from the listing that looks for
+// it.
+func freeName(area fsx.Area, base, suffix string) (string, error) {
+	for attempt := 0; attempt < 100; attempt++ {
+		candidate := base + suffix
+		if attempt > 0 {
+			candidate = fmt.Sprintf("%s.%d%s", base, attempt, suffix)
+		}
+		path, err := area.Path(candidate)
+		if err != nil {
+			return "", err
+		}
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("no free name for %s%s", base, suffix)
 }
 
 // Seen returns the reports that have been shown, for doctor to list.
@@ -132,10 +190,19 @@ func Show(env string, out func(string)) {
 	for _, path := range Unseen(env) {
 		body, err := Read(path)
 		if err != nil {
+			// Said rather than skipped: this file is the whole of what a
+			// session that has already ended found, and it is delivered once.
+			// A silent skip is that finding lost.
+			out(fmt.Sprintf("a session left a report at %s and it could not be "+
+				"read: %v", path, err))
 			continue
 		}
 		out(fmt.Sprintf("a session that ended left this behind (%s):\n\n%s\n",
 			path, strings.TrimRight(body, "\n")))
-		_ = MarkSeen(env, path)
+		if err := MarkSeen(env, path); err != nil {
+			out(fmt.Sprintf("that report could not be marked as read (%v), so "+
+				"the next camp command in this environment will print it again",
+				err))
+		}
 	}
 }
