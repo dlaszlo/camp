@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/dlaszlo/camp/internal/compose"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/inventory"
 	"github.com/dlaszlo/camp/internal/mountinfo"
@@ -13,7 +14,6 @@ import (
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/report"
 	"github.com/dlaszlo/camp/internal/state"
-	"github.com/dlaszlo/camp/internal/verify"
 )
 
 // The commands that only look, and the one that records what they see.
@@ -181,14 +181,16 @@ func statusFromConfiguration(ctx *context, file string, table []mountinfo.Entry)
 	// namespace mode -- which is what a session standing here was built
 	// from. It is a comparison against a file rather than against a
 	// record, and it says so, because the file may have moved on.
-	problems := verify.Run(verify.Input{
-		Plan:      built,
-		Prefix:    built.Live,
-		LowerPath: built.Config.LowerPath(),
-		Storage:   built.Storage,
-		Table:     table,
-		UID:       os.Getuid(),
-		GID:       os.Getgid(),
+	//
+	// Through the same call a composition is built with, deliberately:
+	// status is that pass with the other exit -- reporting instead of
+	// refusing -- and a second assembly of the same input beside it is a
+	// second definition of what "up" means, free to drift from the first.
+	problems := compose.Check(compose.Setup{
+		Plan:   built,
+		Prefix: built.Live,
+		UID:    os.Getuid(),
+		GID:    os.Getgid(),
 	})
 	if problems.Empty() {
 		ctx.printf("\nup: every mount the configuration plans is present, " +

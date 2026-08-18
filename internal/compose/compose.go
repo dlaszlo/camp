@@ -331,15 +331,6 @@ func errorText(err error) string {
 	return err.Error()
 }
 
-// CleanWork removes camp's own work directory once nothing is mounted.
-//
-// The kernel's leftover inside it is mode 000, so it is chmodded on the
-// way. Only what camp created is removed -- storage never is, because it
-// holds unfinished work.
-func CleanWork(p plan.Plan) error {
-	return fsx.Work(p.Config.Env, p.Hash).RemoveTree("work")
-}
-
 // RemoveWorkDir removes the whole work directory for a composition that
 // is down.
 func RemoveWorkDir(p plan.Plan) error {

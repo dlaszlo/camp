@@ -225,19 +225,6 @@ func git() Check {
 	}
 }
 
-func tool(name string) Check {
-	path, err := exec.LookPath(name)
-	if err != nil {
-		return Check{
-			Name:   "tool: " + name,
-			Detail: "not on PATH",
-			Fatal:  true,
-			Hint:   "install the package providing " + name,
-		}
-	}
-	return Check{Name: "tool: " + name, OK: true, Detail: path, Fatal: true}
-}
-
 func privilege() Check {
 	if os.Geteuid() == 0 {
 		return Check{Name: "privilege", OK: true, Detail: "running as root", Fatal: true}
