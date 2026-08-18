@@ -320,6 +320,23 @@ func TestAnUnrecordedFileInTheWaterRefusesTheIsland(t *testing.T) {
 	if !strings.Contains(problems.Error(), "your move") {
 		t.Error("the refusal should say whose move it is")
 	}
+
+	// And it is left exactly where it is. This is the third of the
+	// scaffold's states, and the only one no crash can produce: the
+	// write-ahead order records before it creates and removes before it
+	// strikes, so an object with no record was never camp's. camp cannot
+	// prove otherwise, so it refuses and touches nothing.
+	body, err := os.ReadFile(filepath.Join(built.Storage, ".claude", "settings.json"))
+	if err != nil || string(body) != "mine\n" {
+		t.Errorf("the file camp cannot account for was not left alone: %q, %v", body, err)
+	}
+	manifest, err := islands.LoadManifest(fsx.Storage(built.Config.Env, built.Hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, recorded := manifest.Records(".claude/settings.json"); recorded {
+		t.Error("camp claimed a file it did not create")
+	}
 }
 
 // camp's own attachment point, once something has written to it, must not
@@ -339,6 +356,103 @@ func TestAModifiedAttachmentPointRefusesTheIsland(t *testing.T) {
 	_, problems := gen.Prepare(built)
 	if !problems.Has("islands-scaffold-modified") {
 		t.Fatalf("the rules that fired were %v", problems.Rules())
+	}
+}
+
+// The write-ahead order's first boundary: the manifest is saved and the
+// process dies before the object is created.
+//
+// What is left is a record for something that is not there. That is the
+// harmless half of the pair on purpose -- the next run meets a name it
+// can account for and simply creates it -- and it is the reason the
+// record goes first. The other order would leave an object in the user's
+// own storage that camp could not prove was its own, and the collision
+// rule would then refuse the composition on the strength of camp's own
+// scaffolding.
+func TestARecordedAttachmentPointThatIsNotThereIsRecreated(t *testing.T) {
+	env := testenv.NewEnv(t)
+	built, out, refused := prepared(t, env, "")
+	if !refused.Empty() {
+		t.Fatalf("the first generation was refused:\n%v", refused)
+	}
+	if len(out.Islands[".claude"]) == 0 {
+		t.Fatal("no islands were expanded")
+	}
+
+	// The intermediate state, built by hand: the manifest claims the
+	// attachment point and the object is gone.
+	point := filepath.Join(built.Storage, ".claude", "settings.json")
+	if err := os.Remove(point); err != nil {
+		t.Fatal(err)
+	}
+	before, err := islands.LoadManifest(fsx.Storage(built.Config.Env, built.Hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, recorded := before.Records(".claude/settings.json"); !recorded {
+		t.Fatal("the fixture does not hold the state this test is about")
+	}
+
+	if _, problems := gen.Prepare(built); !problems.Empty() {
+		t.Fatalf("a record with no object refused the composition:\n%v", problems)
+	}
+	if _, err := os.Lstat(point); err != nil {
+		t.Errorf("the attachment point was not created again: %v", err)
+	}
+	after, err := islands.LoadManifest(fsx.Storage(built.Config.Env, built.Hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, recorded := after.Records(".claude/settings.json"); !recorded {
+		t.Error("camp stopped claiming an attachment point it had just created")
+	}
+}
+
+// The retirement's boundary, and the same pair the other way round: the
+// object is removed and the process dies before its record is struck.
+//
+// The object is what the invariant is about, so it goes first. What is
+// left is again a record for something that is not there -- and the next
+// run, meeting an entry the source no longer contributes and nothing on
+// disk, strikes it and says nothing, because there is nothing to say.
+func TestARecordLeftBehindByAHalfFinishedRetirementIsStruck(t *testing.T) {
+	env := testenv.NewEnv(t)
+	built, _, refused := prepared(t, env, "")
+	if !refused.Empty() {
+		t.Fatalf("the first generation was refused:\n%v", refused)
+	}
+
+	// The source stops contributing the directory, so its attachment point
+	// is due for retirement.
+	if err := os.RemoveAll(filepath.Join(env.Workspace, ".claude", "agents")); err != nil {
+		t.Fatal(err)
+	}
+	testenv.Commit(t, env.Workspace, "the agents are gone")
+
+	// And the crash: the object is already removed, the record is not yet
+	// struck.
+	if err := os.RemoveAll(filepath.Join(built.Storage, ".claude", "agents")); err != nil {
+		t.Fatal(err)
+	}
+
+	out, problems := gen.Prepare(built)
+	if !problems.Empty() {
+		t.Fatalf("the run after the crash was refused:\n%v", problems)
+	}
+	manifest, err := islands.LoadManifest(fsx.Storage(built.Config.Env, built.Hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, recorded := manifest.Records(".claude/agents"); recorded {
+		t.Error("camp still claims an attachment point that is gone and that " +
+			"the source no longer contributes")
+	}
+	if _, err := os.Lstat(filepath.Join(built.Storage, ".claude", "agents")); !os.IsNotExist(err) {
+		t.Errorf("something was created again at the retired attachment point: %v", err)
+	}
+	if notes := strings.Join(out.Notes, "\n"); strings.Contains(notes, "agents") {
+		t.Errorf("a record struck for an object that was already gone was "+
+			"reported as if something had happened:\n%s", notes)
 	}
 }
 
