@@ -277,6 +277,94 @@ func TestGitFailingIsNotTheSameAsGitSayingNo(t *testing.T) {
 	}
 }
 
+// A repository that is there and cannot be read is not the same as a
+// directory that is no repository.
+//
+// The two states are already told apart where git is missing entirely.
+// This is the other half, and it is the half a real machine produces: a
+// repository whose directory camp cannot enter, one whose index cannot
+// be read, and one whose .git is damaged. The first two are camp's to
+// tell apart. The third is not, and that is measured here rather than
+// assumed.
+func TestARepositoryThatCannotBeReadIsNotGitSayingNo(t *testing.T) {
+	build := func(t *testing.T) string {
+		t.Helper()
+		root := testenv.Root(t)
+		t.Setenv("GIT_CEILING_DIRECTORIES", root)
+		directory := filepath.Join(root, "workspace")
+		testenv.GitRepo(t, directory)
+		fixture(t, directory)
+		testenv.Commit(t, directory, "the workspace")
+		return directory
+	}
+
+	// git cannot even change into it, so it never reaches the question.
+	t.Run("a directory camp cannot enter", func(t *testing.T) {
+		directory := build(t)
+		if err := os.Chmod(directory, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(directory, 0o755) })
+
+		repo, state, err := gitwire.Open(directory)
+		if state != gitwire.Unreadable {
+			t.Fatalf("a directory that cannot be entered answered %v (%v)", state, err)
+		}
+		if repo != nil {
+			t.Error("a handle came back for a directory git could not read")
+		}
+		if err == nil {
+			t.Error("nothing said why it could not be read")
+		}
+	})
+
+	// The frame question is answered from .git and needs no index, so this
+	// one is a working tree -- and the question that follows fails. What
+	// must not happen is that failure arriving as an empty list, which is
+	// the answer "this mount covers nothing tracked".
+	t.Run("an index camp cannot read", func(t *testing.T) {
+		directory := build(t)
+		index := filepath.Join(directory, ".git", "index")
+		if err := os.Chmod(index, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(index, 0o644) })
+
+		repo, state, err := gitwire.Open(directory)
+		if state != gitwire.InWorkTree {
+			t.Fatalf("a working tree with an unreadable index answered %v (%v)", state, err)
+		}
+		tracked, err := repo.TracksUnder(".claude")
+		if err == nil {
+			t.Fatalf("an index that could not be read answered %v", tracked)
+		}
+		if len(tracked) != 0 {
+			t.Errorf("a failed read came back with content: %v", tracked)
+		}
+	})
+
+	// And the limit, measured: a repository whose .git camp cannot read is
+	// reported by git itself as "not a git repository (or any parent up to
+	// mount point /)" -- git's own no, character for character. camp reads
+	// git's answer and has nothing else to read, so this arrives as an
+	// ordinary "not a working tree" and the tracked-content rule then has
+	// nothing to check. Whoever changes this has to change what is asked,
+	// not how the answer is classified.
+	t.Run("a .git git itself will not open", func(t *testing.T) {
+		directory := build(t)
+		dotgit := filepath.Join(directory, ".git")
+		if err := os.Chmod(dotgit, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(dotgit, 0o755) })
+
+		if _, state, err := gitwire.Open(directory); state != gitwire.NotAWorkTree {
+			t.Fatalf("an unreadable .git answered %v (%v), and git's own answer "+
+				"is that this is not a repository", state, err)
+		}
+	})
+}
+
 // A checkout's path may hold a space, and git's line-oriented porcelain
 // quotes such a path -- or, for a newline, splits one record across what
 // reads as two lines. camp reads the NUL form, where a field is a field

@@ -456,6 +456,45 @@ func TestARecordLeftBehindByAHalfFinishedRetirementIsStruck(t *testing.T) {
 	}
 }
 
+// A code repository whose index cannot be read stops the composition
+// before anything is mounted.
+//
+// This is CAMP-REVIEW-011's shape end to end, and it is the case a real
+// machine produces rather than the one a test invents: git answers the
+// frame question from .git without an index and fails the question that
+// follows. Read as "tracks nothing", that failure would let a mount cover
+// tracked content -- and covering tracked content is what makes git
+// report those files deleted and 'git commit -a' record the deletion.
+//
+// Both passes are asked, because either may be the one that refuses: today
+// it is the generation pass, whose tracked-content callback carries the
+// error out.
+func TestACodeRepositoryWhoseIndexCannotBeReadStopsTheComposition(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+
+	index := filepath.Join(env.Code, ".git", "index")
+	if err := os.Chmod(index, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(index, 0o644) })
+
+	built, refused := plan.Prepare(cfg, plan.Namespace)
+	if refused.Empty() {
+		if err := os.MkdirAll(built.Work, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, refused = gen.Prepare(built)
+	}
+	if !refused.Has("git-unreadable") {
+		t.Fatalf("a code repository whose index cannot be read was accepted; "+
+			"the rules that fired were %v", refused.Rules())
+	}
+	if !strings.Contains(refused.Error(), "index file open failed") {
+		t.Errorf("the refusal does not carry git's own reason:\n%s", refused.Error())
+	}
+}
+
 // A composition with no generation step has no exclude at all. That is
 // legal; what is not legal is being quiet about it.
 func TestNoGenerationStepMeansNoExclude(t *testing.T) {
