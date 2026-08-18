@@ -70,8 +70,6 @@ type Expansion struct {
 	Target pathx.Rel
 	// Store is the writable floor's absolute path in camp's storage.
 	Store string
-	// StoreParts is the same path as components beneath the storage root.
-	StoreParts []string
 	// Source is the directory whose contributed entries become islands.
 	Source string
 	// SourceParts is the same path as components beneath the environment
