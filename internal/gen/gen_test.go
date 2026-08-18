@@ -1,11 +1,17 @@
 package gen_test
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
+	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/islands"
@@ -726,4 +732,127 @@ func TestAnAttachmentPointCampCannotLookAtIsNotDisclaimed(t *testing.T) {
 		t.Error("camp disclaimed an object it could not look at, so the next " +
 			"run will meet it as content nothing can account for")
 	}
+}
+
+// Interrupting camp interrupts what camp started.
+//
+// The generator runs in a process group of its own, so that a timeout can
+// end the whole tree rather than a parent that has already forked -- and
+// that is exactly why Ctrl-C does not reach it: the terminal signals
+// camp's foreground group, not the generator's. camp would have exited
+// while the generator and its children kept writing into camp's scratch.
+//
+// Measured with a real signal to a real camp, and a grandchild the
+// generator left behind on purpose.
+const interruptEnv = "CAMP_GEN_INTERRUPT_CONFIG"
+
+func TestMain(m *testing.M) {
+	if path := os.Getenv(interruptEnv); path != "" {
+		os.Exit(generateFrom(path))
+	}
+	os.Exit(m.Run())
+}
+
+// generateFrom is the child: an ordinary preparation, in its own process,
+// so that a test can signal it the way a person's terminal would.
+func generateFrom(configPath string) int {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	built, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Empty() {
+		fmt.Fprintln(os.Stderr, refused.Error())
+		return 2
+	}
+	if err := os.MkdirAll(built.Work, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if _, problems := gen.Prepare(built); !problems.Empty() {
+		fmt.Fprintln(os.Stderr, problems.Error())
+		return 3
+	}
+	return 0
+}
+
+func TestInterruptingCampInterruptsTheGenerator(t *testing.T) {
+	env := testenv.NewEnv(t)
+
+	ready := filepath.Join(env.Path, "ready")
+	child := filepath.Join(env.Path, "grandchild.pid")
+	script := filepath.Join(env.Path, "generator.sh")
+	testenv.Write(t, script, `#!/bin/sh
+sleep 300 &
+echo $! > "`+child+`"
+echo ready > "`+ready+`"
+while true; do sleep 1; done
+`)
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	yaml := strings.Replace(env.YAML(), "  - git_exclude\n",
+		"  - generate: { command: [\""+script+"\"] }\n", 1)
+	cfg := env.Config(t, yaml)
+
+	camp := exec.Command(os.Args[0])
+	camp.Env = append(os.Environ(), interruptEnv+"="+cfg.Source)
+	camp.Stdout, camp.Stderr = os.Stdout, os.Stderr
+	if err := camp.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, ready)
+	data, err := os.ReadFile(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grandchild, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// SIGTERM rather than SIGINT, and the difference is measured: a
+	// non-interactive shell sets SIGINT to ignore in the children it
+	// starts in the background, so a correctly forwarded Ctrl-C leaves
+	// that sleep running and says nothing about camp. Both signals are
+	// forwarded the same way.
+	if err := camp.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- camp.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		_ = camp.Process.Kill()
+		t.Fatal("camp did not end after being interrupted")
+	}
+
+	// And nothing it started is still running. A process still writing
+	// into camp's scratch after camp has gone is what putting the
+	// generator in its own group would otherwise have bought.
+	for attempt := 0; attempt < 100; attempt++ {
+		if err := syscall.Kill(grandchild, 0); err != nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = syscall.Kill(grandchild, syscall.SIGKILL)
+	t.Fatalf("the generator's own child (%d) outlived the camp that started it",
+		grandchild)
+}
+
+func waitFor(t *testing.T, path string) {
+	t.Helper()
+	for attempt := 0; attempt < 200; attempt++ {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("%s never appeared", path)
 }

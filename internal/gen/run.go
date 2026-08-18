@@ -3,6 +3,7 @@ package gen
 import (
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -187,23 +188,57 @@ func external(built plan.Plan, step config.Step) refusal.List {
 		timeout = timer.C
 	}
 
-	select {
-	case err := <-done:
-		if err != nil {
-			refused.Add("generate-failed",
-				"the generation step failed: %v\n  command: %v\n"+
-					"Nothing has been mounted: generation happens before any mount, "+
-					"so a step that fails stops the composition with the machine "+
-					"exactly as it was.", err, step.Command)
+	// Ctrl-C reaches camp's foreground process group, and the generator is
+	// deliberately not in it -- it has its own, so that a timeout can end
+	// the whole tree rather than a parent that has already forked. That
+	// leaves the interrupt reaching camp and nothing else: camp would exit
+	// while the generator and its children carried on writing into camp's
+	// scratch, which is the opposite of what putting it in its own group
+	// was for. So the signal is forwarded to that group, and camp waits
+	// for it to end before saying anything.
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(interrupts)
+
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				refused.Add("generate-failed",
+					"the generation step failed: %v\n  command: %v\n"+
+						"Nothing has been mounted: generation happens before any mount, "+
+						"so a step that fails stops the composition with the machine "+
+						"exactly as it was.", err, step.Command)
+			}
+			return refused
+
+		case <-timeout:
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			<-done
+			refused.Add("generate-timeout",
+				"the generation step did not finish within %s and its process group "+
+					"was killed.\n  command: %v", step.Timeout, step.Command)
+			return refused
+
+		case received := <-interrupts:
+			signalled, ok := received.(syscall.Signal)
+			if !ok {
+				continue
+			}
+			_ = syscall.Kill(-command.Process.Pid, signalled)
+			// And camp goes the same way once the generator has, so that
+			// interrupting camp means what a person at a terminal means by it.
+			// Waiting first is the point: what must not happen is camp exiting
+			// while the tree it started keeps writing.
+			<-done
+			refused.Add("generate-interrupted",
+				"the generation step was interrupted (%s) and its process group "+
+					"was sent the same signal.\n  command: %v\n"+
+					"Nothing has been mounted: generation happens before any mount.",
+				signalled, step.Command)
+			return refused
 		}
-	case <-timeout:
-		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		<-done
-		refused.Add("generate-timeout",
-			"the generation step did not finish within %s and its process group "+
-				"was killed.\n  command: %v", step.Timeout, step.Command)
 	}
-	return refused
 }
 
 // Expand folds the islands into the plan, each entry's mounts placed
