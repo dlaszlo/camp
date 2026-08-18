@@ -269,7 +269,7 @@ func overlayOptions(mount plan.Mount, target string, table []mountinfo.Entry) re
 		"workdir":  mount.Work,
 	}
 	for key, expected := range want {
-		got := mountinfo.UnescapeOption(entry.Super[key])
+		got := mountinfo.UnescapeOption(option(entry, key))
 		if got != expected {
 			refused.Group(overlayOptionsWrong, "%s is %q and the plan said %q",
 				key, got, expected)
@@ -285,6 +285,20 @@ func overlayOptions(mount plan.Mount, target string, table []mountinfo.Entry) re
 		}
 	}
 	return refused
+}
+
+// option reads one of the overlay's operands out of the kernel's table.
+//
+// Two spellings, one operand. A layer given to the mount API as a
+// descriptor is reported under the key that appends it -- "lowerdir+" --
+// while the old option-string form reports "lowerdir". camp mounts the
+// composed tree the first way and reads both, because a mount made by an
+// older camp, or by hand, is still a mount this pass may be asked about.
+func option(entry mountinfo.Entry, key string) string {
+	if value, found := entry.Super[key]; found {
+		return value
+	}
+	return entry.Super[key+"+"]
 }
 
 // polarity asks whether each mount is writable exactly where it should

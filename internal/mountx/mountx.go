@@ -57,6 +57,149 @@ const (
 	Busy Outcome = "busy"
 )
 
+// Operands are an overlay's directories, opened before the mount is made.
+//
+// The composed tree is mounted through the kernel's mount API -- fsopen,
+// fsconfig, fsmount, move_mount -- rather than by handing mount(2) an
+// option string, and this is why. An option string names the operands by
+// path, and the kernel resolves those paths at mount time, following
+// whatever symlinks are there then: the directory somebody checked and
+// the directory that gets mounted need not be the same one. A descriptor
+// names the object it was opened on and nothing else.
+//
+// The obvious alternative was measured and rejected. mount(2) accepts
+// /proc/self/fd/N as an operand and mounts the right object -- and then
+// records those strings in the kernel's table for the life of the mount,
+// so /proc/self/mountinfo says lowerdir=/proc/self/fd/6 and nothing
+// afterwards, camp's own verification included, can see what was mounted.
+// The mount API records the real paths (measured: lowerdir+=<the real
+// directory>), which is what a person reading /proc/mounts needs too.
+type Operands struct {
+	// Lower are the read-only layers, in the order they are given to the
+	// kernel: leftmost wins.
+	Lower []int
+	// Upper and Work are the writable layer and its work directory, or -1
+	// when the overlay has no upper and is therefore read-only.
+	Upper int
+	Work  int
+}
+
+// NoOperands is the empty set, with the two optional descriptors marked
+// absent rather than left as descriptor zero.
+func NoOperands() Operands { return Operands{Upper: -1, Work: -1} }
+
+// Close gives back every descriptor an Operands holds.
+func (o Operands) Close() {
+	for _, fd := range o.Lower {
+		unix.Close(fd)
+	}
+	if o.Upper >= 0 {
+		unix.Close(o.Upper)
+	}
+	if o.Work >= 0 {
+		unix.Close(o.Work)
+	}
+}
+
+// OpenOperands opens an overlay's operands by path.
+//
+// For the caller that resolved them itself and is mounting in its own
+// namespace: there is no privilege boundary between the check and the
+// mount there, and the paths came out of a plan that refuses a repository
+// which is a symlink. The privileged helper does not use this -- it opens
+// each operand beneath the base it was given, following nothing, and
+// compares what it opened against the identity the front end recorded.
+func OpenOperands(m plan.Mount) (Operands, error) {
+	ends := NoOperands()
+	open := func(path, what string) (int, error) {
+		fd, err := unix.Open(path, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return -1, fmt.Errorf("opening the %s %s: %w", what, path, err)
+		}
+		return fd, nil
+	}
+	for _, path := range m.Lower {
+		fd, err := open(path, "lower layer")
+		if err != nil {
+			ends.Close()
+			return NoOperands(), err
+		}
+		ends.Lower = append(ends.Lower, fd)
+	}
+	if m.Upper == "" {
+		return ends, nil
+	}
+	upper, err := open(m.Upper, "upper layer")
+	if err != nil {
+		ends.Close()
+		return NoOperands(), err
+	}
+	ends.Upper = upper
+	work, err := open(m.Work, "work directory")
+	if err != nil {
+		ends.Close()
+		return NoOperands(), err
+	}
+	ends.Work = work
+	return ends, nil
+}
+
+// Overlay creates the composed tree from its opened operands and attaches
+// it to an opened mount point.
+//
+// Every step is one syscall of the mount API: fsopen makes a filesystem
+// context, fsconfig fills it -- each directory as a descriptor, never as
+// a name -- fsmount turns it into a mount attached to nothing, and
+// move_mount puts that mount where it belongs. Nothing between those
+// steps resolves a path.
+func Overlay(m plan.Mount, ends Operands, target int) error {
+	context, err := unix.Fsopen("overlay", unix.FSOPEN_CLOEXEC)
+	if err != nil {
+		return fmt.Errorf("asking this kernel for an overlay filesystem: %w.\n"+
+			"camp mounts the composed tree through the kernel's mount API "+
+			"(fsopen, fsconfig, fsmount, move_mount) so that every layer is a "+
+			"descriptor rather than a name something else could redirect. A "+
+			"kernel without that API cannot be given the guarantee", err)
+	}
+	defer unix.Close(context)
+
+	for index, fd := range ends.Lower {
+		// "lowerdir+" appends one layer, so the order of these calls is the
+		// order of the layers, leftmost first.
+		if err := unix.FsconfigSetFd(context, "lowerdir+", fd); err != nil {
+			return fmt.Errorf("giving the overlay its lower layer %s: %w", m.Lower[index], err)
+		}
+	}
+	if ends.Upper >= 0 {
+		if err := unix.FsconfigSetFd(context, "upperdir", ends.Upper); err != nil {
+			return fmt.Errorf("giving the overlay its upper layer %s: %w", m.Upper, err)
+		}
+		if err := unix.FsconfigSetFd(context, "workdir", ends.Work); err != nil {
+			return fmt.Errorf("giving the overlay its work directory %s: %w", m.Work, err)
+		}
+	}
+	if m.Xattr != "" {
+		if err := unix.FsconfigSetFlag(context, m.Xattr); err != nil {
+			return fmt.Errorf("asking the overlay for %s: %w", m.Xattr, err)
+		}
+	}
+	if err := unix.FsconfigCreate(context); err != nil {
+		return fmt.Errorf("creating the overlay for %s: %w", m.Target, err)
+	}
+
+	mounted, err := unix.Fsmount(context, unix.FSMOUNT_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("turning the overlay into a mount: %w", err)
+	}
+	defer unix.Close(mounted)
+
+	if err := unix.MoveMount(mounted, "", target, "",
+		unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
+		return fmt.Errorf("attaching the overlay to %s: %w", m.Target, err)
+	}
+	return nil
+}
+
 // Mount performs one operation and leaves it private.
 //
 // It reports whether a mount now exists at the target, which is a
@@ -69,8 +212,18 @@ const (
 func Mount(m plan.Mount) (bool, error) {
 	switch m.Kind {
 	case plan.Overlay:
-		if err := unix.Mount("overlay", m.Target, "overlay", 0, Options(m)); err != nil {
-			return false, fmt.Errorf("mounting the overlay at %s: %w", m.Target, err)
+		target, err := unix.Open(m.Target, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return false, fmt.Errorf("opening the mount point %s: %w", m.Target, err)
+		}
+		defer unix.Close(target)
+		ends, err := OpenOperands(m)
+		if err != nil {
+			return false, err
+		}
+		defer ends.Close()
+		if err := Overlay(m, ends, target); err != nil {
+			return false, err
 		}
 	case plan.BindRO, plan.BindRW:
 		if err := unix.Mount(m.Source, m.Target, "", unix.MS_BIND, ""); err != nil {
@@ -118,12 +271,12 @@ func Mount(m plan.Mount) (bool, error) {
 // beneath.
 type Reopen func() (int, error)
 
-func MountByDescriptor(m plan.Mount, sourceFD, targetFD int, reopen Reopen) (bool, error) {
+func MountByDescriptor(m plan.Mount, sourceFD, targetFD int, ends Operands, reopen Reopen) (bool, error) {
 	target := fmt.Sprintf("/proc/self/fd/%d", targetFD)
 	switch m.Kind {
 	case plan.Overlay:
-		if err := unix.Mount("overlay", target, "overlay", 0, Options(m)); err != nil {
-			return false, fmt.Errorf("mounting the overlay at %s: %w", m.Target, err)
+		if err := Overlay(m, ends, targetFD); err != nil {
+			return false, err
 		}
 	case plan.BindRO, plan.BindRW:
 		source := fmt.Sprintf("/proc/self/fd/%d", sourceFD)
@@ -364,8 +517,14 @@ func Unmount(target string) (Outcome, error) {
 // moves it onto the live path only once it has been verified, so nothing
 // outside ever sees a half-built tree. Submounts follow the move, which
 // is why the staging parent has to be private.
-func Move(from, to string) error {
-	if err := unix.Mount(from, to, "", unix.MS_MOVE, ""); err != nil {
+func Move(fromFD, toFD int, from, to string) error {
+	// By descriptor, not by name. This is the last step of the privileged
+	// mode and the one that makes the composition visible to the machine:
+	// naming the two ends here would resolve them again, at the one moment
+	// when a swapped live directory would be root attaching a verified tree
+	// somewhere nobody asked for.
+	if err := unix.MoveMount(fromFD, "", toFD, "",
+		unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
 		return fmt.Errorf("moving the verified tree from %s onto %s: %w", from, to, err)
 	}
 	return nil

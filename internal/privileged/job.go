@@ -141,12 +141,38 @@ type JobMount struct {
 	// when they differ -- that is the rename-and-symlink race, closed.
 	SourceIdent string `json:"source_ident,omitempty"`
 	TargetIdent string `json:"target_ident,omitempty"`
+	// TargetAbsent says the mount point did not exist yet when the job was
+	// built, which is ordinary: most of them are supplied by an earlier
+	// mount in the same sequence, inside the staging tree.
+	//
+	// It exists so that a missing identity means one thing rather than
+	// two. An identity that is simply empty used to be accepted, so a
+	// target the front end could not look at -- for any reason -- was
+	// mounted onto without a single check, and the difference between
+	// "not there yet" and "camp could not tell" was invisible on the wire.
+	TargetAbsent bool `json:"target_absent,omitempty"`
 
-	// The overlay's operands.
+	// The overlay's operands, as paths for the messages and the record.
 	Lower []string `json:"lower,omitempty"`
 	Upper string   `json:"upper,omitempty"`
 	Work  string   `json:"work,omitempty"`
 	Xattr string   `json:"xattr,omitempty"`
+
+	// The same three as components beneath the job's base, with the
+	// identity the front end saw for each.
+	//
+	// These are what the helper resolves and compares. Without them the
+	// overlay was the one operation whose operands crossed as bare paths:
+	// the bind endpoints were opened and checked, and then the composed
+	// tree -- the mount that decides what the whole composition shows and
+	// where writes land -- was created from three strings the kernel
+	// resolved again, at mount time, following whatever was there then.
+	LowerParts  [][]string `json:"lower_parts,omitempty"`
+	LowerIdents []string   `json:"lower_idents,omitempty"`
+	UpperParts  []string   `json:"upper_parts,omitempty"`
+	UpperIdent  string     `json:"upper_ident,omitempty"`
+	WorkParts   []string   `json:"work_parts,omitempty"`
+	WorkIdent   string     `json:"work_ident,omitempty"`
 
 	// SourceType is what the source has to be: a directory binds onto a
 	// directory, a file onto a file.

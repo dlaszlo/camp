@@ -385,3 +385,155 @@ func TestAPathWhoseMountIsGoneIsAbsentAndNotAStranger(t *testing.T) {
 			"mount: %q", reply.Results[0].Error)
 	}
 }
+
+// The composed tree's own operands travel as components and identities,
+// not only as paths.
+//
+// The overlay decides what the whole composition shows and where every
+// write lands, and it was the one operation whose operands crossed into
+// root as bare strings: three paths the kernel resolved again, at mount
+// time, following whatever stood there then.
+func TestTheMountJobPinsTheOverlaysOperands(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	env := testenv.NewEnv(t)
+	built, refused := plan.Prepare(env.Config(t, ""), plan.Privileged)
+	if !refused.Empty() {
+		t.Fatalf("the fixture was refused:\n%v", refused)
+	}
+	if err := compose.Directories(built); err != nil {
+		t.Fatal(err)
+	}
+	testenv.Write(t, built.ExcludeFile(), "")
+
+	job, problems := privileged.MountJob(built, filepath.Join(built.Work, "staging"), nil)
+	if !problems.Empty() {
+		t.Fatalf("the mount job was refused:\n%v", problems)
+	}
+
+	var overlay *privileged.JobMount
+	for index, mount := range job.Mounts {
+		if mount.Kind == string(plan.Overlay) {
+			overlay = &job.Mounts[index]
+		}
+	}
+	if overlay == nil {
+		t.Fatal("the job has no overlay, so this test measures nothing")
+	}
+	if len(overlay.LowerParts) != len(overlay.Lower) {
+		t.Errorf("%d lower layers and %d of them addressed by component",
+			len(overlay.Lower), len(overlay.LowerParts))
+	}
+	for index, identity := range overlay.LowerIdents {
+		if identity == "" {
+			t.Errorf("lower layer %d crosses with no identity", index)
+		}
+	}
+	if overlay.UpperIdent == "" || len(overlay.UpperParts) == 0 {
+		t.Errorf("the upper layer crosses unpinned: %q %v",
+			overlay.UpperIdent, overlay.UpperParts)
+	}
+	if overlay.WorkIdent == "" || len(overlay.WorkParts) == 0 {
+		t.Errorf("the work directory crosses unpinned: %q %v",
+			overlay.WorkIdent, overlay.WorkParts)
+	}
+}
+
+// An operand with nothing to compare against is refused before anything
+// is mounted. A missing identity used to be accepted outright, which made
+// "camp could not look at it" and "it is not there yet" the same thing on
+// the wire.
+func TestTheHelperRefusesAnOperandItCannotCheck(t *testing.T) {
+	base := t.TempDir()
+	testenv.MkDir(t, filepath.Join(base, "work", "staging"))
+	testenv.MkDir(t, filepath.Join(base, "lower"))
+	testenv.MkDir(t, filepath.Join(base, "point"))
+
+	cases := []struct {
+		name string
+		job  privileged.Job
+	}{
+		{
+			name: "a mount point outside the staging tree with no identity",
+			job: privileged.Job{
+				Version: 1, Action: privileged.ActionMount, Base: base,
+				StagingParts: []string{"work", "staging"},
+				LiveParts:    []string{"live"},
+				Mounts: []privileged.JobMount{{
+					Kind: string(plan.BindRO), Target: filepath.Join(base, "point"),
+					TargetParts: []string{"point"},
+					Source:      filepath.Join(base, "lower"),
+					SourceParts: []string{"lower"},
+				}},
+			},
+		},
+		{
+			name: "an overlay whose upper layer carries no identity",
+			job: privileged.Job{
+				Version: 1, Action: privileged.ActionMount, Base: base,
+				StagingParts: []string{"work", "staging"},
+				LiveParts:    []string{"live"},
+				Mounts: []privileged.JobMount{{
+					Kind:        string(plan.Overlay),
+					Target:      filepath.Join(base, "work", "staging"),
+					TargetParts: []string{"work", "staging"},
+					Lower:       []string{filepath.Join(base, "lower")},
+					LowerParts:  [][]string{{"lower"}},
+					LowerIdents: []string{"1:1"},
+					Upper:       filepath.Join(base, "upper"),
+				}},
+			},
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			asInvoker(t)
+			reply := askJob(t, privileged.ActionMount, test.job)
+			if reply.Rule != "helper-operand-unchecked" {
+				t.Fatalf("the helper answered %q (%s), wanted helper-operand-unchecked",
+					reply.Rule, reply.Error)
+			}
+			if len(reply.Results) != 0 {
+				t.Errorf("the helper acted before refusing: %+v", reply.Results)
+			}
+		})
+	}
+}
+
+// And an operand that is no longer what the front end looked at stops the
+// job, whatever the path still says.
+func TestTheHelperRefusesAnOperandThatChanged(t *testing.T) {
+	base := t.TempDir()
+	testenv.MkDir(t, filepath.Join(base, "work", "staging"))
+	testenv.MkDir(t, filepath.Join(base, "lower"))
+	testenv.MkDir(t, filepath.Join(base, "upper"))
+	testenv.MkDir(t, filepath.Join(base, "work", "overlay"))
+
+	asInvoker(t)
+	reply := askJob(t, privileged.ActionMount, privileged.Job{
+		Version: 1, Action: privileged.ActionMount, Base: base,
+		StagingParts: []string{"work", "staging"},
+		LiveParts:    []string{"live"},
+		Mounts: []privileged.JobMount{{
+			Kind:        string(plan.Overlay),
+			Target:      filepath.Join(base, "work", "staging"),
+			TargetParts: []string{"work", "staging"},
+			Lower:       []string{filepath.Join(base, "lower")},
+			LowerParts:  [][]string{{"lower"}},
+			// What no directory on this machine will answer as.
+			LowerIdents: []string{"999999:999999"},
+			Upper:       filepath.Join(base, "upper"),
+			UpperParts:  []string{"upper"},
+			UpperIdent:  "999999:999999",
+			Work:        filepath.Join(base, "work", "overlay"),
+			WorkParts:   []string{"work", "overlay"},
+			WorkIdent:   "999999:999999",
+		}},
+	})
+	if !contains(reply.Error, "is not the object camp checked") {
+		t.Fatalf("the helper answered %q (%s)", reply.Rule, reply.Error)
+	}
+	if len(reply.Results) != 0 {
+		t.Errorf("the helper acted before refusing: %+v", reply.Results)
+	}
+}

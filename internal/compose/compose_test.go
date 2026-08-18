@@ -414,9 +414,10 @@ func descriptor(out outcome, built plan.Plan) int {
 	}
 
 	mount := plan.Mount{Kind: plan.BindRO, Source: source, Target: target}
-	placed, err := mountx.MountByDescriptor(mount, sourceFD, targetFD, func() (int, error) {
-		return pathx.OpenBeneath(built.Config.Env, parts, unix.O_PATH)
-	})
+	placed, err := mountx.MountByDescriptor(mount, sourceFD, targetFD,
+		mountx.NoOperands(), func() (int, error) {
+			return pathx.OpenBeneath(built.Config.Env, parts, unix.O_PATH)
+		})
 	unix.Close(sourceFD)
 	if err != nil {
 		out.DescriptorErr = err.Error()

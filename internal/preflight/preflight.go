@@ -12,6 +12,7 @@
 package preflight
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -60,7 +61,7 @@ func (c Check) Symbol() string {
 // Run evaluates every requirement for a mode. All of them are evaluated,
 // so one run reports everything rather than one thing per attempt.
 func Run(mode Mode) []Check {
-	checks := []Check{platform(), procfs(), overlayfs(), git()}
+	checks := []Check{platform(), procfs(), overlayfs(), mountAPI(), git()}
 	switch mode {
 	case Namespace:
 		checks = append(checks, userNamespaces())
@@ -138,6 +139,68 @@ func overlayfs() Check {
 		Detail: "the running kernel does not list overlay in /proc/filesystems",
 		Fatal:  true,
 		Hint:   "try 'sudo modprobe overlay', or use a kernel built with it",
+	}
+}
+
+// mountAPI asks whether this kernel has the mount API camp mounts the
+// composed tree with.
+//
+// fsopen, fsconfig, fsmount and move_mount are how the overlay's layers
+// reach the kernel as descriptors rather than as names it resolves itself
+// -- which is what makes the directory camp checked and the directory
+// camp mounted the same one. There is no fallback: the option-string form
+// would silently give up that guarantee, and the /proc/self/fd spelling
+// of it records those descriptor paths in the kernel's table for the life
+// of the mount, where nothing afterwards can read what was mounted
+// (measured).
+//
+// Asked by opening a context and closing it again, which allocates
+// nothing and mounts nothing.
+func mountAPI() Check {
+	fd, err := unix.Fsopen("overlay", unix.FSOPEN_CLOEXEC)
+	switch {
+	case err == nil:
+		unix.Close(fd)
+		return Check{
+			Name:   "mount API",
+			OK:     true,
+			Detail: "fsopen, fsconfig, fsmount and move_mount are available",
+			Fatal:  true,
+		}
+	case errors.Is(err, unix.EPERM):
+		// The syscall is there and answered; making an overlay context needs
+		// the mount capability, which camp has inside its own namespace and
+		// this probe does not. That is the ordinary answer on a working
+		// machine, and reading it as a failure would fail every host camp
+		// runs on.
+		return Check{
+			Name: "mount API",
+			OK:   true,
+			Detail: "present; creating a filesystem needs the mount capability, " +
+				"which camp has inside its namespace",
+			Fatal: true,
+		}
+	case errors.Is(err, unix.ENOSYS):
+		return Check{
+			Name:   "mount API",
+			Detail: "this kernel has no fsopen(2)",
+			Fatal:  true,
+			Hint: "camp gives the overlay its layers as descriptors, through " +
+				"fsopen and fsconfig, so that nothing can redirect a layer " +
+				"between the check and the mount. The calls have been in Linux " +
+				"since 5.2 and overlayfs has taken its layers this way since 6.7. " +
+				"There is no fallback: the option-string form would give up that " +
+				"guarantee silently.",
+		}
+	}
+	return Check{
+		Name:   "mount API",
+		Detail: fmt.Sprintf("fsopen(\"overlay\") answered %v", err),
+		Fatal:  true,
+		Hint: "camp mounts the composed tree through fsopen and fsconfig. A " +
+			"container or a sandbox filtering syscalls can hide them, and a " +
+			"kernel without the overlay filesystem answers here as well as at " +
+			"the check above.",
 	}
 }
 

@@ -19,7 +19,6 @@ import (
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/gen"
-	"github.com/dlaszlo/camp/internal/mountx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/refusal"
@@ -138,13 +137,32 @@ func Expansion(p plan.Plan, out gen.Output) string {
 
 // Syscalls renders the mount calls a run would make, in order, for
 // somebody who wants to see the plan in the kernel's own terms.
+//
+// The composed tree is made with the kernel's mount API rather than with
+// mount(2), because that is the only way to hand it the layers as
+// descriptors instead of as names it resolves itself. It is shown as it
+// happens: a filesystem context, one call per operand, and a mount that
+// exists before it is anywhere.
 func Syscalls(p plan.Plan) string {
 	var b strings.Builder
 	for _, mount := range p.Mounts {
 		switch mount.Kind {
 		case plan.Overlay:
-			fmt.Fprintf(&b, "  mount(\"overlay\", %q, \"overlay\", 0, %q)\n",
-				mount.Target, mountx.Options(mount))
+			b.WriteString("  fsopen(\"overlay\", FSOPEN_CLOEXEC)\n")
+			for _, lower := range mount.Lower {
+				fmt.Fprintf(&b, "  fsconfig(fs, FSCONFIG_SET_FD, \"lowerdir+\", NULL, fd of %s)\n", lower)
+			}
+			if mount.Upper != "" {
+				fmt.Fprintf(&b, "  fsconfig(fs, FSCONFIG_SET_FD, \"upperdir\", NULL, fd of %s)\n", mount.Upper)
+				fmt.Fprintf(&b, "  fsconfig(fs, FSCONFIG_SET_FD, \"workdir\", NULL, fd of %s)\n", mount.Work)
+			}
+			if mount.Xattr != "" {
+				fmt.Fprintf(&b, "  fsconfig(fs, FSCONFIG_SET_FLAG, %q, NULL, 0)\n", mount.Xattr)
+			}
+			b.WriteString("  fsconfig(fs, FSCONFIG_CMD_CREATE, NULL, NULL, 0)\n")
+			b.WriteString("  fsmount(fs, FSMOUNT_CLOEXEC, 0)\n")
+			fmt.Fprintf(&b, "  move_mount(mount, \"\", fd of %s, \"\", MOVE_MOUNT_F_EMPTY_PATH|MOVE_MOUNT_T_EMPTY_PATH)\n",
+				mount.Target)
 		default:
 			fmt.Fprintf(&b, "  mount(%q, %q, \"\", MS_BIND, \"\")\n",
 				mount.Source, mount.Target)

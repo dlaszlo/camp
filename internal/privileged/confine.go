@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/compose"
+	"github.com/dlaszlo/camp/internal/plan"
 )
 
 // What this file exists for.
@@ -98,6 +99,10 @@ func (j Job) confine() error {
 		}
 	}
 
+	if err := j.checkable(); err != nil {
+		return err
+	}
+
 	for _, target := range j.Targets {
 		if !beneath(target.Path, base) {
 			return refuse("helper-target-outside",
@@ -105,6 +110,75 @@ func (j Job) confine() error {
 					"This helper unmounts what one camp composition put up, and "+
 					"nothing else on the machine. Every path it touches has to lie "+
 					"beneath the environment root the job names.", target.Path, base)
+		}
+	}
+	return nil
+}
+
+// checkable refuses a mount job in which anything would be mounted
+// without being compared against what the front end looked at.
+//
+// Here rather than at the mount itself, so that it is answered before the
+// helper's first syscall: a job that cannot be checked is refused while
+// the machine is still untouched, and the tests that exercise these
+// refusals can run as an ordinary user.
+//
+// The one operand that may arrive without an identity is a mount point
+// inside the staging tree that did not exist when the job was built --
+// which is the ordinary case, because most of them are supplied by an
+// earlier mount of this same sequence.
+func (j Job) checkable() error {
+	if j.Action != ActionMount {
+		return nil
+	}
+	for _, operation := range j.Mounts {
+		if operation.TargetIdent == "" && !insideStaging(j, operation.TargetParts) {
+			return refuse("helper-operand-unchecked",
+				"the job gives no identity for the mount point %s, and it is not "+
+					"inside the staging tree.\nEvery operand this helper mounts is "+
+					"compared against what the front end looked at. A mount point "+
+					"with nothing to compare against is one nobody checked.",
+				operation.Target)
+		}
+		if operation.Kind != string(plan.Overlay) {
+			continue
+		}
+		if len(operation.LowerParts) != len(operation.Lower) {
+			return refuse("helper-operand-unchecked",
+				"the job names %d lower layers for the composed tree and %d of "+
+					"them as components beneath the base.",
+				len(operation.Lower), len(operation.LowerParts))
+		}
+		operands := []struct {
+			what     string
+			path     string
+			parts    []string
+			identity string
+		}{
+			{"upper layer", operation.Upper, operation.UpperParts, operation.UpperIdent},
+			{"work directory", operation.Work, operation.WorkParts, operation.WorkIdent},
+		}
+		for index, parts := range operation.LowerParts {
+			operands = append(operands, struct {
+				what     string
+				path     string
+				parts    []string
+				identity string
+			}{"lower layer", operation.Lower[index], parts, identityAt(operation.LowerIdents, index)})
+		}
+		for _, operand := range operands {
+			if operand.path == "" {
+				continue // an overlay with no upper has no work directory either
+			}
+			if operand.identity == "" || len(operand.parts) == 0 {
+				return refuse("helper-operand-unchecked",
+					"the job gives no identity for the composed tree's %s (%s).\n"+
+						"Every operand this helper mounts is compared against what "+
+						"the front end looked at, and this one has nothing to compare "+
+						"against. The composed tree decides what the whole "+
+						"composition shows and where every write lands.",
+					operand.what, operand.path)
+			}
 		}
 	}
 	return nil

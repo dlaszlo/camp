@@ -3,6 +3,7 @@ package privileged
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -345,12 +346,84 @@ func MountJob(built plan.Plan, staging string, exclude []byte) (Job, refusal.Lis
 			}
 			operation.SourceIdent = identity
 		}
-		if identity, err := identityBeneath(built.Config.Env, targetParts); err == nil {
+		if mount.Kind == plan.Overlay {
+			if problems := overlayOperands(&operation, built); !problems.Empty() {
+				refused.Extend(problems)
+				continue
+			}
+		}
+
+		// A mount point that is not there yet is the ordinary case: most of
+		// them are supplied by an earlier mount of this same sequence. What
+		// must not happen is the two being confused, so absence is recorded
+		// as absence and anything else stops the job here, while nothing is
+		// mounted.
+		switch identity, err := identityBeneath(built.Config.Env, targetParts); {
+		case err == nil:
 			operation.TargetIdent = identity
+		case errors.Is(err, os.ErrNotExist):
+			operation.TargetAbsent = true
+		default:
+			refused.Add("target-vanished",
+				"the mount point %s could not be looked at: %v.", target, err)
+			continue
 		}
 		job.Mounts = append(job.Mounts, operation)
 	}
 	return job, refused
+}
+
+// overlayOperands fills in the three directories the composed tree is
+// made of, as components beneath the base and as identities.
+//
+// Every one of them has to exist by now: the two repositories are the
+// composition's own, and the work directory was created a moment ago by
+// compose.Directories. So a failure to look at one is a refusal rather
+// than a case to carry.
+func overlayOperands(operation *JobMount, built plan.Plan) refusal.List {
+	var refused refusal.List
+	take := func(path, what string) ([]string, string, bool) {
+		parts, ok := relativeTo(built.Config.Env, path)
+		if !ok {
+			refused.Add("overlay-operand-outside",
+				"the overlay's %s is %s, which is not inside the environment root "+
+					"%s.\nEvery operand the helper mounts is addressed as components "+
+					"beneath that root, so that root can never be pointed at "+
+					"something outside the composition.", what, path, built.Config.Env)
+			return nil, "", false
+		}
+		identity, err := identityBeneath(built.Config.Env, parts)
+		if err != nil {
+			refused.Add("overlay-operand-vanished",
+				"the overlay's %s %s could not be looked at: %v.", what, path, err)
+			return nil, "", false
+		}
+		return parts, identity, true
+	}
+
+	for _, lower := range operation.Lower {
+		parts, identity, ok := take(lower, "lower layer")
+		if !ok {
+			return refused
+		}
+		operation.LowerParts = append(operation.LowerParts, parts)
+		operation.LowerIdents = append(operation.LowerIdents, identity)
+	}
+	if operation.Upper == "" {
+		return refused
+	}
+	parts, identity, ok := take(operation.Upper, "upper layer")
+	if !ok {
+		return refused
+	}
+	operation.UpperParts, operation.UpperIdent = parts, identity
+
+	parts, identity, ok = take(operation.Work, "work directory")
+	if !ok {
+		return refused
+	}
+	operation.WorkParts, operation.WorkIdent = parts, identity
+	return refused
 }
 
 // workParts names camp's work directory beneath the environment root, so
