@@ -476,3 +476,53 @@ func TestGitFailingDuringPlanningStopsTheComposition(t *testing.T) {
 			"answered %v", refused.Rules())
 	}
 }
+
+// allow_overlap exempts a name from the overlap gate. It does not make
+// the name expressible, and it does not make a socket or a symlink
+// something camp can stand over.
+//
+// It does not even require an overlap: a name can be listed there and
+// exist only in the workspace. Such a name used to be exempt from
+// everything -- no read-only bind, no exclude line, and no type check --
+// which is protected by nothing at all.
+func TestAnAllowListedNameIsStillJudgedForWhatItIs(t *testing.T) {
+	env := testenv.NewEnv(t)
+	link := filepath.Join(env.Workspace, "outside")
+	if err := os.Symlink(filepath.Join(env.Path, "elsewhere"), link); err != nil {
+		t.Fatal(err)
+	}
+	yaml := strings.Replace(env.YAML(), "allow_overlap: [.gitignore]",
+		"allow_overlap: [.gitignore, outside]", 1)
+
+	cfg := env.Config(t, yaml)
+	env.Accept(t, cfg)
+	_, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Has("root-entry-symlink") {
+		t.Fatalf("an allow-listed symlink at the workspace root was accepted; "+
+			"the rules that fired were %v", refused.Rules())
+	}
+}
+
+// A directory the descent cannot read is a check that did not run, which
+// is not a check that found nothing. Inside an allow-listed directory
+// that check is the one that catches a copy-up.
+func TestAnUnreadableAllowListedDirectoryStopsTheComposition(t *testing.T) {
+	env := testenv.NewEnv(t)
+	for _, side := range []string{env.Workspace, env.Code} {
+		testenv.Write(t, filepath.Join(side, "shared", "note.md"), "note\n")
+	}
+	if err := os.Chmod(filepath.Join(env.Workspace, "shared"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Join(env.Workspace, "shared"), 0o755) })
+
+	yaml := strings.Replace(env.YAML(), "allow_overlap: [.gitignore]",
+		"allow_overlap: [.gitignore, shared]", 1)
+	cfg := env.Config(t, yaml)
+	env.Accept(t, cfg)
+	_, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Has("overlap-unreadable") {
+		t.Fatalf("an unreadable allow-listed directory passed the gate; the "+
+			"rules that fired were %v", refused.Rules())
+	}
+}

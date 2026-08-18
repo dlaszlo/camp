@@ -113,13 +113,16 @@ func descend(cfg config.Config, lowerPath, upperPath string, rel pathx.Rel, lowe
 		return nil, nil
 	}
 
+	// A side that cannot be listed is not a side with nothing in it. This
+	// is the check that catches a copy-up, and an unreadable directory
+	// would have made it pass by saying nothing at all.
 	lowerEntries, err := pathx.ReadDirBeneath(lowerPath, rel.Components())
 	if err != nil {
-		return nil, nil
+		return unreadable(rel, filepath.Join(lowerPath, rel.String()), "workspace", err), nil
 	}
 	upperEntries, err := pathx.ReadDirBeneath(upperPath, rel.Components())
 	if err != nil {
-		return nil, nil
+		return unreadable(rel, filepath.Join(upperPath, rel.String()), "code repository", err), nil
 	}
 
 	upperByName := map[string]pathx.Info{}
@@ -201,6 +204,21 @@ func copyUpGroup() refusal.Group {
 			"Decide which copy is the real one, and remove or rename the other. " +
 			"Nothing is mounted, so both are safe to do right now.",
 	}
+}
+
+// unreadable is what the descent says when it cannot look.
+func unreadable(rel pathx.Rel, path, side string, err error) refusal.List {
+	var refused refusal.List
+	refused.Add("overlap-unreadable",
+		"the allow-listed directory %q could not be listed on the %s side: "+
+			"%s: %v.\n"+
+			"camp keeps checking inside an allow-listed directory, because a "+
+			"file on both sides of one is what a copy-up leaves behind -- and a "+
+			"directory it cannot read is a check that did not run, which is not "+
+			"the same as a check that found nothing. Make the directory "+
+			"readable, or take the name out of allow_overlap.",
+		rel.String(), side, path, err)
+	return refused
 }
 
 func overlapRefusal(cfg config.Config, lowerPath, upperPath string, rel pathx.Rel, lower, upper pathx.Info) refusal.R {

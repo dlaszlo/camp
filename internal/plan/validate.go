@@ -534,9 +534,11 @@ var (
 		Many: "%d workspace root entries are symbolic links:",
 		Detail: "camp protects every workspace root name with a read-only bind, " +
 			"and a bind follows symlinks: binding one would pull whatever the " +
-			"link points at into the composed tree and protect that instead. " +
-			"Replace it with a real file or directory, or cover it with a mount " +
-			"target of its own.",
+			"link points at into the composed tree and protect that instead. A " +
+			"name in allow_overlap gets no bind at all, and no exclude line " +
+			"either, so the link would simply stand in the composed tree " +
+			"unprotected. Replace it with a real file or directory, or cover it " +
+			"with a mount target of its own.",
 	}
 	rootEntryTypes = refusal.Group{
 		Rule: "root-entry-type",
@@ -549,14 +551,23 @@ var (
 	}
 )
 
+// Every raw name is judged, and the exemptions come afterwards. A name
+// is exempt from the *overlap* gate because a mount covers it or because
+// somebody allowed it; neither makes it a name camp can express or a type
+// camp can stand over. allow_overlap does not even require an overlap, so
+// a lower-only socket or symlink named there used to pass the root guard
+// and get no exclude line: exempt from everything, protected by nothing.
 func (c *checker) checkRootTypes(lowerRoot []pathx.Info) {
 	covered := rootTargets(c.cfg)
 	for _, entry := range lowerRoot {
-		if covered[entry.Name] || c.cfg.AllowsOverlap(entry.Name) {
-			continue
-		}
 		if pathx.HasNewline(entry.Name) {
 			c.refused.Group(newlineRootEntries, "%q in %s", entry.Name, c.lower)
+			continue
+		}
+		if covered[entry.Name] {
+			// A mount stands over this name for the whole composition, so
+			// what it is underneath never shows. Its own source is checked
+			// where that mount is checked.
 			continue
 		}
 		switch entry.Type {
