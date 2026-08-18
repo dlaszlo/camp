@@ -185,7 +185,13 @@ func mount(job Job) Reply {
 		if ruling, ok := err.(ruled); ok {
 			reply.Rule = ruling.rule
 		}
-		return reply
+		// Through unwind although there is nothing to unwind: what it sets
+		// is the reply's account of the machine, and this refusal happens
+		// before the first syscall that changes anything. Returned bare, it
+		// said the rollback had failed -- so an up that touched nothing
+		// reported the workspace frozen, listed no mounts as still mounted,
+		// and left a partial record for a composition that was never built.
+		return unwind(job, nil, reply)
 	}
 
 	// The staging tree gets a private parent before anything is built in

@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/mountinfo"
+	"github.com/dlaszlo/camp/internal/plan"
 )
 
 // The one check that stands between root and a stranger's mount, tested
@@ -136,5 +137,52 @@ func TestAnObjectThatIsNotTheOneCampCheckedIsRefused(t *testing.T) {
 	// and a comparison against nothing must not invent one.
 	if err := checkIdentity(fd, path, ""); err != nil {
 		t.Errorf("an operand with no recorded identity was refused: %v", err)
+	}
+}
+
+// A job whose operands have already moved is refused before the first
+// syscall that changes anything, and the reply has to say that the
+// machine is clean -- because it is.
+//
+// The flag is what the front end reads to choose between "nothing is
+// mounted" and "what it built is still on the machine: run camp down".
+// Measured with a real 'camp up' on 2026-08-18, with the overlay's upper
+// layer replaced in the window between the front end's identity capture
+// and the helper's first mount: nothing was mounted, the workspace was
+// writable, camp status said all eleven mounts were gone -- and camp up
+// said the composition was standing and left the record in phase partial.
+func TestARefusalBeforeTheFirstMountReportsACleanMachine(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	reply := mount(Job{
+		Version:      JobVersion,
+		Action:       ActionMount,
+		Base:         base,
+		StagingParts: []string{"staging"},
+		Mounts: []JobMount{{
+			Kind:        string(plan.BindRO),
+			Target:      target,
+			TargetParts: []string{"target"},
+			// What the front end saw, and not what is there now.
+			TargetIdent: "1:1",
+		}},
+	})
+
+	if reply.Error == "" {
+		t.Fatal("an operand that is not the one camp checked was accepted")
+	}
+	if !reply.RolledBack {
+		t.Error("a refusal that mounted nothing reported a machine still " +
+			"carrying a composition")
+	}
+	if len(reply.Stranded) != 0 {
+		t.Errorf("nothing was mounted and this is stranded: %v", reply.Stranded)
+	}
+	if len(reply.Results) != 0 || reply.Moved {
+		t.Errorf("the reply claims work that never happened: %+v", reply)
 	}
 }
