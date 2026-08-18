@@ -333,8 +333,14 @@ func errorText(err error) string {
 
 // RemoveWorkDir removes the whole work directory for a composition that
 // is down.
-func RemoveWorkDir(p plan.Plan) error {
-	area := fsx.Work(p.Config.Env, p.Hash)
+//
+// Taken from the environment root and the hash rather than from a plan,
+// because the one caller is the privileged teardown and it works from the
+// record: the configuration may have been edited, or deleted, while the
+// composition was up, and the record is what says where this composition
+// put things.
+func RemoveWorkDir(env, hash string) error {
+	area := fsx.Work(env, hash)
 	entries, err := os.ReadDir(area.Root())
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -225,6 +225,13 @@ func (n *Narrator) Swept(directory string) {
 	n.say("swept: %s, left by a session that has ended", directory)
 }
 
+// Removed: camp's own disposable work directory, at the end of a
+// teardown that finished. Storage is never in this line: it holds
+// unfinished work and camp does not remove it.
+func (n *Narrator) Removed(directory string) {
+	n.say("removed: %s, camp's own work directory", directory)
+}
+
 // LeftAlone: something in camp's own work area that camp could not prove
 // is its own. It stops nothing and it is nobody's to remove silently.
 func (n *Narrator) LeftAlone(note string) {
