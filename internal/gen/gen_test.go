@@ -300,7 +300,7 @@ func TestAnUnrecordedFileInTheWaterRefusesTheIsland(t *testing.T) {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}
 
-	store := fsx.Storage(built.Storage)
+	store := fsx.Storage(built.Config.Env, built.Hash)
 	if _, err := store.MkdirAll(".claude"); err != nil {
 		t.Fatal(err)
 	}

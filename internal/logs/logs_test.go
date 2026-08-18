@@ -3,7 +3,6 @@ package logs_test
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +12,7 @@ import (
 
 // Every line is kept, and every line says when it was said.
 func TestEveryLineIsKeptWithItsTime(t *testing.T) {
-	log, campDir := open(t)
+	log, env := open(t)
 
 	if _, err := log.Write([]byte("[OK] locks: taken\n[NOTE] this mode starts no session\n")); err != nil {
 		t.Fatalf("writing the log: %v", err)
@@ -22,7 +21,7 @@ func TestEveryLineIsKeptWithItsTime(t *testing.T) {
 		t.Fatalf("closing the log: %v", err)
 	}
 
-	lines := read(t, logs.Path(campDir))
+	lines := read(t, logs.Path(env))
 	if len(lines) != 2 {
 		t.Fatalf("two lines were written and %d were kept:\n%s", len(lines), lines)
 	}
@@ -46,11 +45,11 @@ func TestEveryLineIsKeptWithItsTime(t *testing.T) {
 // A blank line stays blank. Refusals are paragraphs, and a timestamp on
 // an empty line is a line that says nothing.
 func TestABlankLineStaysBlank(t *testing.T) {
-	log, campDir := open(t)
+	log, env := open(t)
 	log.Write([]byte("first\n\nsecond\n"))
 	log.Close()
 
-	lines := read(t, logs.Path(campDir))
+	lines := read(t, logs.Path(env))
 	if len(lines) != 3 || lines[1] != "" {
 		t.Errorf("the paragraph break was not kept:\n%q", lines)
 	}
@@ -60,7 +59,7 @@ func TestABlankLineStaysBlank(t *testing.T) {
 // the oldest goes. Nothing here waits for a run to be over: a log that
 // only rotated at exit would grow without bound during a long session.
 func TestTheFileRotatesBySize(t *testing.T) {
-	log, campDir := open(t)
+	log, env := open(t)
 	line := strings.Repeat("x", 4096) + "\n"
 	for written := 0; written < logs.Limit*(logs.Kept+2); written += len(line) {
 		if _, err := log.Write([]byte(line)); err != nil {
@@ -69,7 +68,7 @@ func TestTheFileRotatesBySize(t *testing.T) {
 	}
 	log.Close()
 
-	current := logs.Path(campDir)
+	current := logs.Path(env)
 	info, err := os.Stat(current)
 	if err != nil {
 		t.Fatalf("the current log is not there: %v", err)
@@ -91,8 +90,8 @@ func TestTheFileRotatesBySize(t *testing.T) {
 // re-executes -- and the one that did not rotate must not keep writing
 // into the file that was rotated away.
 func TestAWriterFollowsSomebodyElsesRotation(t *testing.T) {
-	first, campDir := open(t)
-	second, err := logs.Open(campDir)
+	first, env := open(t)
+	second, err := logs.Open(env)
 	if err != nil {
 		t.Fatalf("opening the log a second time: %v", err)
 	}
@@ -107,7 +106,7 @@ func TestAWriterFollowsSomebodyElsesRotation(t *testing.T) {
 	if _, err := second.Write([]byte("after the rotation\n")); err != nil {
 		t.Fatalf("writing after somebody else rotated: %v", err)
 	}
-	current, err := os.ReadFile(logs.Path(campDir))
+	current, err := os.ReadFile(logs.Path(env))
 	if err != nil {
 		t.Fatalf("reading the current log: %v", err)
 	}
@@ -118,13 +117,13 @@ func TestAWriterFollowsSomebodyElsesRotation(t *testing.T) {
 
 func open(t *testing.T) (*logs.Log, string) {
 	t.Helper()
-	campDir := filepath.Join(t.TempDir(), ".camp")
-	log, err := logs.Open(campDir)
+	env := t.TempDir()
+	log, err := logs.Open(env)
 	if err != nil {
 		t.Fatalf("opening the log: %v", err)
 	}
 	t.Cleanup(func() { log.Close() })
-	return log, campDir
+	return log, env
 }
 
 func read(t *testing.T, path string) []string {

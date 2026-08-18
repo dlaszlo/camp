@@ -93,7 +93,7 @@ func cmdAccept(ctx *context, args []string) error {
 	}
 	current := inventory.Take(lower, upper)
 
-	if previous, found, err := inventory.Load(cfg.CampDir()); err == nil && found {
+	if previous, found, err := inventory.Load(cfg.Env); err == nil && found {
 		differences := inventory.Compare(previous, current)
 		if len(differences) == 0 {
 			ctx.printf("nothing has changed since the last snapshot.\n")
@@ -105,13 +105,13 @@ func cmdAccept(ctx *context, args []string) error {
 		}
 	}
 
-	if err := current.Save(cfg.CampDir()); err != nil {
+	if err := current.Save(cfg.Env); err != nil {
 		return wrap(err, ExitFailure, "")
 	}
 	ctx.printf("wrote %s: %d root entries across both repositories.\n"+
 		"Its diff is meant to be read -- it is byte-sorted, one record per "+
 		"line -- and camp compares against it at every up.\n",
-		inventory.Path(cfg.CampDir()), len(current.Entries))
+		inventory.Path(cfg.Env), len(current.Entries))
 	return nil
 }
 

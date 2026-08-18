@@ -31,6 +31,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/fsx"
 )
 
@@ -76,8 +77,8 @@ type Log struct {
 }
 
 // Path is where the log lives for an environment.
-func Path(campDir string) string {
-	return filepath.Join(campDir, DirName, Name)
+func Path(env string) string {
+	return filepath.Join(env, config.Dir, DirName, Name)
 }
 
 // Open prepares the log for one environment.
@@ -85,8 +86,8 @@ func Path(campDir string) string {
 // A failure to open it is returned rather than swallowed, and the caller
 // decides -- which is always to carry on without a log and say so once. A
 // command that cannot write its own record still has work to do.
-func Open(campDir string) (*Log, error) {
-	area := fsx.Logs(filepath.Join(campDir, DirName))
+func Open(env string) (*Log, error) {
+	area := fsx.Logs(env)
 	if err := area.Ensure(0o755); err != nil {
 		return nil, err
 	}
@@ -99,7 +100,7 @@ func Open(campDir string) (*Log, error) {
 		directory.Close()
 		return nil, err
 	}
-	return &Log{area: area, path: Path(campDir), directory: directory, file: file}, nil
+	return &Log{area: area, path: Path(env), directory: directory, file: file}, nil
 }
 
 // Write records whole lines, one timestamp each.

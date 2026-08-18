@@ -73,7 +73,7 @@ func WriteInputs(built plan.Plan) refusal.List {
 		return refused
 	}
 
-	work := fsx.Work(built.Work)
+	work := fsx.Work(built.Config.Env, built.Hash)
 	gen, err := work.Sub("gen")
 	if err != nil {
 		refused.Add("generate-scratch", "%v", err)
@@ -241,7 +241,7 @@ func ReadOutputs(built plan.Plan) (Output, refusal.List) {
 func WriteOutputs(built plan.Plan, out Output) refusal.List {
 	var refused refusal.List
 
-	work := fsx.Work(built.Work)
+	work := fsx.Work(built.Config.Env, built.Hash)
 	gen, err := work.Sub("gen")
 	if err != nil {
 		refused.Add("generate-scratch", "%v", err)

@@ -56,7 +56,7 @@ func (c *context) printf(format string, args ...any) {
 // report, because a record silently not being kept is worse than no
 // record.
 func (c *context) keep(cfg config.Config) {
-	c.attach(cfg.CampDir())
+	c.attach(cfg.Env)
 }
 
 // keepUnder starts the log of the environment a configuration path
@@ -68,11 +68,12 @@ func (c *context) keepUnder(source string) {
 	if source == "" {
 		return
 	}
-	c.attach(filepath.Dir(source))
+	// $ENV/.camp/config.yml, so the environment root is two above it.
+	c.attach(filepath.Dir(filepath.Dir(source)))
 }
 
-func (c *context) attach(campDir string) {
-	file, err := logs.Open(campDir)
+func (c *context) attach(env string) {
+	file, err := logs.Open(env)
 	if err != nil {
 		report.Narrate(c.err).Warn("camp's log is not being written: %v. "+
 			"Nothing else about this run changes.", err)
@@ -186,7 +187,7 @@ func resolve(ctx *context, file string) (config.Config, error) {
 	// A namespace session leaves its findings in a file, because by the
 	// time its last window closes there is nobody to print them to. This
 	// is where they reach somebody: once, and then marked as read.
-	reports.Show(cfg.CampDir(), func(text string) {
+	reports.Show(cfg.Env, func(text string) {
 		fmt.Fprintf(ctx.err, "%s\n", text)
 	})
 	return cfg, nil

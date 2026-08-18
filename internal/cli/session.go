@@ -94,7 +94,7 @@ func enter(ctx *context, file string, argv []string) error {
 // be read is reported and left alone -- camp removes only what it can
 // prove is its own.
 func sweep(say *report.Narrator, cfg config.Config) {
-	swept, kept := compose.Sweep(cfg.CampDir(), func(live string) bool {
+	swept, kept := compose.Sweep(cfg.Env, func(live string) bool {
 		if _, err := os.Stat(live); err != nil {
 			return true // the composed tree is gone; so is its session
 		}

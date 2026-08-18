@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/enc"
 	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/pathx"
@@ -93,7 +94,7 @@ type Snapshot struct {
 }
 
 // Path is where the snapshot lives for an environment.
-func Path(campDir string) string { return filepath.Join(campDir, FileName) }
+func Path(env string) string { return filepath.Join(env, config.Dir, FileName) }
 
 // Take reads both roots and builds a snapshot.
 func Take(lowerRoot, upperRoot []pathx.Info) Snapshot {
@@ -123,8 +124,8 @@ func (s Snapshot) Bytes() []byte {
 }
 
 // Save writes the snapshot beside the configuration.
-func (s Snapshot) Save(campDir string) error {
-	area := fsx.Camp(campDir)
+func (s Snapshot) Save(env string) error {
+	area := fsx.Camp(env)
 	if err := area.Ensure(0o755); err != nil {
 		return err
 	}
@@ -136,18 +137,18 @@ func (s Snapshot) Save(campDir string) error {
 // Absence is reported separately from a parse failure: the first means
 // "run camp accept", the second means the file is damaged and camp will
 // not guess at what it used to say.
-func Load(campDir string) (Snapshot, bool, error) {
-	data, err := os.ReadFile(Path(campDir))
+func Load(env string) (Snapshot, bool, error) {
+	data, err := os.ReadFile(Path(env))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Snapshot{}, false, nil
 		}
-		return Snapshot{}, false, fmt.Errorf("reading %s: %w", Path(campDir), err)
+		return Snapshot{}, false, fmt.Errorf("reading %s: %w", Path(env), err)
 	}
 
 	records, err := enc.Parse(withoutHeader(data))
 	if err != nil {
-		return Snapshot{}, true, fmt.Errorf("%s: %w", Path(campDir), err)
+		return Snapshot{}, true, fmt.Errorf("%s: %w", Path(env), err)
 	}
 
 	snapshot := Snapshot{}
@@ -155,7 +156,7 @@ func Load(campDir string) (Snapshot, bool, error) {
 		if len(record) < 3 {
 			return Snapshot{}, true, fmt.Errorf("%s line %d has %d fields and "+
 				"a record has three, or four for a symlink",
-				Path(campDir), number+1, len(record))
+				Path(env), number+1, len(record))
 		}
 		entry := Entry{Side: Side(record[0]), Type: pathx.Type(record[1]), Name: record[2]}
 		if len(record) > 3 {
@@ -253,8 +254,8 @@ func Compare(accepted, current Snapshot) []Difference {
 // A missing snapshot is refused rather than generated: an up that wrote
 // the file it was supposed to be checked against would swallow the signal
 // entirely.
-func Check(campDir string, current Snapshot) (refused refusal.List, warnings []string) {
-	accepted, found, err := Load(campDir)
+func Check(env string, current Snapshot) (refused refusal.List, warnings []string) {
+	accepted, found, err := Load(env)
 	switch {
 	case err != nil:
 		refused.Add("inventory-unreadable",
@@ -275,7 +276,7 @@ func Check(campDir string, current Snapshot) (refused refusal.List, warnings []s
 				"  camp accept\n"+
 				"camp does not write the file on its own: an up that generated the "+
 				"snapshot it was supposed to check against would swallow the "+
-				"signal the file exists to raise.", Path(campDir))
+				"signal the file exists to raise.", Path(env))
 		return refused, nil
 	}
 
@@ -284,7 +285,7 @@ func Check(campDir string, current Snapshot) (refused refusal.List, warnings []s
 			warnings = append(warnings, difference.Describe())
 			continue
 		}
-		refused.Group(unaccepted(difference.Kind, campDir), "%s", difference.Describe())
+		refused.Group(unaccepted(difference.Kind, env), "%s", difference.Describe())
 	}
 	return refused, warnings
 }
@@ -296,7 +297,7 @@ func Check(campDir string, current Snapshot) (refused refusal.List, warnings []s
 // a workspace somebody has been working in grows them in batches. The
 // path of the snapshot is the same for every subject, which is what lets
 // them gather.
-func unaccepted(kind, campDir string) refusal.Group {
+func unaccepted(kind, env string) refusal.Group {
 	return refusal.Group{
 		Rule: "inventory-" + kind,
 		One:  "the accepted snapshot does not have it this way:",
@@ -304,15 +305,15 @@ func unaccepted(kind, campDir string) refusal.Group {
 		Detail: "Such a name is not covered by a read-only bind and not in the " +
 			"exclude, because both were derived from the snapshot you accepted. " +
 			"Look at it, and then accept the new state:\n  camp accept\n" +
-			"The snapshot is at " + Path(campDir) + " and its diff is meant to be " +
+			"The snapshot is at " + Path(env) + " and its diff is meant to be " +
 			"read.",
 	}
 }
 
 // Report renders the comparison for down and for the end of a session,
 // where it never blocks -- only tells.
-func Report(campDir string, current Snapshot) string {
-	accepted, found, err := Load(campDir)
+func Report(env string, current Snapshot) string {
+	accepted, found, err := Load(env)
 	if err != nil || !found {
 		return ""
 	}

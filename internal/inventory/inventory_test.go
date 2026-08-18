@@ -84,7 +84,7 @@ func TestANewCodeRootEntryOnlyWarns(t *testing.T) {
 func TestAMissingSnapshotIsRefusedAndNotGenerated(t *testing.T) {
 	env := testenv.NewEnv(t)
 	cfg := env.Config(t, "")
-	path := inventory.Path(cfg.CampDir())
+	path := inventory.Path(cfg.Env)
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestTheSnapshotIsSortedByBytesAndSurvivesHostileNames(t *testing.T) {
 	env := testenv.NewEnv(t)
 	cfg := env.Config(t, "")
 
-	data, err := os.ReadFile(inventory.Path(cfg.CampDir()))
+	data, err := os.ReadFile(inventory.Path(cfg.Env))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestTheSnapshotIsSortedByBytesAndSurvivesHostileNames(t *testing.T) {
 	testenv.Write(t, filepath.Join(env.Workspace, "two\tcolumns"), "x\n")
 	env.Accept(t, cfg)
 
-	snapshot, found, err := inventory.Load(cfg.CampDir())
+	snapshot, found, err := inventory.Load(cfg.Env)
 	if err != nil || !found {
 		t.Fatalf("the snapshot did not read back: found=%v err=%v", found, err)
 	}
@@ -161,7 +161,7 @@ func TestTheSnapshotIsSortedByBytesAndSurvivesHostileNames(t *testing.T) {
 func TestADamagedSnapshotIsRefusedRatherThanIgnored(t *testing.T) {
 	env := testenv.NewEnv(t)
 	cfg := env.Config(t, "")
-	if err := os.WriteFile(inventory.Path(cfg.CampDir()), []byte("bad\\qline\n"), 0o644); err != nil {
+	if err := os.WriteFile(inventory.Path(cfg.Env), []byte("bad\\qline\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

@@ -2,7 +2,6 @@ package reports_test
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,9 +12,9 @@ import (
 // found has to reach somebody by another route: a file, printed once by
 // whichever camp command comes next in that environment.
 func TestAReportIsPrintedOnceAndThenMarked(t *testing.T) {
-	campDir := filepath.Join(t.TempDir(), ".camp")
+	env := t.TempDir()
 
-	path, err := reports.Write(campDir, "abc123def456", "the session found something\n")
+	path, err := reports.Write(env, "abc123def456", "the session found something\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,12 +22,12 @@ func TestAReportIsPrintedOnceAndThenMarked(t *testing.T) {
 		t.Errorf("the report is named %q and should name its composition", path)
 	}
 
-	if unseen := reports.Unseen(campDir); len(unseen) != 1 {
+	if unseen := reports.Unseen(env); len(unseen) != 1 {
 		t.Fatalf("%d unseen reports, wanted 1", len(unseen))
 	}
 
 	var shown []string
-	reports.Show(campDir, func(text string) { shown = append(shown, text) })
+	reports.Show(env, func(text string) { shown = append(shown, text) })
 	if len(shown) != 1 {
 		t.Fatalf("the report was shown %d times, wanted once", len(shown))
 	}
@@ -37,14 +36,14 @@ func TestAReportIsPrintedOnceAndThenMarked(t *testing.T) {
 	}
 
 	shown = nil
-	reports.Show(campDir, func(text string) { shown = append(shown, text) })
+	reports.Show(env, func(text string) { shown = append(shown, text) })
 	if len(shown) != 0 {
 		t.Errorf("the report was shown again: %v", shown)
 	}
 
 	// Renamed, not deleted: it is the record of what a session found, and
 	// camp only stops putting it in front of you.
-	if seen := reports.Seen(campDir); len(seen) != 1 {
+	if seen := reports.Seen(env); len(seen) != 1 {
 		t.Fatalf("%d reports kept, wanted 1", len(seen))
 	}
 	if _, err := os.Stat(path + reports.SeenSuffix); err != nil {
@@ -58,12 +57,12 @@ func TestAReportIsPrintedOnceAndThenMarked(t *testing.T) {
 // Nothing to say means no file at all: an environment where every session
 // ended cleanly should not accumulate empty reports.
 func TestAnEnvironmentWithNoReportsIsQuiet(t *testing.T) {
-	campDir := filepath.Join(t.TempDir(), ".camp")
-	if unseen := reports.Unseen(campDir); len(unseen) != 0 {
+	env := t.TempDir()
+	if unseen := reports.Unseen(env); len(unseen) != 0 {
 		t.Errorf("found %v in an environment with no reports", unseen)
 	}
 	var shown []string
-	reports.Show(campDir, func(text string) { shown = append(shown, text) })
+	reports.Show(env, func(text string) { shown = append(shown, text) })
 	if len(shown) != 0 {
 		t.Errorf("something was printed: %v", shown)
 	}
@@ -72,19 +71,19 @@ func TestAnEnvironmentWithNoReportsIsQuiet(t *testing.T) {
 // Several sessions of one composition do not overwrite one another, and
 // they come out oldest first.
 func TestSeveralReportsAreKeptApartAndOrdered(t *testing.T) {
-	campDir := filepath.Join(t.TempDir(), ".camp")
+	env := t.TempDir()
 	for _, body := range []string{"first\n", "second\n"} {
-		if _, err := reports.Write(campDir, "abc123def456", body); err != nil {
+		if _, err := reports.Write(env, "abc123def456", body); err != nil {
 			t.Fatal(err)
 		}
 		// The name carries a second-resolution timestamp; two written in the
 		// same second are one file, which is a real limit worth knowing
 		// rather than a bug worth hiding.
-		if len(reports.Unseen(campDir)) == 2 {
+		if len(reports.Unseen(env)) == 2 {
 			break
 		}
 	}
-	unseen := reports.Unseen(campDir)
+	unseen := reports.Unseen(env)
 	if len(unseen) == 0 {
 		t.Fatal("nothing was written")
 	}

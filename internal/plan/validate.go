@@ -90,7 +90,7 @@ func (c *checker) run() (Plan, refusal.List) {
 	// The accepted snapshot: a new name at the workspace root changes what
 	// the derived binds protect and what the exclude covers, so it has to
 	// be a change somebody decided rather than one that happened.
-	problems, warnings := inventory.Check(c.cfg.CampDir(), inventory.Take(lowerRoot, upperRoot))
+	problems, warnings := inventory.Check(c.cfg.Env, inventory.Take(lowerRoot, upperRoot))
 	c.refused.Extend(problems)
 	built.Warnings = append(c.warnings, warnings...)
 

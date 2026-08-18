@@ -16,10 +16,11 @@ import (
 // on it.
 //
 // The rule it enforces: every filesystem write in camp goes through the
-// fsx package, whose only addressing is an Area, and no Area can be
-// constructed from a repository path. So a write target cannot be derived
-// from a repository path even by accident, and a reviewer checking the
-// write sites has one file to read instead of a whole tree to search.
+// fsx package, whose only addressing is an Area -- a base camp trusts and
+// the components below it, each resolved following no symlink and never
+// leaving the base. So a reviewer checking where camp writes has one file
+// to read instead of a whole tree to search, and confine_test.go beside
+// it measures that the addressing holds against a symlink and a swap.
 //
 // This does not replace reading the code once. It keeps the answer true
 // afterwards, which is the part a person cannot do by hand every time.

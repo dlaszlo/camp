@@ -259,7 +259,7 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	// for.
 	stderr := report.To(os.Stderr)
 	defer stderr.Close()
-	if file, err := logs.Open(built.Config.CampDir()); err == nil {
+	if file, err := logs.Open(built.Config.Env); err == nil {
 		stderr.Keep(file)
 	}
 	say := report.Narrate(stderr)
@@ -346,7 +346,7 @@ func farewell(built plan.Plan, stderr io.Writer) {
 		return
 	}
 	body := "the session at " + built.Live + " ended.\n\n" + found.String()
-	if _, err := reports.Write(built.Config.CampDir(), built.Hash, body); err != nil {
+	if _, err := reports.Write(built.Config.Env, built.Hash, body); err != nil {
 		fmt.Fprintf(stderr, "camp: the end-of-session report could not be "+
 			"written: %v\n", err)
 	}

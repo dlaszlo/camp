@@ -141,15 +141,30 @@ type Record struct {
 // Dir is where records live: the invoking user's state directory, always
 // resolved in the invoking user's environment.
 func Dir() string {
+	base, name := where()
+	return filepath.Join(base, name)
+}
+
+// where splits that into the directory camp writes in and camp's own name
+// inside it.
+//
+// Split because the two halves are trusted differently. The user's state
+// directory is the user's -- camp neither made it nor vouches for it --
+// and camp's own directory below it is resolved from there following no
+// symlink, like every other place camp writes.
+func where() (string, string) {
 	if base := os.Getenv("XDG_STATE_HOME"); base != "" {
-		return filepath.Join(base, "camp")
+		return base, "camp"
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "camp")
+		return os.TempDir(), "camp"
 	}
-	return filepath.Join(home, ".local", "state", "camp")
+	return filepath.Join(home, ".local", "state"), "camp"
 }
+
+// area is where camp's records are written.
+func area() fsx.Area { return fsx.State(where()) }
 
 // Path is one record's file.
 func Path(hash string) string { return filepath.Join(Dir(), hash+".json") }
@@ -206,7 +221,7 @@ func FromPlan(built plan.Plan, tool, configDigest, inventoryDigest string, uid, 
 // nobody else's business.
 func (r Record) Save() error {
 	r.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	area := fsx.State(Dir())
+	area := area()
 	if err := area.Ensure(0o700); err != nil {
 		return err
 	}
@@ -394,7 +409,7 @@ func All() []Listing {
 // Forget removes one record and nothing else. Not a repository, not the
 // storage, not the composed tree -- one file.
 func Forget(hash string) error {
-	return fsx.State(Dir()).Remove(hash + ".json")
+	return area().Remove(hash + ".json")
 }
 
 // Presence is what the machine says about one recorded mount.

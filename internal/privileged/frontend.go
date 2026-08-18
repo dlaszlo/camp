@@ -64,6 +64,35 @@ type UpInput struct {
 	Say *report.Narrator
 }
 
+// recordsOutsideRepositories refuses to keep the state record inside one
+// of the repositories being composed.
+//
+// The record's directory is the user's own state directory, and
+// XDG_STATE_HOME may name anything -- including a directory inside the
+// code repository, in which case camp would write a file into a
+// repository at every up. Nothing about the path is wrong enough for the
+// filesystem to notice: it is the one place camp writes that it did not
+// choose, so it is checked rather than confined.
+func recordsOutsideRepositories(built plan.Plan) *refusal.R {
+	directory := state.Dir()
+	for _, repository := range built.Config.Repositories {
+		root := repository.Path.Join(built.Config.Env)
+		if !pathx.Under(directory, root) {
+			continue
+		}
+		problem := refusal.New("state-in-repository",
+			"camp's records would be written to %s, which is inside the "+
+				"repository %q (%s).\n"+
+				"That directory is where the privileged mode keeps what it has to "+
+				"undo, and camp writes into no repository, ever. It is chosen by "+
+				"XDG_STATE_HOME, or by $HOME/.local/state when that is unset. Point "+
+				"XDG_STATE_HOME somewhere outside the repositories and run this "+
+				"again.", directory, repository.Name, root)
+		return &problem
+	}
+	return nil
+}
+
 // Left says what is on the machine now. Only Up knows: the same failure
 // list is reached from exits that removed everything again and from exits
 // that deliberately left the composition standing, and the sentence that
@@ -92,12 +121,16 @@ func Up(in UpInput) (Left, refusal.List) {
 	var refused refusal.List
 	built := in.Plan
 
+	if problem := recordsOutsideRepositories(built); problem != nil {
+		refused.Push(*problem)
+		return Clean, refused
+	}
 	if err := compose.Directories(built); err != nil {
 		refused.Add("directories", "%v", err)
 		return Clean, refused
 	}
 
-	work := fsx.Work(built.Work)
+	work := fsx.Work(built.Config.Env, built.Hash)
 	staging, err := work.MkdirAllMode(0o700, "staging")
 	if err != nil {
 		refused.Add("staging", "%v", err)

@@ -149,10 +149,15 @@ func clearWork(job Job) error {
 	if err := campsOwn(work); err != nil {
 		return err
 	}
-	if err := fsx.Work(work).RemoveTree("work"); err != nil {
+	// Addressed from the job's own base -- which confine has already
+	// established the invoking user owns -- and by component, so that root
+	// removing and giving away a tree cannot be redirected by a symlink
+	// somewhere in it. The components were checked to be plain names.
+	area := fsx.At("work", job.Base, job.WorkParts...)
+	if err := area.RemoveTree("work"); err != nil {
 		return err
 	}
-	if err := fsx.Work(work).Chown(job.UID, job.GID); err != nil && !os.IsNotExist(err) {
+	if err := area.Chown(job.UID, job.GID); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil

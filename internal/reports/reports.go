@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/fsx"
 )
 
@@ -32,15 +33,15 @@ import (
 const SeenSuffix = ".seen"
 
 // Dir is where reports live for an environment.
-func Dir(campDir string) string { return filepath.Join(campDir, "reports") }
+func Dir(env string) string { return filepath.Join(env, config.Dir, "reports") }
 
 // Write leaves one report behind.
 //
 // Named by the composition and the moment, so several sessions of the
 // same composition do not overwrite one another, and so the file itself
 // says when it was written.
-func Write(campDir, hash string, body string) (string, error) {
-	area := fsx.Reports(Dir(campDir))
+func Write(env, hash string, body string) (string, error) {
+	area := fsx.Reports(env)
 	if err := area.Ensure(0o755); err != nil {
 		return "", err
 	}
@@ -52,8 +53,8 @@ func Write(campDir, hash string, body string) (string, error) {
 }
 
 // Unseen returns the reports nobody has been shown yet, oldest first.
-func Unseen(campDir string) []string {
-	entries, err := os.ReadDir(Dir(campDir))
+func Unseen(env string) []string {
+	entries, err := os.ReadDir(Dir(env))
 	if err != nil {
 		return nil
 	}
@@ -68,7 +69,7 @@ func Unseen(campDir string) []string {
 
 	paths := make([]string, 0, len(names))
 	for _, name := range names {
-		paths = append(paths, filepath.Join(Dir(campDir), name))
+		paths = append(paths, filepath.Join(Dir(env), name))
 	}
 	return paths
 }
@@ -87,8 +88,13 @@ func Read(path string) (string, error) {
 // Renamed rather than removed: it is the record of what a session found,
 // and somebody may want to read it a second time. camp simply stops
 // putting it in front of them.
-func MarkSeen(path string) error {
-	area := fsx.Reports(filepath.Dir(path))
+//
+// The environment is passed rather than derived from the path, because
+// the write has to be addressed from a directory camp trusts down: a
+// report is named by whatever listed the directory, and camp does not
+// write to a place it worked out from a string it was handed.
+func MarkSeen(env, path string) error {
+	area := fsx.Reports(env)
 	name := filepath.Base(path)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -101,15 +107,15 @@ func MarkSeen(path string) error {
 }
 
 // Seen returns the reports that have been shown, for doctor to list.
-func Seen(campDir string) []string {
-	entries, err := os.ReadDir(Dir(campDir))
+func Seen(env string) []string {
+	entries, err := os.ReadDir(Dir(env))
 	if err != nil {
 		return nil
 	}
 	var paths []string
 	for _, entry := range entries {
 		if strings.HasSuffix(entry.Name(), SeenSuffix) {
-			paths = append(paths, filepath.Join(Dir(campDir), entry.Name()))
+			paths = append(paths, filepath.Join(Dir(env), entry.Name()))
 		}
 	}
 	sort.Strings(paths)
@@ -122,14 +128,14 @@ func Seen(campDir string) []string {
 // session's findings reach whoever comes back to the environment next --
 // which, for a detached session, is the only moment there is anybody to
 // tell.
-func Show(campDir string, out func(string)) {
-	for _, path := range Unseen(campDir) {
+func Show(env string, out func(string)) {
+	for _, path := range Unseen(env) {
 		body, err := Read(path)
 		if err != nil {
 			continue
 		}
 		out(fmt.Sprintf("a session that ended left this behind (%s):\n\n%s\n",
 			path, strings.TrimRight(body, "\n")))
-		_ = MarkSeen(path)
+		_ = MarkSeen(env, path)
 	}
 }

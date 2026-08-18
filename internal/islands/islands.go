@@ -224,7 +224,7 @@ func Scaffold(storage fsx.Area, manifest *Manifest, expansion Expansion) (refusa
 		}
 	}
 
-	notes := retire(manifest, expansion)
+	notes := retire(storage, manifest, expansion)
 	return refused, notes
 }
 
@@ -294,7 +294,7 @@ func untouched(path string, kind pathx.Type) (bool, error) {
 // permits. A modified one is left where it is, struck from the manifest
 // and reported -- it has become ordinary water content, which is the
 // user's.
-func retire(manifest *Manifest, expansion Expansion) []string {
+func retire(storage fsx.Area, manifest *Manifest, expansion Expansion) []string {
 	var notes []string
 
 	needed := map[string]bool{}
@@ -329,15 +329,10 @@ func retire(manifest *Manifest, expansion Expansion) []string {
 			continue
 		}
 		_ = manifest.Remove(relative)
-		_ = removeEmpty(expansion.Store, name, kind)
+		// Removed through the storage area and by component -- the same route
+		// the attachment point was created by -- so that camp's own object is
+		// the only thing this can ever reach.
+		_ = storage.Remove(append(expansion.Target.Components(), name)...)
 	}
 	return notes
-}
-
-func removeEmpty(store, name string, kind pathx.Type) error {
-	area := fsx.Storage(store)
-	if kind == pathx.Dir {
-		return area.Remove(name)
-	}
-	return area.Remove(name)
 }

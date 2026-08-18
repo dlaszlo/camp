@@ -213,7 +213,7 @@ func (r *Report) gate(built plan.Plan) {
 
 func (r *Report) inventory(built plan.Plan) {
 	current := inventory.Take(built.LowerRoot, built.UpperRoot)
-	r.Inventory = inventory.Report(built.Config.CampDir(), current)
+	r.Inventory = inventory.Report(built.Config.Env, current)
 }
 
 // Refresh re-reads both roots and runs the whole pass. Used at the end of

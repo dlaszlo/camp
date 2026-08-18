@@ -230,7 +230,7 @@ func makeLive(cfg config.Config, say *report.Narrator) error {
 					"not into one.", live, repo.Name)
 		}
 	}
-	if err := fsx.Live(live).Ensure(0o755); err != nil {
+	if err := fsx.Live(cfg.Env, cfg.Merged.Components()...).Ensure(0o755); err != nil {
 		return failure(ExitPrecondition, "",
 			"the composed tree's directory %s could not be created: %v", live, err)
 	}
