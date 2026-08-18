@@ -107,74 +107,79 @@ func descend(cfg config.Config, lowerPath, upperPath string, rel pathx.Rel, lowe
 	return refused
 }
 
+// The overlap gate's two refusals, in the shape a rule that fires many
+// times has to have: what happens at one name is on that name's own line,
+// and the explanation is written once for however many there are.
+//
+// A composition that has drifted has drifted at several names at once --
+// that is what a migration half-done looks like -- and the reader's next
+// move is the same for all of them. Nine copies of these paragraphs would
+// bury the nine paths that are the only thing to act on.
+func overlapGroup(cfg config.Config) refusal.Group {
+	return refusal.Group{
+		Rule: "overlap",
+		One:  "a name exists in both repositories and allow_overlap does not name it:",
+		Many: "%d names exist in both repositories and allow_overlap names none " +
+			"of them:",
+		Detail: "A merge is a decision about which repository owns a directory: a " +
+			"file created in a merged directory lands in the code repository, " +
+			"whatever it looked like it belonged to. A name that is not a " +
+			"directory on both sides is not merged at all -- the upper layer wins " +
+			"outright, and the workspace's copy stays on disk and is invisible in " +
+			"the tree you are working in. camp makes neither choice silently.\n" +
+			"Two ways out, and nothing is mounted yet, so both are safe to do " +
+			"right now:\n" +
+			"  - move or rename one side of each pair, which is what the migration " +
+			"is for; or\n" +
+			"  - decide an overlap is intended and write it down, by adding the " +
+			"name to allow_overlap in " + cfg.Source + ". Inside an allow-listed " +
+			"directory camp keeps checking one level further down, because a file " +
+			"on both sides of a merged directory is what a copy-up leaves behind.",
+	}
+}
+
+// Inside an allow-listed directory there is no knob to point at.
+// allow_overlap names root entries, and the check deliberately moves one
+// level down rather than switching off -- so the advice that fits the
+// root case sends the reader to a setting that is already there and would
+// change nothing. Measured on a real composition: after a copy-up through
+// an allow-listed directory, the refusal named the file and then advised
+// adding the directory, which was allow-listed already.
+func copyUpGroup() refusal.Group {
+	return refusal.Group{
+		Rule: "overlap",
+		One: "a file exists on both sides of an allow-listed directory, which " +
+			"is what a copy-up leaves behind:",
+		Many: "%d files exist on both sides of an allow-listed directory, which " +
+			"is what a copy-up leaves behind:",
+		Detail: "A write through the composed tree copied the workspace's file " +
+			"into the code repository, and both stand there now. allow_overlap " +
+			"cannot name these -- it names root entries, and inside an " +
+			"allow-listed directory the check moves one level down rather than " +
+			"switching off, because this trace is the thing it exists to catch.\n" +
+			"Decide which copy is the real one, and remove or rename the other. " +
+			"Nothing is mounted, so both are safe to do right now.",
+	}
+}
+
 func overlapRefusal(cfg config.Config, lowerPath, upperPath string, rel pathx.Rel, lower, upper pathx.Info) refusal.R {
 	path := rel.String()
 	lowerFull := filepath.Join(lowerPath, path)
 	upperFull := filepath.Join(upperPath, path)
 
-	var consequence string
-	switch {
-	case lower.Type == pathx.Dir && upper.Type == pathx.Dir:
-		consequence = "Both are directories, so the overlay would merge them: the " +
-			"composed tree would show the two repositories' entries side by side " +
-			"in one directory, and a new file created there would land in the " +
-			"code repository whatever it looked like it belonged to. Which " +
-			"repository owns that directory is a decision, and camp will not " +
-			"make it silently."
-	case upper.Type == pathx.File || upper.Type == pathx.Dir:
-		consequence = fmt.Sprintf(
-			"The side that matters is the code repository's: the upper layer wins "+
-				"outright for a name that is not a directory on both sides, so the "+
-				"composed tree would show %s and the workspace's copy would be "+
-				"unreachable -- present on disk, invisible in the tree you are "+
-				"working in.", upperFull)
-	default:
-		consequence = "The upper layer wins outright, so the workspace's copy " +
-			"would be unreachable from the composed tree."
+	consequence := "the code repository's copy wins and the workspace's is " +
+		"unreachable"
+	if lower.Type == pathx.Dir && upper.Type == pathx.Dir {
+		consequence = "the overlay would merge the two"
 	}
+	subject := fmt.Sprintf("%q: workspace %s (%s) and code %s (%s) -- %s",
+		path, lowerFull, lower.Type, upperFull, upper.Type, consequence)
 
-	// Inside an allow-listed directory there is no knob to point at.
-	// allow_overlap names root entries, and the check deliberately moves
-	// one level down rather than switching off -- so the advice that fits
-	// the root case sends the reader to a setting that is already there
-	// and would change nothing. Measured on a real composition: after a
-	// copy-up through an allow-listed directory, the refusal named the
-	// file and then advised adding the directory, which was allow-listed
-	// already.
 	if len(rel.Components()) > 1 {
-		return refusal.New("overlap",
-			"%q exists in both repositories, inside the allow-listed directory "+
-				"%q.\n"+
-				"  workspace: %s (%s)\n"+
-				"  code:      %s (%s)\n"+
-				"%s\n"+
-				"This is what a copy-up leaves behind: a write through the composed "+
-				"tree copied the workspace's file into the code repository, and both "+
-				"stand there now. allow_overlap cannot name this one -- it names "+
-				"root entries, and inside an allow-listed directory the check moves "+
-				"one level down rather than switching off, because this trace is "+
-				"the thing it exists to catch.\nDecide which copy is the real one, "+
-				"and remove or rename the other. Nothing is mounted, so both are "+
-				"safe to do right now.",
-			path, rel.First(), lowerFull, lower.Type, upperFull, upper.Type,
-			consequence)
+		return refusal.Of(copyUpGroup(), "%s, inside the allow-listed directory %q",
+			subject, rel.First())
 	}
-
-	return refusal.New("overlap",
-		"%q exists in both repositories and allow_overlap does not name it.\n"+
-			"  workspace: %s (%s)\n"+
-			"  code:      %s (%s)\n"+
-			"%s\n"+
-			"Two ways out, and nothing is mounted yet, so both are safe to do "+
-			"right now:\n"+
-			"  - move or rename one of the two, which is what the migration is "+
-			"for; or\n"+
-			"  - decide the overlap is intended and write it down, by adding "+
-			"%q to allow_overlap in %s. Inside an allow-listed directory camp "+
-			"keeps checking one level further down, because a file on both sides "+
-			"of a merged directory is what a copy-up leaves behind.",
-		path, lowerFull, lower.Type, upperFull, upper.Type, consequence,
-		rel.First(), cfg.Source)
+	return refusal.Of(overlapGroup(cfg), "%s", subject)
 }
 
 // GateSummary renders what the gate compared, for plan and doctor: how

@@ -27,7 +27,12 @@ import (
 
 // Refusals renders every refusal, one paragraph each, numbered when there
 // is more than one so that a reader can talk about "the second one".
+//
+// One paragraph per problem, not per subject: a check that fired for nine
+// mounts is one refusal here, naming the nine. Nine copies of the same
+// three paragraphs would bury the only thing in them that differs.
 func Refusals(list refusal.List) string {
+	list = list.Merge()
 	if list.Empty() {
 		return ""
 	}

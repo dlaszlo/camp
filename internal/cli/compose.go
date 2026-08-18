@@ -145,7 +145,7 @@ func refusedComposition(refused refusal.List) error {
 		"nothing was mounted, and nothing has to be undone -- every one of "+
 			"these can be repaired by hand right now",
 		"this composition cannot be brought up. %d thing(s) stop it:\n\n%s",
-		len(refused), strings.TrimRight(report.Refusals(refused), "\n"))
+		refused.Count(), strings.TrimRight(report.Refusals(refused), "\n"))
 }
 
 // runtimeChecks are the refusals that need the machine's current state

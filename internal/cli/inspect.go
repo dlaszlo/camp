@@ -196,7 +196,7 @@ func statusFromConfiguration(ctx *context, file string, table []mountinfo.Entry)
 		return nil
 	}
 	ctx.printf("\n%d thing(s) do not match the plan this configuration derives "+
-		"today:\n\n%s", len(problems), report.Refusals(problems))
+		"today:\n\n%s", problems.Count(), report.Refusals(problems))
 	return failure(ExitPrecondition, "", "run 'camp down' to take it apart")
 }
 

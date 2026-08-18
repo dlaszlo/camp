@@ -284,15 +284,29 @@ func Check(campDir string, current Snapshot) (refused refusal.List, warnings []s
 			warnings = append(warnings, difference.Describe())
 			continue
 		}
-		refused.Add("inventory-"+difference.Kind,
-			"%s, and the accepted snapshot does not have it that way.\n"+
-				"That name is not covered by a read-only bind and not in the "+
-				"exclude, because both were derived from the snapshot you accepted. "+
-				"Look at it, and then accept the new state:\n  camp accept\n"+
-				"The snapshot is at %s and its diff is meant to be read.",
-			difference.Describe(), Path(campDir))
+		refused.Group(unaccepted(difference.Kind, campDir), "%s", difference.Describe())
 	}
 	return refused, warnings
+}
+
+// unaccepted is how a blocking difference says itself.
+//
+// One group per kind, because a new name and a changed type are two
+// different things to look at -- but several new names are one thing, and
+// a workspace somebody has been working in grows them in batches. The
+// path of the snapshot is the same for every subject, which is what lets
+// them gather.
+func unaccepted(kind, campDir string) refusal.Group {
+	return refusal.Group{
+		Rule: "inventory-" + kind,
+		One:  "the accepted snapshot does not have it this way:",
+		Many: "the accepted snapshot does not have %d of these this way:",
+		Detail: "Such a name is not covered by a read-only bind and not in the " +
+			"exclude, because both were derived from the snapshot you accepted. " +
+			"Look at it, and then accept the new state:\n  camp accept\n" +
+			"The snapshot is at " + Path(campDir) + " and its diff is meant to be " +
+			"read.",
+	}
 }
 
 // Report renders the comparison for down and for the end of a session,

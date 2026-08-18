@@ -164,12 +164,7 @@ func (c *checker) checkSessionEnvironment() []Variable {
 // ambiguous too. So the name is refused rather than half-handled.
 func (c *checker) checkNames() {
 	report := func(kind, name string) {
-		c.refused.Add("name-newline",
-			"%s contains a line break: %q.\n"+
-				"camp refuses such a name outright. It cannot be written as a "+
-				"gitignore pattern -- the attempt silently ignores the file it meant "+
-				"and hides two unrelated names instead -- and every report camp "+
-				"prints a name into would become ambiguous. Rename it.", kind, name)
+		c.refused.Group(newlineNames, "%s: %q", kind, name)
 	}
 	for _, repo := range c.cfg.Repositories {
 		if pathx.HasNewline(repo.Name) {
@@ -196,6 +191,75 @@ func (c *checker) checkNames() {
 	}
 }
 
+var newlineNames = refusal.Group{
+	Rule: "name-newline",
+	One:  "a configured name contains a line break:",
+	Many: "%d configured names contain a line break:",
+	Detail: "camp refuses such a name outright. It cannot be written as a " +
+		"gitignore pattern -- the attempt silently ignores the file it meant " +
+		"and hides two unrelated names instead -- and every report camp prints " +
+		"a name into would become ambiguous. Rename it.",
+}
+
+// What a declared repository can be wrong about. A configuration written
+// against a tree that has moved is wrong about several of them at once,
+// and the reader fixes them in one pass over one file.
+var (
+	unreadableRepositories = refusal.Group{
+		Rule: "repository-unreadable",
+		One:  "a declared repository could not be looked at:",
+		Many: "%d declared repositories could not be looked at:",
+		Detail: "Every component of the path is opened without following a " +
+			"symlink, because a bind mount follows them and one symlink in a " +
+			"repository path could pull any directory on this machine into the " +
+			"composition.",
+	}
+	missingRepositories = refusal.Group{
+		Rule: "repository-missing",
+		One:  "a declared repository is not there:",
+		Many: "%d declared repositories are not there:",
+		Detail: "camp neither clones nor creates repositories. Either the path is " +
+			"wrong, or the repository has not been checked out yet:\n" +
+			"  git clone <url> <the path above>",
+	}
+	symlinkRepositories = refusal.Group{
+		Rule: "repository-symlink",
+		One:  "a declared repository is a symbolic link:",
+		Many: "%d declared repositories are symbolic links:",
+		Detail: "camp follows no symlink in a mount operand. A link can be " +
+			"repointed between the moment camp checks it and the moment the " +
+			"kernel mounts it, and the check would then be about a different " +
+			"directory than the mount. Write the real path in env: and the " +
+			"repository path.",
+	}
+	repositoryTypes = refusal.Group{
+		Rule: "repository-not-directory",
+		One:  "a declared repository is not a directory:",
+		Many: "%d declared repositories are not directories:",
+		Detail: "A repository is a directory camp binds or overlays. Nothing else " +
+			"can play the part.",
+	}
+	sameRepositories = refusal.Group{
+		Rule: "repository-same",
+		One:  "two declared repositories are the same directory:",
+		Many: "%d pairs of declared repositories are the same directory:",
+		Detail: "They are compared by what the kernel says they are, not by how " +
+			"they are spelled, because two different strings routinely name one " +
+			"directory. One directory cannot play two parts in a composition. " +
+			"Correct one path of each pair.",
+	}
+	nestedRepositories = refusal.Group{
+		Rule: "repository-nested",
+		One:  "a declared repository is inside another:",
+		Many: "%d declared repositories are inside another:",
+		Detail: "Nested repositories cannot be composed: the outer one's content " +
+			"already contains the inner one, so mounting both makes the same " +
+			"files appear twice with different rules, and a write through one " +
+			"path would land somewhere the other path does not agree with. Move " +
+			"one of them out.",
+	}
+)
+
 // checkRepositories looks at each participant and at how they sit
 // relative to one another.
 func (c *checker) checkRepositories() map[string]pathx.Info {
@@ -206,32 +270,19 @@ func (c *checker) checkRepositories() map[string]pathx.Info {
 		info, err := pathx.StatBeneath(c.cfg.Env, repo.Path.Components())
 		switch {
 		case err != nil:
-			c.refused.Add("repository-unreadable",
-				"the repository %q at %s could not be looked at: %v.\n"+
-					"Every component of the path is opened without following a "+
-					"symlink, because a bind mount follows them and one symlink in a "+
-					"repository path could pull any directory on this machine into "+
-					"the composition.", repo.Name, absolute, err)
+			c.refused.Group(unreadableRepositories, "%q at %s: %v",
+				repo.Name, absolute, err)
 			continue
 		case !info.Exists():
-			c.refused.Add("repository-missing",
-				"the repository %q is declared at %s, and there is nothing there.\n"+
-					"camp neither clones nor creates repositories. Either the path is "+
-					"wrong, or the repository has not been checked out yet:\n"+
-					"  git clone <url> %s", repo.Name, absolute, absolute)
+			c.refused.Group(missingRepositories, "%q is declared at %s",
+				repo.Name, absolute)
 			continue
 		case info.Type == pathx.Symlink:
-			c.refused.Add("repository-symlink",
-				"the repository %q at %s is a symbolic link to %q.\n"+
-					"camp follows no symlink in a mount operand. A link can be "+
-					"repointed between the moment camp checks it and the moment the "+
-					"kernel mounts it, and the check would then be about a different "+
-					"directory than the mount. Write the real path in env: and the "+
-					"repository path.", repo.Name, absolute, info.Link)
+			c.refused.Group(symlinkRepositories, "%q at %s points at %q",
+				repo.Name, absolute, info.Link)
 			continue
 		case info.Type != pathx.Dir:
-			c.refused.Add("repository-not-directory",
-				"the repository %q at %s is a %s, not a directory.",
+			c.refused.Group(repositoryTypes, "%q at %s is a %s",
 				repo.Name, absolute, info.Type)
 			continue
 		}
@@ -251,14 +302,8 @@ func (c *checker) checkRepositoryIdentity(found map[string]pathx.Info) {
 			continue
 		}
 		if other, clash := byIdentity[info.Ident]; clash {
-			c.refused.Add("repository-same",
-				"the repositories %q and %q are the same directory (%s and %s "+
-					"resolve to inode %s).\n"+
-					"They are compared by what the kernel says they are, not by how "+
-					"they are spelled, because two different strings routinely name "+
-					"one directory. One directory cannot play two parts in a "+
-					"composition. Correct one of the two paths.",
-				other, repo.Name,
+			c.refused.Group(sameRepositories, "%q and %q: %s and %s both resolve "+
+				"to inode %s", other, repo.Name,
 				c.cfg.RepositoryPath(other), repo.Path.Join(c.cfg.Env), info.Ident)
 			continue
 		}
@@ -281,13 +326,7 @@ func (c *checker) checkRepositoryNesting(found map[string]pathx.Info) {
 			outerPath := outer.Path.Join(c.cfg.Env)
 			innerPath := inner.Path.Join(c.cfg.Env)
 			if outerPath != innerPath && pathx.Under(innerPath, outerPath) {
-				c.refused.Add("repository-nested",
-					"the repository %q (%s) is inside the repository %q (%s).\n"+
-						"Nested repositories cannot be composed: the outer one's "+
-						"content already contains the inner one, so mounting both makes "+
-						"the same files appear twice with different rules, and a write "+
-						"through one path would land somewhere the other path does not "+
-						"agree with. Move one of them out.",
+				c.refused.Group(nestedRepositories, "%q (%s) is inside %q (%s)",
 					inner.Name, innerPath, outer.Name, outerPath)
 			}
 		}
@@ -420,6 +459,41 @@ func (c *checker) rootListings() ([]pathx.Info, []pathx.Info, bool) {
 // stand over a symlink, a socket, a FIFO or a device -- and a symlink at
 // the root is worse than unsupported, because binding it would follow it
 // out of the repository entirely.
+// What a workspace root entry can be that camp cannot protect. A
+// workspace somebody has been working in has several of them at once --
+// an editor's socket, a build directory's link -- so each is said once
+// with every name it fired for.
+var (
+	newlineRootEntries = refusal.Group{
+		Rule: "name-newline",
+		One:  "a workspace root entry contains a line break:",
+		Many: "%d workspace root entries contain a line break:",
+		Detail: "camp cannot write such a name as an exclude line -- the attempt " +
+			"silently ignores that name and hides two unrelated ones instead -- " +
+			"so the composition is refused rather than started with a hole in it. " +
+			"Rename it.",
+	}
+	symlinkRootEntries = refusal.Group{
+		Rule: "root-entry-symlink",
+		One:  "a workspace root entry is a symbolic link:",
+		Many: "%d workspace root entries are symbolic links:",
+		Detail: "camp protects every workspace root name with a read-only bind, " +
+			"and a bind follows symlinks: binding one would pull whatever the " +
+			"link points at into the composed tree and protect that instead. " +
+			"Replace it with a real file or directory, or cover it with a mount " +
+			"target of its own.",
+	}
+	rootEntryTypes = refusal.Group{
+		Rule: "root-entry-type",
+		One:  "a workspace root entry is something camp cannot bind:",
+		Many: "%d workspace root entries are things camp cannot bind:",
+		Detail: "camp binds a directory over a directory and a file over a file; " +
+			"there is nothing it can do with a socket, a FIFO or a device that " +
+			"would be honest. Remove it from the workspace root, or cover it with " +
+			"a mount target of its own.",
+	}
+)
+
 func (c *checker) checkRootTypes(lowerRoot []pathx.Info) {
 	covered := rootTargets(c.cfg)
 	for _, entry := range lowerRoot {
@@ -427,31 +501,17 @@ func (c *checker) checkRootTypes(lowerRoot []pathx.Info) {
 			continue
 		}
 		if pathx.HasNewline(entry.Name) {
-			c.refused.Add("name-newline",
-				"the workspace root entry %q contains a line break.\n"+
-					"camp cannot write it as an exclude line -- the attempt silently "+
-					"ignores that name and hides two unrelated ones instead -- so the "+
-					"composition is refused rather than started with a hole in it. "+
-					"Rename it in %s.", entry.Name, c.lower)
+			c.refused.Group(newlineRootEntries, "%q in %s", entry.Name, c.lower)
 			continue
 		}
 		switch entry.Type {
 		case pathx.Dir, pathx.File:
 		case pathx.Symlink:
-			c.refused.Add("root-entry-symlink",
-				"the workspace root entry %s/%s is a symbolic link to %q.\n"+
-					"camp protects every workspace root name with a read-only bind, "+
-					"and a bind follows symlinks: binding this one would pull %q into "+
-					"the composed tree and protect that instead. Replace it with a "+
-					"real file or directory, or cover it with a mount target of its "+
-					"own.", c.lower, entry.Name, entry.Link, entry.Link)
+			c.refused.Group(symlinkRootEntries, "%s/%s points at %q",
+				c.lower, entry.Name, entry.Link)
 		default:
-			c.refused.Add("root-entry-type",
-				"the workspace root entry %s/%s is a %s.\n"+
-					"camp binds a directory over a directory and a file over a file; "+
-					"there is nothing it can do with a %s that would be honest. "+
-					"Remove it from the workspace root, or cover it with a mount "+
-					"target of its own.", c.lower, entry.Name, entry.Type, entry.Type)
+			c.refused.Group(rootEntryTypes, "%s/%s is a %s",
+				c.lower, entry.Name, entry.Type)
 		}
 	}
 }

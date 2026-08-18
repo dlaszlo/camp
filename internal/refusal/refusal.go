@@ -26,6 +26,14 @@ type R struct {
 	Rule string
 	// Message is the whole explanation, in sentences.
 	Message string
+
+	// group and subjects are set for the rules that can fire many times in
+	// one run, and they are what lets nine mounts failing one check become
+	// one refusal naming nine paths. Unexported: grouping is this
+	// package's own business, and nothing outside it should be able to
+	// half-build a group by hand.
+	group    *Group
+	subjects []string
 }
 
 // Error lets a single refusal be returned as an error.
@@ -74,10 +82,12 @@ func (l List) Has(rule string) bool {
 	return false
 }
 
-// Error renders every refusal, one paragraph each.
+// Error renders every refusal, one paragraph each -- one per problem,
+// with the subjects of a repeated one gathered onto it.
 func (l List) Error() string {
-	parts := make([]string, 0, len(l))
-	for _, r := range l {
+	merged := l.Merge()
+	parts := make([]string, 0, len(merged))
+	for _, r := range merged {
 		parts = append(parts, r.Message)
 	}
 	return strings.Join(parts, "\n\n")
@@ -91,3 +101,101 @@ func (l List) Err() error {
 	}
 	return l
 }
+
+// Group is one problem a check can meet several times in one run.
+//
+// A rule that fires once per mount, once per root entry or once per pair
+// of names is not several problems. It is one problem with several
+// subjects, and a reader handed nine copies of the same three paragraphs
+// has to read all nine to find the nine paths in them. One paragraph and
+// a list of nine is the same information and a fraction of the reading.
+//
+// So a rule that can fire more than once says itself in four parts: the
+// opening for one subject, the opening for several, the explanation both
+// share, and -- passed separately, at each site the rule fires -- the
+// subject itself.
+//
+// Detail says nothing about any particular subject, and that is what
+// makes the grouping work at all: two refusals merge when their rule and
+// their explanation are identical, so a path or a name in the explanation
+// would give every subject a group of its own. Everything specific to one
+// subject belongs on its subject line.
+type Group struct {
+	// Rule is the identifier, as everywhere else.
+	Rule string
+	// One is the opening sentence when exactly one subject failed. It
+	// takes no arguments: the subject is on its own line under it.
+	One string
+	// Many is the opening for several, taking the count.
+	Many string
+	// Detail is the explanation and the repair, printed once however many
+	// subjects there are.
+	Detail string
+}
+
+// Of builds the refusal of one subject.
+//
+// The subject is one line, formatted by the caller: the path, the name,
+// the pair of paths, and whatever else belongs to this one instance --
+// which side is which, what type each end is, which step declared it.
+func Of(group Group, format string, args ...any) R {
+	subjects := []string{fmt.Sprintf(format, args...)}
+	return R{
+		Rule:     group.Rule,
+		Message:  compose(group, subjects),
+		group:    &group,
+		subjects: subjects,
+	}
+}
+
+// Group appends the refusal of one subject.
+func (l *List) Group(group Group, format string, args ...any) {
+	*l = append(*l, Of(group, format, args...))
+}
+
+// compose renders a group's refusal for the subjects it fired for.
+func compose(group Group, subjects []string) string {
+	opening := group.One
+	if len(subjects) != 1 {
+		opening = fmt.Sprintf(group.Many, len(subjects))
+	}
+	parts := append([]string{opening}, subjects...)
+	if group.Detail != "" {
+		parts = append(parts, group.Detail)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// Merge returns one refusal per problem: the refusals of one group, about
+// several subjects, become one refusal naming all of them.
+//
+// Order is the order each problem was first met, so the reader still
+// meets the checks in the order they ran. A refusal that belongs to no
+// group passes through untouched, which is every rule that can only ever
+// fire about one thing.
+func (l List) Merge() List {
+	merged := make(List, 0, len(l))
+	where := map[string]int{}
+	for _, item := range l {
+		if item.group == nil {
+			merged = append(merged, item)
+			continue
+		}
+		key := strings.Join([]string{item.Rule, item.group.One, item.group.Many,
+			item.group.Detail}, "\x00")
+		index, seen := where[key]
+		if !seen {
+			where[key] = len(merged)
+			item.subjects = append([]string(nil), item.subjects...)
+			merged = append(merged, item)
+			continue
+		}
+		merged[index].subjects = append(merged[index].subjects, item.subjects...)
+		merged[index].Message = compose(*merged[index].group, merged[index].subjects)
+	}
+	return merged
+}
+
+// Count is how many problems this list holds -- what a reader would
+// count, which is one per group and not one per subject.
+func (l List) Count() int { return len(l.Merge()) }

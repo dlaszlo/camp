@@ -113,6 +113,81 @@ func at(in Input, mount plan.Mount) string {
 	return mount.Rel.Join(in.Prefix)
 }
 
+// The checks that run once per mount, and so can fail for several mounts
+// in one pass. A composition that went wrong went wrong the same way at
+// every mount of its kind -- a whole sequence propagating, a whole
+// sequence writable -- and one paragraph with the list of paths is the
+// report that can be acted on.
+//
+// Nothing in a Detail names a path: that is what lets the mounts gather
+// onto one refusal.
+var (
+	unreachableSources = refusal.Group{
+		Rule: "verify-source-unreachable",
+		One:  "a mount source cannot be looked at after mounting:",
+		Many: "%d mount sources cannot be looked at after mounting:",
+		Detail: "The source was there when the plan was checked. Something has " +
+			"changed it since, and camp will not call a composition verified " +
+			"against a source it cannot see.",
+	}
+	unreachableTargets = refusal.Group{
+		Rule: "verify-target-unreachable",
+		One:  "a mount point cannot be looked at after mounting:",
+		Many: "%d mount points cannot be looked at after mounting:",
+		Detail: "The path is the authority here, not the kernel's table: a covered " +
+			"mount stays listed in the table and is reachable by nothing.",
+	}
+	wrongIdentity = refusal.Group{
+		Rule: "verify-identity",
+		One:  "a mount point does not show what was mounted on it:",
+		Many: "%d mount points do not show what was mounted on them:",
+		Detail: "Either the mount did not take, or a later mount is covering it " +
+			"-- a covered mount stays listed in the kernel's table and is " +
+			"reachable by nothing, so the table would not have shown this.",
+	}
+	unreachablePolarity = refusal.Group{
+		Rule: "verify-polarity-unreachable",
+		One:  "a mount cannot be asked whether it is writable:",
+		Many: "%d mounts cannot be asked whether they are writable:",
+		Detail: "statvfs is what answers that question the way a process writing " +
+			"there would experience the answer, and it did not answer.",
+	}
+	writable = refusal.Group{
+		Rule: "verify-writable",
+		One:  "a mount was made read-only and is writable:",
+		Many: "%d mounts were made read-only and are writable:",
+		Detail: "This is the failure the whole arrangement exists to prevent: a " +
+			"write there would copy the file up into the code repository instead " +
+			"of failing. It happens when a bind and its read-only flag are asked " +
+			"for in one call, which the kernel accepts and silently ignores.",
+	}
+	readOnlyByMistake = refusal.Group{
+		Rule:   "verify-read-only",
+		One:    "a mount was made writable and is read-only:",
+		Many:   "%d mounts were made writable and are read-only:",
+		Detail: "Writes meant to land there will fail.",
+	}
+	propagating = refusal.Group{
+		Rule: "verify-propagation",
+		One:  "a mount propagates:",
+		Many: "%d mounts propagate:",
+		Detail: "Every camp mount is made private as it is created: a propagating " +
+			"mount inside the composed tree travels back out onto the backing " +
+			"store's own path, which is how eight planned mounts once became " +
+			"twelve, four of them on the workspace's path.",
+	}
+	overlayOptionsWrong = refusal.Group{
+		Rule: "verify-overlay-option",
+		One: "the composed tree was mounted with an option the plan did not ask " +
+			"for:",
+		Many: "the composed tree was mounted with %d options the plan did not ask " +
+			"for:",
+		Detail: "The options are compared one by one and never as one string: the " +
+			"kernel echoes what was passed plus its own defaults, so string " +
+			"equality would fail on a correct mount every time.",
+	}
+)
+
 // identity asks whether the mount is the one that was planned, and
 // whether it is reachable at all.
 //
@@ -142,23 +217,17 @@ func identity(mount plan.Mount, target string, table []mountinfo.Entry) refusal.
 
 	source, err := stat(mount.Source)
 	if err != nil {
-		refused.Add("verify-source-unreachable",
-			"the mount source %s cannot be looked at after mounting: %v.", mount.Source, err)
+		refused.Group(unreachableSources, "%s: %v", mount.Source, err)
 		return refused
 	}
 	destination, err := stat(target)
 	if err != nil {
-		refused.Add("verify-target-unreachable",
-			"the mount point %s cannot be looked at after mounting: %v.", target, err)
+		refused.Group(unreachableTargets, "%s: %v", target, err)
 		return refused
 	}
 	if source != destination {
-		refused.Add("verify-identity",
-			"%s does not show %s: the path resolves to %s, and the source is "+
-				"%s.\nEither the mount did not take, or a later mount is covering "+
-				"it -- a covered mount stays listed in the kernel's table and is "+
-				"reachable by nothing, so the table would not have shown this.",
-			target, mount.Source, destination, source)
+		refused.Group(wrongIdentity, "%s should show %s: the path resolves to "+
+			"%s, and the source is %s", target, mount.Source, destination, source)
 	}
 	return refused
 }
@@ -202,8 +271,8 @@ func overlayOptions(mount plan.Mount, target string, table []mountinfo.Entry) re
 	for key, expected := range want {
 		got := mountinfo.UnescapeOption(entry.Super[key])
 		if got != expected {
-			refused.Add("verify-overlay-option",
-				"the composed tree's %s is %q and the plan said %q.", key, got, expected)
+			refused.Group(overlayOptionsWrong, "%s is %q and the plan said %q",
+				key, got, expected)
 		}
 	}
 	if mount.Xattr != "" {
@@ -228,8 +297,7 @@ func polarity(mount plan.Mount, target string) refusal.List {
 	var refused refusal.List
 	var fs unix.Statfs_t
 	if err := unix.Statfs(target, &fs); err != nil {
-		refused.Add("verify-polarity-unreachable",
-			"%s cannot be looked at: %v.", target, err)
+		refused.Group(unreachablePolarity, "%s: %v", target, err)
 		return refused
 	}
 
@@ -237,16 +305,9 @@ func polarity(mount plan.Mount, target string) refusal.List {
 	wantReadOnly := mount.Kind == plan.BindRO
 	switch {
 	case wantReadOnly && !readOnly:
-		refused.Add("verify-writable",
-			"%s was mounted read-only and is writable.\nThis is the failure the "+
-				"whole arrangement exists to prevent: a write there would copy the "+
-				"file up into the code repository instead of failing. It happens "+
-				"when a bind and its read-only flag are asked for in one call, "+
-				"which the kernel accepts and silently ignores.", target)
+		refused.Group(writable, "%s", target)
 	case !wantReadOnly && readOnly:
-		refused.Add("verify-read-only",
-			"%s was mounted writable and is read-only. Writes meant to land "+
-				"there will fail.", target)
+		refused.Group(readOnlyByMistake, "%s", target)
 	}
 	return refused
 }
@@ -264,12 +325,7 @@ func propagation(mount plan.Mount, target string, table []mountinfo.Entry) refus
 		return refused
 	}
 	if !entry.Private() {
-		refused.Add("verify-propagation",
-			"%s propagates (%s). Every camp mount is made private as it is "+
-				"created: a propagating mount inside the composed tree travels "+
-				"back out onto the backing store's own path, which is how eight "+
-				"planned mounts once became twelve, four of them on the "+
-				"workspace's path.", target, strings.Join(entry.Optional, " "))
+		refused.Group(propagating, "%s (%s)", target, strings.Join(entry.Optional, " "))
 	}
 	return refused
 }
