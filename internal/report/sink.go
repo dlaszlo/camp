@@ -35,6 +35,9 @@ type Sink struct {
 	// cannot write its record still has work to do, and a broken log that
 	// says so on every line would bury the work.
 	complained bool
+	// troubled is the same rule for the other sentence: something about
+	// the log that is worth saying while the log goes on being written.
+	troubled bool
 }
 
 // To returns the sink a command writes its narration to.
@@ -50,6 +53,29 @@ func (s *Sink) Keep(log io.Writer) {
 	if s != nil {
 		s.log = log
 	}
+}
+
+// Trouble says one thing about the log itself, once.
+//
+// Not the failure below, which is a log that stopped taking lines. This
+// is a log that is still being written and something about how: a run
+// whose rotation is off because the filesystem has no interprocess
+// locking, or a second process that could not open the file at all. It
+// goes out as a line like any other -- terminal and log both -- because
+// a run that was recorded differently is a fact about that run and
+// belongs in the record of it.
+//
+// Once, for the reason complained exists: a sentence about the log
+// repeated on every line buries the work the run is doing. The two
+// flags are separate because the two sentences are: a log that cannot
+// be written and a log that is not being rotated are different states,
+// and hearing about the first must not silence the second.
+func (s *Sink) Trouble(format string, args ...any) {
+	if s == nil || s.troubled {
+		return
+	}
+	s.troubled = true
+	s.line(Marked(MarkWarn, fmt.Sprintf(format, args...)))
 }
 
 // Write splits what it is given into lines and gives each to both ends.

@@ -92,7 +92,7 @@ func TestTheFileRotatesBySize(t *testing.T) {
 // into the file that was rotated away.
 func TestAWriterFollowsSomebodyElsesRotation(t *testing.T) {
 	first, env := open(t)
-	second, err := logs.Open(env)
+	second, err := logs.Open(env, nil)
 	if err != nil {
 		t.Fatalf("opening the log a second time: %v", err)
 	}
@@ -123,7 +123,7 @@ func open(t *testing.T) (*logs.Log, pathx.Root) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { env.Close() })
-	log, err := logs.Open(env)
+	log, err := logs.Open(env, nil)
 	if err != nil {
 		t.Fatalf("opening the log: %v", err)
 	}

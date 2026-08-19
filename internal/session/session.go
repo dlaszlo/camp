@@ -226,6 +226,29 @@ func InitMain(args []string) {
 	Inside(args[0], uid, gid, args[4:])
 }
 
+// keepLog attaches this half of the session's log, and says so once if
+// it cannot.
+//
+// The failure is reported rather than stepped over. Most of what a
+// session says is said from in here -- the mounts, the verification, the
+// identity, the farewell -- so a log that the launcher opened and this
+// process could not is a file that holds the four lines before the
+// interesting ones and nothing to say why. The session goes ahead: it
+// has a workload to start, and a record not being kept is not a reason
+// to refuse one.
+func keepLog(sink *report.Sink, root pathx.Root) {
+	file, err := logs.Open(root, sink)
+	if err != nil {
+		sink.Trouble("camp's log is not being written from inside the "+
+			"session: %v.\nThe session goes ahead. Everything it says from "+
+			"here -- the mounts, the verification and the farewell -- is on "+
+			"this terminal only, and %s holds the launcher's lines and no "+
+			"more.", err, logs.Path(root))
+		return
+	}
+	sink.Keep(file)
+}
+
 // Inside is the init: camp as pid 1 of the namespace.
 func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	pipe := os.NewFile(pipeFD, "handshake")
@@ -277,9 +300,7 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	// for.
 	stderr := report.To(os.Stderr)
 	defer stderr.Close()
-	if file, err := logs.Open(built.Config.Root); err == nil {
-		stderr.Keep(file)
-	}
+	keepLog(stderr, built.Config.Root)
 	say := report.Narrate(stderr)
 	say.Identity(built.Config.Session)
 

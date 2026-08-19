@@ -128,8 +128,14 @@ func cmdDown(ctx *context, args []string) error {
 	// what the record is for -- so the log is opened from the record's own
 	// environment rather than from a file that may be gone. It is the run
 	// most worth having a record of: nothing else says what came down.
+	//
+	// The environment root as the record names it, and not derived from
+	// the recorded configuration's path: that derivation holds only for
+	// the layout camp writes, and this composition may have been brought
+	// up with a -f pointing anywhere. The record was written from the
+	// configuration camp did read, and env: is what it said.
 	if found {
-		ctx.keepUnder(record.Config)
+		ctx.keepIn(record.Env)
 	}
 	if !found {
 		return failure(ExitNotFound, "",

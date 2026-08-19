@@ -64,6 +64,17 @@ const (
 // state record stamps UTC and is a different kind of thing.
 const Stamp = "2006-01-02T15:04:05.000-07:00"
 
+// Trouble is how the log says the one thing that can change about it
+// while a command runs, and it is said once.
+//
+// The sink a command narrates through implements it: what is said goes
+// to the terminal and into this file like any other line, because a run
+// whose log stopped rotating is a fact about that run and belongs in the
+// record of it.
+type Trouble interface {
+	Trouble(format string, args ...any)
+}
+
 // Log is the file behind a command's stderr.
 type Log struct {
 	area fsx.Area
@@ -73,10 +84,37 @@ type Log struct {
 	// write. The lock is on the directory rather than on the file because
 	// the file is what rotation renames: two processes holding a lock on
 	// the same name could be holding two different files a moment later.
+	//
+	// It is opened through the same Area the file is, so both descriptors
+	// come out of one resolution from one pinned root: a lock taken on a
+	// directory that is not the one the file was created in serializes
+	// nothing.
 	directory *os.File
 	mutex     sync.Mutex
 	file      *os.File
+
+	// say is where the sentence below goes. Nil for a caller that opened
+	// a log outside a command's narration, which then hears nothing --
+	// there is nobody to hear it.
+	say Trouble
+	// locking is whether this filesystem has working interprocess locks.
+	// It starts true and goes false the first time flock refuses, taking
+	// rotation with it, and what refused is kept for the sentence that
+	// says so.
+	locking bool
+	refused error
 }
+
+// flock is how the directory lock is taken and given back.
+//
+// A variable, and the only one in this package, because the state the
+// code below it is written against -- a filesystem whose flock answers
+// EOPNOTSUPP or ENOSYS -- is one no test can arrange on purpose: a test
+// makes directories on whatever filesystem it is run on, and cannot make
+// that filesystem stop locking. It exists for the test, the way
+// doctorTable does in internal/cli and afterTypeCheck in internal/fsx,
+// and a running camp never replaces it.
+var flock = unix.Flock
 
 // Path is where the log lives for an environment, for a message about it.
 func Path(root pathx.Root) string {
@@ -88,21 +126,29 @@ func Path(root pathx.Root) string {
 // A failure to open it is returned rather than swallowed, and the caller
 // decides -- which is always to carry on without a log and say so once. A
 // command that cannot write its own record still has work to do.
-func Open(root pathx.Root) (*Log, error) {
+//
+// The narration is passed in rather than reached for, because the one
+// thing this file can have to say about itself has to reach the person
+// at the terminal, and this package knows nothing about terminals.
+func Open(root pathx.Root, say Trouble) (*Log, error) {
 	area := fsx.Logs(root)
 	if err := area.Ensure(0o755); err != nil {
 		return nil, err
 	}
-	directory, err := os.Open(area.Root())
+	// Through the area, not through its name: the name would be resolved
+	// again, and the whole point of locking the directory is that it is
+	// the directory this file is written in.
+	directory, err := area.OpenDir()
 	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", area.Root(), err)
+		return nil, err
 	}
 	file, err := area.Append(Name, 0o644)
 	if err != nil {
 		directory.Close()
 		return nil, err
 	}
-	return &Log{area: area, path: Path(root), directory: directory, file: file}, nil
+	return &Log{area: area, path: Path(root), directory: directory, file: file,
+		say: say, locking: true}, nil
 }
 
 // Write records whole lines, one timestamp each.
@@ -112,23 +158,68 @@ func Open(root pathx.Root) (*Log, error) {
 // the paragraphs of a refusal, and a timestamp on its own would be a line
 // saying nothing.
 func (l *Log) Write(p []byte) (int, error) {
+	written, lost, err := l.write(p)
+	// Said here, after the write and outside the mutex, because saying it
+	// goes through the sink and the sink writes straight back into this
+	// log: a sentence composed under the mutex would deadlock on the line
+	// it is itself producing.
+	if lost {
+		l.unserialized()
+	}
+	return written, err
+}
+
+// write is one line's whole journey to the file, under this process's
+// mutex and -- where the filesystem has one -- the directory lock every
+// camp process writing this log takes.
+//
+// It answers whether this call is the one that found there is no
+// interprocess locking here, so that the sentence about it is said
+// once, and said outside the mutex.
+func (l *Log) write(p []byte) (written int, lost bool, err error) {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
 	stamped := stamp(time.Now(), p)
-	l.hold()
-	defer l.drop()
+	held, refused := l.hold()
+	lost = refused
+	defer func() {
+		if l.drop(held) {
+			lost = true
+		}
+	}()
 
 	if err := l.reopenIfRotated(); err != nil {
-		return 0, err
+		return 0, lost, err
 	}
-	if err := l.rotateIfFull(len(stamped)); err != nil {
-		return 0, err
+	// Only under the lock. Rotation is several renames of one set of
+	// names, and two writers performing them at once overwrite or skip
+	// the generations they are moving -- so without the lock this run
+	// appends and lets the file grow. A line lost is worse than a
+	// rotation missed, and Write says afterwards which one this run got.
+	if held {
+		if err := l.rotateIfFull(len(stamped)); err != nil {
+			return 0, lost, err
+		}
 	}
 	if _, err := l.file.Write(stamped); err != nil {
-		return 0, fmt.Errorf("writing %s: %w", l.path, err)
+		return 0, lost, fmt.Errorf("writing %s: %w", l.path, err)
 	}
-	return len(p), nil
+	return len(p), lost, nil
+}
+
+// unserialized says, once, that this run appends without rotating.
+func (l *Log) unserialized() {
+	if l.say == nil {
+		return
+	}
+	l.say.Trouble("camp's log %s cannot be locked on this filesystem (%v), "+
+		"so this run appends to it and does not rotate it. Two processes "+
+		"write one log -- a session's launcher and the init it re-executes "+
+		"-- and rotation is several renames of one set of names: performed "+
+		"at once by both, they overwrite or skip the generations they are "+
+		"moving. Every line is still kept, and nothing else about this run "+
+		"changes.", l.path, l.refused)
 }
 
 // Close releases the file and the directory.
@@ -162,19 +253,51 @@ func stamp(now time.Time, p []byte) []byte {
 	return out.Bytes()
 }
 
-// hold and drop take the lock across processes. A failure to lock is not
-// a reason to lose the line: the append still lands whole, and the only
-// thing at risk is which side of a rotation it lands on.
-func (l *Log) hold() {
-	if l.directory != nil {
-		_ = unix.Flock(int(l.directory.Fd()), unix.LOCK_EX)
+// hold takes the lock across processes, and says both whether it got it
+// and whether this call is the one that found there is none.
+//
+// A failure to lock is not a reason to lose the line -- the append still
+// lands whole, because the kernel places an appending write at the end
+// of the file in one operation whoever else is writing. It is a reason
+// to stop rotating: rotation is a sequence of renames over one set of
+// names, and this lock is the only thing that makes two processes
+// perform it one at a time.
+//
+// EINTR is not that failure. A signal arriving while this process waits
+// for the lock says nothing about the filesystem, so it waits again.
+func (l *Log) hold() (held, refused bool) {
+	if l.directory == nil || !l.locking {
+		return false, false
+	}
+	for {
+		err := flock(int(l.directory.Fd()), unix.LOCK_EX)
+		if err == nil {
+			return true, false
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		l.locking, l.refused = false, err
+		return false, true
 	}
 }
 
-func (l *Log) drop() {
-	if l.directory != nil {
-		_ = unix.Flock(int(l.directory.Fd()), unix.LOCK_UN)
+// drop gives the lock back, and answers the same question hold does.
+//
+// An unlock that fails is the same finding as a lock that fails, and it
+// is worse to leave standing: this process would hold the directory for
+// the rest of its life and every other camp process on this log would
+// wait for it. So rotation goes off here too, and the one sentence about
+// it covers both directions.
+func (l *Log) drop(held bool) bool {
+	if !held || l.directory == nil {
+		return false
 	}
+	if err := flock(int(l.directory.Fd()), unix.LOCK_UN); err != nil {
+		l.locking, l.refused = false, err
+		return true
+	}
+	return false
 }
 
 // reopenIfRotated notices that somebody else rotated the file under us.

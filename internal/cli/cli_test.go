@@ -197,3 +197,85 @@ func TestInitWritesTheSkeletonIntoTheEnvironment(t *testing.T) {
 		t.Errorf("init did not name the file it wrote:\n%s", out)
 	}
 }
+
+// A configuration camp refuses is one of the runs most worth having a
+// record of, and the record is the environment's own log.
+//
+// The log lives under the environment's .camp, and until the file parses
+// nothing has said where that is -- except the path of the file itself,
+// which for the layout camp writes is two components below it. So the
+// log is attached from the path, before the parse, and the refusal that
+// follows lands in it. Attached after the parse, as it was, the whole
+// refusal reached the terminal and nothing else.
+func TestARefusedConfigurationIsKeptInTheEnvironmentsLog(t *testing.T) {
+	env := testenv.NewEnv(t)
+	path := config.Path(env.Path)
+	// Standard place, and not a configuration: an unknown key, which camp
+	// refuses rather than guesses at.
+	testenv.Write(t, path, "env: "+env.Path+"\nmerged: live\nsandbox: true\n")
+
+	_, errOut, code := run(t, "plan", "-f", path)
+	if code == 0 {
+		t.Fatalf("a configuration with an unknown key was accepted:\n%s", errOut)
+	}
+
+	kept, err := os.ReadFile(filepath.Join(env.Path, ".camp", "logs", "camp.log"))
+	if err != nil {
+		t.Fatalf("the refusal was not written to the environment's log: %v", err)
+	}
+	// Every line of it, not the fact that something was written: what is
+	// worth having a week later is what the person at the terminal saw.
+	for _, line := range strings.Split(strings.TrimRight(errOut, "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.Contains(string(kept), line) {
+			t.Errorf("the log does not carry a line the terminal was given:\n"+
+				"  %q\nlog:\n%s", line, kept)
+		}
+	}
+	if !strings.Contains(string(kept), "sandbox") {
+		t.Errorf("the log does not name the key that was refused:\n%s", kept)
+	}
+}
+
+// A -f pointing outside the layout camp writes attaches no log, and the
+// command still runs.
+//
+// The environment root is derived from the configuration's path by
+// removing two components, which is true of $ENV/.camp/config.yml and of
+// nothing else. For /tmp/mine.yml it would make the root "/" and camp
+// would try to write its log into /.camp -- somebody else's directory,
+// and not this composition's. There the parsed configuration is what
+// says which environment this is.
+func TestAConfigurationOutsideTheLayoutIsLoggedWhereItSaysToLog(t *testing.T) {
+	env := testenv.NewEnv(t)
+	// Accepted the way every fixture is, without writing a configuration
+	// into the environment: the only one there is is the one -f names.
+	cfg, err := env.TryConfig(env.YAML())
+	if err != nil {
+		t.Fatalf("the fixture configuration did not parse:\n%v", err)
+	}
+	env.Accept(t, cfg)
+	// Two components below a directory of its own, which is exactly the
+	// shape the derivation would misread: strip two and it names that
+	// directory, which is nobody's environment root.
+	outside := testenv.Root(t)
+	elsewhere := filepath.Join(outside, "somewhere", "mine.yml")
+	testenv.Write(t, elsewhere, env.YAML())
+
+	_, errOut, code := run(t, "plan", "-f", elsewhere)
+	if code != 0 {
+		t.Fatalf("the composition was refused:\n%s", errOut)
+	}
+	// Nothing was written where the derivation would have put it ...
+	if _, err := os.Stat(filepath.Join(outside, ".camp")); err == nil {
+		t.Errorf("camp made a .camp in %s, which is not an environment root: "+
+			"the log was written two components above a file that is not in "+
+			"camp's own layout", outside)
+	}
+	// ... and the log is where env: says the environment is.
+	if _, err := os.Stat(filepath.Join(env.Path, ".camp", "logs", "camp.log")); err != nil {
+		t.Errorf("the run was not logged in the environment env: names: %v", err)
+	}
+}
