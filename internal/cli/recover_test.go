@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,7 +25,8 @@ func recorded(t *testing.T) (state.Record, *testenv.Env) {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}
 
-	record := state.FromPlan(built, "test", "", "", os.Getuid(), os.Getgid())
+	record := state.FromPlan(built, filepath.Join(built.Work, "staging"), "test", "",
+		"", os.Getuid(), os.Getgid())
 	record.Phase = state.Up
 	if err := record.Save(); err != nil {
 		t.Fatal(err)

@@ -241,11 +241,32 @@ func mount(job Job, root pathx.Root) Reply {
 			return unwind(job, root, made, reply)
 		}
 
-		result := Result{Target: target, Outcome: "mounted"}
-		if identity, err := identityUnder(root, operation.TargetParts); err == nil {
-			result.Device, result.Inode = identity.Device, identity.Inode
+		// What the mount answers as, read back from the root's own
+		// descriptor, and the operation fails if it cannot be read.
+		//
+		// A dropped failure here produced a successful reply carrying a zero
+		// identity, and a zero identity in a record is read by the teardown
+		// as authority to unmount whatever stands at that path -- so the one
+		// mount camp could not identify became the one mount camp would
+		// remove without checking. The deliberate zero is the other one: a
+		// teardown target whose record predates its mount, which job.go
+		// documents, and that one is a record's silence rather than a
+		// helper's.
+		found, err := identityUnder(root, operation.TargetParts)
+		if err != nil {
+			reply.Rule = "helper-mount-unidentifiable"
+			reply.Error = fmt.Sprintf("%s was mounted and camp could not read "+
+				"back what it is: %v.\nA mount camp cannot identify is one a "+
+				"teardown could not tell from a stranger's, so it is removed "+
+				"again here rather than recorded as an identity of zero.", target, err)
+			return unwind(job, root, made, reply)
 		}
-		reply.Results = append(reply.Results, result)
+		reply.Results = append(reply.Results, Result{
+			Target:  target,
+			Outcome: "mounted",
+			Device:  found.Device,
+			Inode:   found.Inode,
+		})
 	}
 
 	// The first verification pass, here rather than in the front end,

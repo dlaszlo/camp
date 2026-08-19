@@ -29,7 +29,9 @@ func fixture(t *testing.T) (state.Record, string) {
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}
-	record := state.FromPlan(built, "test", "cfgdigest", "invdigest", os.Getuid(), os.Getgid())
+	staging := filepath.Join(built.Work, "staging")
+	record := state.FromPlan(built, staging, "test", "cfgdigest", "invdigest",
+		os.Getuid(), os.Getgid())
 	return record, cfg.Source
 }
 
@@ -48,7 +50,7 @@ func TestARecordCarriesTheWholeConcretePlanInOrder(t *testing.T) {
 	}
 
 	teardown := record.Teardown()
-	if teardown[0].Target != record.Mounts[len(record.Mounts)-1].Target {
+	if teardown[0].Path != record.Mounts[len(record.Mounts)-1].Target {
 		t.Error("the teardown order is not the reverse of the mount order")
 	}
 	if record.Phase != state.Mounting {
@@ -56,6 +58,67 @@ func TestARecordCarriesTheWholeConcretePlanInOrder(t *testing.T) {
 			"anything is mounted, so that there is no moment at which something "+
 			"is mounted and nothing knows what", record.Phase)
 	}
+}
+
+// The record names both places every mount can be, and it names them
+// before anything is mounted.
+//
+// Until the move the whole tree and every mount in it is under the
+// staging directory, and the staging self-bind is that tree's parent. A
+// record that carried only the final live targets was a valid record
+// naming not one mount that existed, for the whole of the helper's work.
+func TestARecordNamesWhereEachMountWillStandAndWhereItStandsNow(t *testing.T) {
+	scratch(t)
+	record, _ := fixture(t)
+
+	if record.Staging == "" {
+		t.Fatal("the record does not say where the tree is built, so nothing " +
+			"in it can name a mount made before the move")
+	}
+	// Both self-binds, in the order the helper makes them: the staging
+	// point before anything is built in it, the live point before the tree
+	// is moved onto it.
+	if len(record.Detached) != 2 ||
+		record.Detached[0] != record.Staging || record.Detached[1] != record.Live {
+		t.Fatalf("the record's detached points are %v; they have to be the "+
+			"staging point %s and the live point %s, in that order",
+			record.Detached, record.Staging, record.Live)
+	}
+
+	staged := 0
+	for _, mount := range record.Mounts {
+		if !under(mount.Target, record.Live) {
+			// The workspace's own self-bind is not in the composed tree: it is
+			// made at its final path and never moved, so it has one place.
+			if mount.Staging != "" {
+				t.Errorf("%s is not in the composed tree and the record gives it "+
+					"a staging location %s", mount.Target, mount.Staging)
+			}
+			continue
+		}
+		staged++
+		if mount.Staging == "" {
+			t.Errorf("%s names no staging location, and that is where it stands "+
+				"for the whole of the helper's work", mount.Target)
+			continue
+		}
+		// The same relative place in both trees, because the move takes the
+		// tree in one step and nothing inside it is rearranged.
+		want := record.Staging + strings.TrimPrefix(mount.Target, record.Live)
+		if mount.Staging != want {
+			t.Errorf("%s stands at %s before the move, and the tree is built at "+
+				"%s, so it stands at %s", mount.Target, mount.Staging,
+				record.Staging, want)
+		}
+	}
+	if staged == 0 {
+		t.Fatal("no recorded mount is in the composed tree, so this test " +
+			"measures nothing")
+	}
+}
+
+func under(path, base string) bool {
+	return path == base || strings.HasPrefix(path, strings.TrimRight(base, "/")+"/")
 }
 
 // Recovery never needs the configuration. It may have been edited while
@@ -81,10 +144,10 @@ func TestDownConvergesFromTheRecordWithTheConfigurationDeleted(t *testing.T) {
 		t.Fatalf("the record came back with %d mounts and had %d",
 			len(loaded.Mounts), len(record.Mounts))
 	}
-	for index, mount := range loaded.Teardown() {
+	for index, place := range loaded.Teardown()[:len(record.Mounts)] {
 		want := record.Mounts[len(record.Mounts)-1-index].Target
-		if mount.Target != want {
-			t.Fatalf("teardown entry %d is %q, wanted %q", index, mount.Target, want)
+		if place.Path != want {
+			t.Fatalf("teardown entry %d is %q, wanted %q", index, place.Path, want)
 		}
 	}
 }
@@ -127,6 +190,19 @@ func TestARecordedMountIsCheckedByIdentityAndNotOnlyByPath(t *testing.T) {
 	if presence, _ := unmade.Presence(mounted); presence != state.Unverified {
 		t.Errorf("a mount with no recorded identity read as %q", presence)
 	}
+}
+
+// lastMount is the record's last recorded mount, which is one inside the
+// composed tree and therefore one with a staging location.
+func lastMount(t *testing.T, raw map[string]any) map[string]any {
+	t.Helper()
+	mounts := raw["mounts"].([]any)
+	mount := mounts[len(mounts)-1].(map[string]any)
+	if mount["staging"] == nil {
+		t.Fatal("the fixture's last mount carries no staging location, so the " +
+			"refusals about one would measure nothing")
+	}
+	return mount
 }
 
 func deviceAndInode(t *testing.T, info os.FileInfo) (uint64, uint64) {
@@ -257,13 +333,16 @@ func TestForgetRemovesTheRecordAndNothingElse(t *testing.T) {
 	}
 }
 
-// forget refuses while any mount of the recorded plan is still there.
+// A record is not discarded while anything it answers for is standing.
 //
 // The record is the only authoritative list of what a teardown has to
-// remove -- down's to consume, not forget's to lose -- so the check is
-// against the kernel's table and not against the phase, which a crash can
-// leave saying anything.
-func TestForgetIsRefusedWhileAnythingIsStillMounted(t *testing.T) {
+// remove -- down's to consume, not forget's to lose -- so the decision is
+// made against the kernel's table and not against the phase, which a
+// crash can leave saying anything. And it covers three areas rather than
+// only the recorded targets: a mount anywhere in the work, staging or
+// live tree is camp's, and one that no plan names is exactly the mount a
+// discarded record would leave nothing behind for.
+func TestARecordIsKeptWhileAnythingItAnswersForIsMounted(t *testing.T) {
 	scratch(t)
 	record, _ := fixture(t)
 	record.Phase = state.Partial
@@ -271,19 +350,65 @@ func TestForgetIsRefusedWhileAnythingIsStillMounted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The kernel's table, with one of the recorded mounts in it.
 	table, err := mountinfo.Read(mountinfo.Self)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(state.StillMounted(record, table)) != 0 {
-		t.Fatal("the fixture's paths are somehow mounted already")
+	if held := state.Held(record, table); len(held) != 0 {
+		t.Fatalf("the fixture's paths are somehow mounted already: %v", held)
 	}
 
-	pretend := append(table, mountinfo.Entry{Point: record.Mounts[0].Target, FSType: "overlay"})
-	still := state.StillMounted(record, pretend)
-	if len(still) != 1 || still[0] != record.Mounts[0].Target {
-		t.Fatalf("the still-mounted check found %v", still)
+	// Each of these is one mount the machine has and the plan does not
+	// account for in the same way, and each on its own has to keep the
+	// record: at a recorded live target, at a recorded staging location,
+	// beneath the live tree, beneath the staging tree, and beneath the work
+	// directory. The last three are the ones a check by recorded target
+	// alone cannot see.
+	staged := ""
+	for _, mount := range record.Mounts {
+		if mount.Staging != "" {
+			staged = mount.Staging
+		}
+	}
+	if staged == "" {
+		t.Fatal("no recorded mount carries a staging location, so half of this " +
+			"test measures nothing")
+	}
+	for _, probe := range []struct {
+		name  string
+		point string
+	}{
+		{"at a recorded live target", record.Mounts[0].Target},
+		{"at a recorded staging location", staged},
+		{"beneath the live tree", filepath.Join(record.Live, "deep", "inside")},
+		{"beneath the staging tree", filepath.Join(record.Staging, "deep", "inside")},
+		{"beneath the work directory", filepath.Join(record.Created[0], "kernel-leftover")},
+	} {
+		t.Run(probe.name, func(t *testing.T) {
+			pretend := append(append([]mountinfo.Entry{}, table...),
+				mountinfo.Entry{Point: probe.point, FSType: "overlay"})
+			held := state.Held(record, pretend)
+			if len(held) != 1 || held[0] != probe.point {
+				t.Fatalf("what is standing came back as %v, wanted %s", held, probe.point)
+			}
+			if err := state.Release(record, pretend); err == nil {
+				t.Fatal("the record was discarded with a mount still standing")
+			} else if !strings.Contains(err.Error(), probe.point) {
+				t.Errorf("the refusal has to name what is still there: %v", err)
+			}
+			if _, found, _ := state.Load(record.Hash); !found {
+				t.Error("the record was removed by a refused release")
+			}
+		})
+	}
+
+	// And a clean table lets it go. Otherwise the refusals above would pass
+	// over a record nothing could ever discard.
+	if err := state.Release(record, table); err != nil {
+		t.Fatalf("a record with nothing standing was kept: %v", err)
+	}
+	if _, found, _ := state.Load(record.Hash); found {
+		t.Error("the record survived a release with nothing mounted")
 	}
 }
 
@@ -360,6 +485,28 @@ func TestARecordThatCannotMeanWhatItSaysIsRefused(t *testing.T) {
 				mounts := raw["mounts"].([]any)
 				raw["mounts"] = append(mounts, mounts[0])
 			}, "recorded twice"},
+		{"a staging location that is not resolved",
+			func(raw map[string]any) {
+				lastMount(t, raw)["staging"] = "/tmp/../tmp/staging/point"
+			}, "resolved"},
+		// A staging location outside the staging tree is a path this record
+		// cannot account for: the helper builds inside one directory, and a
+		// teardown naming something elsewhere would address a mount nobody
+		// made.
+		{"a staging location outside the staging tree",
+			func(raw map[string]any) {
+				lastMount(t, raw)["staging"] = "/tmp/somewhere-else"
+			}, "staging tree"},
+		{"the same staging location twice",
+			func(raw map[string]any) {
+				mounts := raw["mounts"].([]any)
+				previous := mounts[len(mounts)-2].(map[string]any)
+				lastMount(t, raw)["staging"] = previous["staging"]
+			}, "recorded twice"},
+		{"a stranded mount that is not a resolved path",
+			func(raw map[string]any) {
+				raw["stranded"] = []any{"relative/path"}
+			}, "absolute"},
 	} {
 		t.Run(probe.name, func(t *testing.T) {
 			_, err := state.Decode(edit(t, probe.change))

@@ -10,6 +10,7 @@ import (
 	"github.com/dlaszlo/camp/internal/drift"
 	"github.com/dlaszlo/camp/internal/holders"
 	"github.com/dlaszlo/camp/internal/locks"
+	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
@@ -147,12 +148,14 @@ func cmdDown(ctx *context, args []string) error {
 		return failure(ExitFailure, "", "%s", strings.TrimRight(report.Refusals(refused), "\n"))
 	}
 
-	removed := 0
+	removed, empty := 0, 0
 	var mismatched []string
 	for _, result := range reply.Results {
 		switch result.Outcome {
 		case "unmounted":
 			removed++
+		case "absent":
+			empty++
 		case "mismatch":
 			mismatched = append(mismatched, result.Error)
 		}
@@ -163,10 +166,25 @@ func cmdDown(ctx *context, args []string) error {
 			say.Unmounted(result.Target)
 		}
 	}
-	say.Done("%d of %d mounts removed.", removed, len(reply.Results))
+	// Two numbers and not one fraction. The record names every mount twice
+	// -- where it is built and where it ends up -- and it is only ever in
+	// one of the two, so "ten of nineteen removed" would read as a teardown
+	// that gave up halfway through a machine that is now clean.
+	if empty > 0 {
+		say.Done("%d mount(s) removed, and %d of the places the record names "+
+			"had nothing at them: a mount is recorded both where it is built "+
+			"and where it is moved to, and it stands at one of the two.",
+			removed, empty)
+	} else {
+		say.Done("%d of %d mounts removed.", removed, len(reply.Results))
+	}
 
 	if len(reply.Stranded) > 0 {
 		record.Phase = state.Partial
+		// The paths, and not only the sentence about them: the next 'camp
+		// down' is built from this record, so a mount this teardown could not
+		// remove has to be a target in it rather than a line of prose.
+		record.Strand(reply.Stranded...)
 		_ = record.Save()
 		ctx.printf("\n")
 		for _, target := range reply.Stranded {
@@ -270,7 +288,24 @@ func cmdDown(ctx *context, args []string) error {
 			"camp leaves it exactly where it is.\n",
 			record.Live, strings.Join(leftovers, ", "))
 	}
-	_ = state.Forget(record.Hash)
+
+	// The record goes last, and only if the machine agrees that it may.
+	// Every recorded mount came down or this line was never reached, but
+	// "everything the plan named" and "everything camp is answerable for"
+	// are two lists: a mount left anywhere in the work, staging or live
+	// tree is one nothing else knows is camp's, and the record is what a
+	// person walled in behind it would read.
+	table, err := mountinfo.Read(mountinfo.Self)
+	if err != nil {
+		return failure(ExitFailure, "",
+			"every mount came down and the record %s is kept: %v.\n"+
+				"camp does not discard the only list of what a composition put "+
+				"where without being able to see that nothing of it is standing.",
+			record.Hash, err)
+	}
+	if err := state.Release(record, table); err != nil {
+		return failure(ExitBusy, "", "%v", err)
+	}
 	return nil
 }
 

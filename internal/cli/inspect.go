@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/dlaszlo/camp/internal/compose"
 	"github.com/dlaszlo/camp/internal/gen"
@@ -245,23 +244,14 @@ func cmdForget(ctx *context, args []string) error {
 
 	// Forgetting an active composition would discard the only
 	// authoritative list of what has to be unmounted, which is down's to
-	// consume and not forget's to lose.
+	// consume and not forget's to lose. The rule is state's, and every
+	// command that discards a record asks it there.
 	table, err := mountinfo.Read(mountinfo.Self)
 	if err != nil {
 		return wrap(err, ExitFailure, "")
 	}
-	still := state.StillMounted(record, table)
-	if len(still) > 0 {
-		return failure(ExitPrecondition, "",
-			"%s is in phase %q and %d of its mounts are still present: %s.\n"+
-				"This record is the only list of what a teardown has to remove. "+
-				"Run 'camp down' first; forgetting it now would leave those mounts "+
-				"with nothing that knows about them.",
-			hash, record.Phase, len(still), strings.Join(still, ", "))
-	}
-
-	if err := state.Forget(hash); err != nil {
-		return wrap(err, ExitFailure, "")
+	if err := state.Release(record, table); err != nil {
+		return failure(ExitPrecondition, "", "%v", err)
 	}
 	ctx.printf("forgot the record for %s. Nothing else was deleted: not the "+
 		"repositories, not the storage, not the composed tree.\n", record.Live)

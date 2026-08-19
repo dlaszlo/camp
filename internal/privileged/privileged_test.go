@@ -54,7 +54,8 @@ func recordFor(t *testing.T, tail string) state.Record {
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}
-	return state.FromPlan(built, "test", "", "", os.Getuid(), os.Getgid())
+	return state.FromPlan(built, filepath.Join(built.Work, "staging"), "test", "",
+		"", os.Getuid(), os.Getgid())
 }
 
 // The teardown instruction comes from the record and from nothing else.
@@ -71,16 +72,23 @@ func TestTheTeardownJobIsBuiltFromTheRecordAlone(t *testing.T) {
 	if job.Action != privileged.ActionUnmount {
 		t.Errorf("the job's action is %q", job.Action)
 	}
-	// Every recorded mount, and after them the points the helper bound onto
-	// themselves so the composition could be moved into place.
-	if len(job.Targets) != len(record.Mounts)+len(record.Detached) {
-		t.Fatalf("the job has %d targets, and the record %d mounts and %d "+
-			"detached points", len(job.Targets), len(record.Mounts),
-			len(record.Detached))
+	// Every recorded mount at both places it can be, and after them the two
+	// points the helper bound onto themselves so nothing could propagate.
+	staged := 0
+	for _, mount := range record.Mounts {
+		if mount.Staging != "" {
+			staged++
+		}
 	}
-	if last := job.Targets[len(job.Targets)-1]; last.Path != record.Live {
-		t.Errorf("the last thing to come down is %s, and it should be the live "+
-			"path itself: the composition was standing on it", last.Path)
+	if want := len(record.Mounts) + staged + len(record.Detached); len(job.Targets) != want {
+		t.Fatalf("the job has %d targets, and the record %d mounts, %d of them "+
+			"with a staging location, and %d detached points", len(job.Targets),
+			len(record.Mounts), staged, len(record.Detached))
+	}
+	if last := job.Targets[len(job.Targets)-1]; last.Path != record.Staging {
+		t.Errorf("the last thing to come down is %s, and it should be the "+
+			"staging point: it is the first mount the helper makes and the "+
+			"parent of everything built before the move", last.Path)
 	}
 	if job.Targets[0].Path != record.Mounts[len(record.Mounts)-1].Target {
 		t.Error("the job's first target is not the last mount made; teardown " +
@@ -92,6 +100,126 @@ func TestTheTeardownJobIsBuiltFromTheRecordAlone(t *testing.T) {
 	}
 }
 
+// The teardown names every place the machine could have a mount, in the
+// order that takes the tree apart from the top -- from the record alone,
+// with no helper reply merged into it.
+//
+// This is the record a kill leaves behind: written before the helper's
+// first syscall and never updated, because the helper died before it
+// could reply. Until the move the whole tree is under the staging
+// directory, so a teardown built from this record has to name the staging
+// locations as well as the live ones, and it cannot know which of the two
+// the machine is in.
+func TestTheTeardownNamesBothPlacesInTheOrderTheyComeApart(t *testing.T) {
+	record := fixture(t)
+	if record.Phase != state.Mounting {
+		t.Fatalf("the fixture is in phase %q, and the record this is about is "+
+			"the one written before anything was mounted", record.Phase)
+	}
+
+	// The live targets in reverse, then the staging locations in reverse,
+	// then the live self-bind, then the staging self-bind: the reverse of
+	// the order the helper makes them in. A mount is only ever in one of
+	// its two places, so naming the other costs one "absent" answer -- what
+	// must not happen is a place that has a mount and no target names it.
+	var want []string
+	for index := len(record.Mounts) - 1; index >= 0; index-- {
+		want = append(want, record.Mounts[index].Target)
+	}
+	for index := len(record.Mounts) - 1; index >= 0; index-- {
+		if staged := record.Mounts[index].Staging; staged != "" {
+			want = append(want, staged)
+		}
+	}
+	want = append(want, record.Live, record.Staging)
+
+	got := targetPaths(privileged.UnmountJob(record))
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the teardown order is\n  %s\nand it has to be\n  %s",
+			strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	}
+
+	// The two paths that carry two mounts each are named twice, and that is
+	// the point: the composed tree stands on the self-bind underneath it,
+	// at the live path and -- before the move -- at the staging path, and
+	// each of those is one unmount.
+	counted := map[string]int{}
+	for _, path := range got {
+		counted[path]++
+	}
+	for _, path := range []string{record.Live, record.Staging} {
+		if counted[path] != 2 {
+			t.Errorf("%s is named %d time(s); the tree and the bind it stands "+
+				"on are two mounts at one path", path, counted[path])
+		}
+	}
+	for path, times := range counted {
+		if times > 1 && path != record.Live && path != record.Staging {
+			t.Errorf("%s is named %d times, and one path is one mount", path, times)
+		}
+	}
+}
+
+// What a failed rollback could not remove survives into the record and is
+// named by the next teardown.
+//
+// The helper reports it, the front end used to print it in a sentence and
+// drop it, and then 'camp down' -- which is built from the record and
+// nothing else -- could not address it at all.
+func TestAStrandedMountBecomesATargetOfTheNextTeardown(t *testing.T) {
+	record := fixture(t)
+
+	// One place the plan does not name -- a mount that appeared where
+	// nothing planned one -- and one it does.
+	unplanned := filepath.Join(record.Staging, "propagated", "copy")
+	record.Strand(unplanned, record.Live)
+	record.Phase = state.Partial
+	if err := record.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, found, err := state.Load(record.Hash)
+	if err != nil || !found {
+		t.Fatalf("the record could not be read back: found=%v err=%v", found, err)
+	}
+	paths := targetPaths(privileged.UnmountJob(loaded))
+	if len(paths) == 0 {
+		t.Fatal("the teardown job names nothing")
+	}
+	if paths[0] != unplanned {
+		t.Fatalf("the teardown's first target is %q, and a stranded mount the "+
+			"plan does not name goes first: nothing knows what stands on it",
+			paths[0])
+	}
+	// A stranded path the plan already names keeps the place the order
+	// gives it, rather than being named a third time.
+	appearances := 0
+	for _, path := range paths {
+		if path == record.Live {
+			appearances++
+		}
+	}
+	if appearances != 2 {
+		t.Errorf("%s is named %d times; it was stranded and it is already the "+
+			"tree and the bind underneath it", record.Live, appearances)
+	}
+
+	// And it does not grow: the same mount stranded twice is one mount.
+	loaded.Strand(unplanned)
+	if len(loaded.Stranded) != 2 {
+		t.Errorf("the record lists %d stranded places after the same one was "+
+			"recorded twice: %v", len(loaded.Stranded), loaded.Stranded)
+	}
+}
+
+func targetPaths(job privileged.Job) []string {
+	paths := make([]string, 0, len(job.Targets))
+	for _, target := range job.Targets {
+		paths = append(paths, target.Path)
+	}
+	return paths
+}
+
 // A configuration that gains a session: section changes nothing about a
 // teardown. The record is the authority, the section describes something
 // this mode never started, and down must not become sensitive to it: a
@@ -101,11 +229,17 @@ func TestATeardownIsUnaffectedByASessionSection(t *testing.T) {
 	plain := fixture(t)
 	withSection := recordFor(t, sessionYAML)
 
+	// Both the environment root and the composition's own identifier come
+	// out of the comparison: the two fixtures are two scratch trees with
+	// two live paths, and the hash is derived from the live path, so the
+	// work directory's name differs for a reason that has nothing to do
+	// with the section.
 	targets := func(record state.Record) []string {
 		job := privileged.UnmountJob(record)
 		names := make([]string, 0, len(job.Targets))
 		for _, target := range job.Targets {
-			names = append(names, strings.TrimPrefix(target.Path, record.Env))
+			name := strings.TrimPrefix(target.Path, record.Env)
+			names = append(names, strings.ReplaceAll(name, record.Hash, "<hash>"))
 		}
 		return names
 	}
@@ -119,9 +253,9 @@ func TestATeardownIsUnaffectedByASessionSection(t *testing.T) {
 		t.Fatal(err)
 	}
 	if job := privileged.UnmountJob(withSection); len(job.Targets) !=
-		len(withSection.Mounts)+len(withSection.Detached) {
-		t.Errorf("the teardown job has %d targets and the record %d mounts",
-			len(job.Targets), len(withSection.Mounts))
+		len(withSection.Teardown()) {
+		t.Errorf("the teardown job has %d targets and the record names %d "+
+			"places", len(job.Targets), len(withSection.Teardown()))
 	}
 }
 

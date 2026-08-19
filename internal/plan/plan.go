@@ -156,6 +156,25 @@ type Mount struct {
 	Xattr string
 }
 
+// InStaging is where this mount stands while the privileged mode builds
+// the tree: the same place inside the staging directory that it will have
+// inside the live one, because the whole tree is moved in one step.
+//
+// Empty for the one mount that is not in the tree -- the workspace's own
+// self-bind -- which stands at its final path from the moment it is made
+// and is never moved.
+//
+// One derivation, in one place. The job the helper executes and the
+// record written before it starts both need this path, and a record
+// naming a staging location the helper did not mount at would name
+// nothing at all.
+func (m Mount) InStaging(staging string) string {
+	if !m.InLive {
+		return ""
+	}
+	return m.Rel.Join(staging)
+}
+
 // Describe renders one mount for a person reading the plan.
 //
 // Labels, never lowerdir's positional syntax: left-to-right precedence is

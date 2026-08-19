@@ -151,11 +151,13 @@ func Up(in UpInput) (Left, refusal.List) {
 	}
 
 	// The record goes down before anything is mounted, carrying the whole
-	// plan. From here on, whatever happens, something knows what to undo.
-	record := state.FromPlan(built, in.Tool,
+	// plan and both places every mount of it can be. From here on, whatever
+	// happens, something knows what to undo -- including a kill in the
+	// window where the whole tree is still in staging, which is most of the
+	// helper's life.
+	record := state.FromPlan(built, staging, in.Tool,
 		state.Digest(in.ConfigBytes), state.Digest(in.InventoryBytes),
 		os.Getuid(), os.Getgid())
-	record.Staging = staging
 	if err := record.Save(); err != nil {
 		refused.Add("record", "%v", err)
 		return Clean, refused
@@ -164,7 +166,10 @@ func Up(in UpInput) (Left, refusal.List) {
 
 	job, problems := MountJob(built, staging, in.Exclude)
 	if !problems.Empty() {
-		_ = state.Forget(built.Hash)
+		// Nothing has been mounted -- the helper has not been started -- but
+		// the question is still asked of the machine rather than assumed, and
+		// the record stays if the machine disagrees.
+		release(record, &problems)
 		return Clean, problems
 	}
 
@@ -178,13 +183,21 @@ func Up(in UpInput) (Left, refusal.List) {
 		return Uncertain, refused
 	case reply.Error != "":
 		if reply.RolledBack {
-			_ = state.Forget(built.Hash)
 			refused.Add("mount-failed",
 				"%s\nNothing is mounted: the helper removed everything it had "+
 					"made before it stopped.", reply.Error)
+			// The helper's account, checked against the machine before the only
+			// list of what it made is discarded. A rollback that reported itself
+			// complete over a mount still standing is exactly the case this
+			// record exists for.
+			release(record, &refused)
 			return Clean, refused
 		}
 		record.Phase = state.Partial
+		// What the rollback could not remove, as targets rather than as a
+		// sentence: the next 'camp down' has this record and nothing else to
+		// address them by.
+		record.Strand(reply.Stranded...)
 		_ = record.Save()
 		refused.Add("mount-failed-partial",
 			"%s\nThe rollback could not finish. Still mounted: %s.\n"+
@@ -240,6 +253,28 @@ func Up(in UpInput) (Left, refusal.List) {
 	return Standing, refused
 }
 
+// release discards the record for a run that left nothing on the machine,
+// and keeps it when the machine says otherwise.
+//
+// Every site that forgets a record goes through state.Release, which
+// decides from the kernel's table rather than from what the run believes
+// it did. A table camp cannot read is not permission to discard: a record
+// costs one file, and it is the only thing that can answer somebody who
+// is walled in behind a mount.
+func release(record state.Record, refused *refusal.List) {
+	table, err := mountinfo.Read(mountinfo.Self)
+	if err != nil {
+		refused.Add("record-kept",
+			"the record %s is kept: %v.\nIt is the only list of what this "+
+				"composition put where, and camp does not discard one without being "+
+				"able to see that nothing of it is standing.", record.Hash, err)
+		return
+	}
+	if err := state.Release(record, table); err != nil {
+		refused.Add("record-kept", "%v", err)
+	}
+}
+
 // Down takes a recorded composition apart.
 //
 // It reads the record and never the configuration. The configuration may
@@ -261,24 +296,23 @@ func Down(record state.Record, sudo []string, stderr *os.File) (Reply, refusal.L
 // This is what makes recovery possible after a crash: the record carries
 // the complete concrete plan, so down never needs the configuration --
 // which may have been edited, or deleted, while the composition was up.
-// The targets come out in the reverse of the order they were mounted in.
+//
+// The order is the record's, and the record's alone: every place the
+// composition may have a mount, live locations before staging locations
+// and both before the two self-binds, which is the reverse of the order
+// the helper makes them in. Nothing here assumes the move happened. This
+// job is built the same way whether a helper reply was ever received, so
+// a run that was killed between its first mount and its reply is torn
+// down by the record that was written before any of it.
 func UnmountJob(record state.Record) Job {
-	targets := make([]JobTarget, 0, len(record.Mounts)+len(record.Detached))
-	for _, mount := range record.Teardown() {
+	places := record.Teardown()
+	targets := make([]JobTarget, 0, len(places))
+	for _, place := range places {
 		targets = append(targets, JobTarget{
-			Path:   mount.Target,
-			Device: mount.Device,
-			Inode:  mount.Inode,
+			Path:   place.Path,
+			Device: place.Device,
+			Inode:  place.Inode,
 		})
-	}
-	// Last, and after everything that stood on them: the mount points the
-	// helper bound onto themselves so the composition could be moved into
-	// place without propagating. One of them is the live path itself, which
-	// the composition was covering until a moment ago. They carry no
-	// identity: each was covered by the composition for its whole life, so
-	// nothing could ever look at one.
-	for _, path := range record.Detached {
-		targets = append(targets, JobTarget{Path: path})
 	}
 
 	job := Job{
@@ -332,11 +366,17 @@ func MountJob(built plan.Plan, staging string, exclude []byte) (Job, refusal.Lis
 	}
 
 	for _, mount := range built.Mounts {
+		// Where this mount is made: inside the staging tree for everything
+		// that is in the composed tree, at its own path for the one mount
+		// that is not. The path comes from the plan's own derivation, which
+		// is what the record written a moment ago carries too -- two
+		// derivations of it could drift, and then the record would name a
+		// staging location nothing was ever mounted at.
 		targetParts := mount.TargetParts
 		target := mount.Target
-		if mount.InLive {
+		if staged := mount.InStaging(staging); staged != "" {
 			targetParts = append(append([]string{}, stagingParts...), mount.Rel.Components()...)
-			target = mount.Rel.Join(staging)
+			target = staged
 		}
 
 		operation := JobMount{

@@ -208,13 +208,37 @@ func corruptRecords() []state.Listing {
 //
 // A record alone is not a composition: one left by a crash names mounts
 // that may all be gone. What decides is the machine.
+//
+// Both places, because a run killed before the move built the whole tree
+// in staging and moved none of it: asking only about the live targets
+// answers "nothing is standing" over a composition that is entirely
+// standing, one directory further down.
 func standing(record state.Record, table []mountinfo.Entry) bool {
 	for _, mount := range record.Mounts {
-		if presence, _ := mount.Presence(table); presence != state.Gone {
+		if presence, _, _ := whereItStands(mount, table); presence != state.Gone {
 			return true
 		}
 	}
 	return false
+}
+
+// whereItStands answers for one recorded mount at whichever of its two
+// places has something at it, and says which place answered.
+//
+// The live target first: after the move that is where the mount is, and a
+// staging directory that no longer exists cannot be looked at anyway. The
+// staging location is asked only when the live one is empty, so a mount
+// can never be reported twice.
+func whereItStands(mount state.Mount, table []mountinfo.Entry) (state.Presence, string, error) {
+	presence, err := mount.Presence(table)
+	if presence != state.Gone || mount.Staging == "" {
+		return presence, mount.Target, err
+	}
+	staged, stagedErr := mount.PresenceAt(mount.Staging, table)
+	if staged == state.Gone {
+		return presence, mount.Target, err
+	}
+	return staged, mount.Staging, stagedErr
 }
 
 // treeFromRecord describes the composition that is standing out of what
@@ -268,9 +292,10 @@ func describeRecord(ctx *context, record state.Record, table []mountinfo.Entry) 
 	ctx.printf("phase:   %s, written %s\n", record.Phase, record.Age())
 
 	counts := map[state.Presence]int{}
+	staged := 0
 	ctx.printf("\n%d recorded mount(s), oldest first:\n", len(record.Mounts))
 	for _, mount := range record.Mounts {
-		presence, err := mount.Presence(table)
+		presence, where, err := whereItStands(mount, table)
 		counts[presence]++
 		note := ""
 		switch {
@@ -281,16 +306,40 @@ func describeRecord(ctx *context, record state.Record, table []mountinfo.Entry) 
 		case presence == state.Unverified:
 			note = " -- mounted, with no recorded identity to check it against"
 		}
-		ctx.printf("  %-10s %s%s\n", presence, mount.Target, note)
+		// Named at the place it was found, which for a run that stopped
+		// before the move is the staging tree. Printing the live target of a
+		// mount that is standing one directory further down would describe a
+		// machine nobody is looking at.
+		if where != mount.Target {
+			staged++
+			note += fmt.Sprintf(" -- still in staging, not moved onto %s", mount.Target)
+		}
+		ctx.printf("  %-10s %s%s\n", presence, where, note)
 	}
 
 	// The self-binds are listed after the plan and never verified by
 	// identity: each one sits underneath the composition, so what a look at
-	// its path finds is the tree standing on top of it.
+	// its path finds is the tree standing on top of it. Both of them: the
+	// staging point is bound onto itself before anything is built in it and
+	// is the last thing to come off.
 	for _, path := range record.Detached {
 		ctx.printf("  %-10s %s (bound onto itself so the move could not "+
 			"propagate; whatever covers it answers for this path)\n",
 			presenceOf(path, table), path)
+	}
+	for _, path := range record.Stranded {
+		ctx.printf("  %-10s %s (a rollback or an earlier teardown could not "+
+			"remove this)\n", presenceOf(path, table), path)
+	}
+
+	// Said before the verdict, because it changes what the verdict means:
+	// every mount can be present and the composition still be nowhere near
+	// the live path.
+	if staged > 0 {
+		ctx.printf("\n%d of these stand in the staging tree and were never "+
+			"moved onto %s. The run stopped inside the privileged helper, "+
+			"between its first mount and the move; 'camp down' takes them apart "+
+			"where they are.\n", staged, record.Live)
 	}
 
 	ctx.printf("\n%s", verdict(record, counts))
