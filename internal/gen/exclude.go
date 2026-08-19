@@ -1,12 +1,24 @@
-// Package gen produces the two artefacts that need git knowledge, and
-// keeps that knowledge out of camp's core.
+// Package gen produces the two artefacts that need to know what a
+// repository contains: the exclude payload, and the list of what a
+// repository contributes at an islands mount. Both are produced by one
+// generation step, with a shipped default. A composition that is not
+// git-based simply does not list one, and then it has no exclude at all
+// -- which plan says plainly rather than leaving the defence out quietly.
 //
-// The core needs git in exactly two places: the exclude payload, and the
-// list of what a repository contributes at an islands mount. Both are
-// produced by one generation step, with a shipped default. A composition
-// that is not git-based simply does not list one, and then it has no
-// exclude at all -- which plan says plainly rather than leaving the
-// defence out quietly.
+// **What this package is not is the only place camp reads git, and this
+// comment used to say it was.** The core asks git one question of its
+// own -- what the code repository tracks at or under a mount target --
+// and it asks it here directly, through internal/gitwire: in
+// internal/plan, because that refusal (§17) has to be made while nothing
+// is mounted and a repository can still be repaired by hand; and in
+// internal/drift and internal/health, which ask the same repository what
+// leaked. Spec §19 says the core contains no git; the code has said
+// otherwise since the tracked-content rule was written, and the
+// disagreement is named here rather than settled: moving the query behind
+// this package's boundary is a design change, and which of the two moves
+// -- the query, or the sentence -- is the owner's to decide. What is not
+// anybody's option is source claiming the opposite of what it does, since
+// a reader who trusts the claim stops looking.
 //
 // Everything here runs in the prepare phase: before anything is mounted,
 // always as the invoking user. What it produces is then validated as

@@ -208,13 +208,20 @@ func mountAPI() Check {
 	}
 }
 
-// git is a warning rather than a requirement.
+// git is classified as a warning rather than a requirement, and the
+// warning understates what camp does without it.
 //
-// camp uses git for the shipped generation step and for the scans it runs
-// when a session ends. A composition of two directories that are not
-// repositories needs none of that and works without it -- so a machine
-// with no git is worth mentioning and is not a reason to refuse. The one
-// place where it really is required refuses there, with the reason.
+// This comment used to say that a composition of two directories that are
+// not repositories needs no git and works without it. It does not: the
+// core asks git one question at every plan, whatever the configuration
+// says -- whether the code repository is a working tree, and what it
+// tracks under each mount target -- and on a machine with no git that
+// question has no answer. An unanswerable question is not "no", so
+// planning refuses with git-unreadable (internal/plan) and nothing
+// composes. Whether the classification should therefore become fatal is a
+// decision about what doctor calls an unusable machine, and it has not
+// been made; what is not a decision is a comment saying the opposite of
+// what the code does.
 func git() Check {
 	path, err := exec.LookPath("git")
 	if err == nil {
@@ -223,9 +230,14 @@ func git() Check {
 	return Check{
 		Name:   "tool: git",
 		Detail: "not on PATH",
-		Hint: "camp needs git for the shipped git_exclude step and for the " +
-			"scans it runs when a session ends. A composition that lists no " +
-			"generation step does not need it, and works without it.",
+		Hint: "camp needs git for the shipped git_exclude step, for the scans " +
+			"it runs when a session ends, and for the one question planning asks " +
+			"of the code repository at every command: what it tracks under each " +
+			"mount target, which is the rule that no mount may cover tracked " +
+			"content. Without git that question cannot be answered, and a check " +
+			"that could not run is not a check that passed -- so every " +
+			"composition is refused with git-unreadable, including one whose " +
+			"participants are not repositories at all.",
 	}
 }
 

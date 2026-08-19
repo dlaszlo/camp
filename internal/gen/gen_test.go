@@ -495,6 +495,60 @@ func TestACodeRepositoryWhoseIndexCannotBeReadStopsTheComposition(t *testing.T) 
 	}
 }
 
+// An ambient git variable cannot unlock a mount over tracked code.
+//
+// The rule's whole shape, end to end: the code repository tracks src/,
+// the configuration mounts something over src, and one variable is
+// exported in camp's own environment the way a terminal or a wrapper
+// script exports it. Before the environment was built rather than
+// inherited, each of these left camp believing there was nothing tracked
+// to cover -- GIT_WORK_TREE and GIT_DIR by making the repository "not a
+// working tree", where the rule is not skipped by accident but has
+// nothing to check; GIT_INDEX_FILE by making the tracked set empty, which
+// is the answer "this mount covers nothing". The composition then starts,
+// the mount hides src/, git reports every file under it deleted, and
+// 'git commit -a' records that.
+//
+// Either refusal is a pass -- git-unreadable when camp cannot see the
+// repository, target-tracked-code when it can. What is not a pass is a
+// composition nobody stopped. Both passes are asked, because either may
+// be the one that refuses.
+func TestAnAmbientGitVariableCannotUnlockAMountOverTrackedCode(t *testing.T) {
+	for _, hostile := range []struct{ name, value string }{
+		{"GIT_DIR", "no-such-git-dir"},
+		{"GIT_WORK_TREE", "registry"},
+		{"GIT_INDEX_FILE", "no-such-index"},
+	} {
+		t.Run(hostile.name, func(t *testing.T) {
+			env := testenv.NewEnv(t)
+			testenv.Write(t, filepath.Join(env.Workspace, "src", ".gitkeep"), "")
+			testenv.Commit(t, env.Workspace, "a mount point that collides with code")
+
+			yaml := strings.Replace(env.YAML(),
+				`      - { source: "registry",  target: ".registry" }`,
+				`      - { source: "registry",  target: "src" }`, 1)
+			cfg := env.Config(t, yaml)
+
+			// After the fixture is built, because the fixture's own git is not
+			// what is under test.
+			t.Setenv(hostile.name, filepath.Join(env.Path, hostile.value))
+
+			built, refused := plan.Prepare(cfg, plan.Namespace)
+			if refused.Empty() {
+				if err := os.MkdirAll(built.Work, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				_, refused = gen.Prepare(built)
+			}
+			if !refused.Has("target-tracked-code") && !refused.Has("git-unreadable") {
+				t.Fatalf("a mount over tracked code was accepted with %s set in "+
+					"camp's environment; the rules that fired were %v",
+					hostile.name, refused.Rules())
+			}
+		})
+	}
+}
+
 // A composition with no generation step has no exclude at all. That is
 // legal; what is not legal is being quiet about it.
 func TestNoGenerationStepMeansNoExclude(t *testing.T) {

@@ -8,7 +8,7 @@
 // is an exclude that survives the session. The generated exclude is
 // mounted over the composed tree's copy instead.
 //
-// Two habits every call here keeps:
+// Three habits every call here keeps:
 //
 //   - LC_ALL=C. Command output is translated on this machine, and code
 //     that decides by reading a message decides differently in another
@@ -16,6 +16,9 @@
 //   - --no-optional-locks. "git status" rewrites .git/index to refresh
 //     its stat cache, and a reporting pass that quietly modifies the
 //     repository it is reporting on is exactly what invariant 1 forbids.
+//   - The subprocess environment is built rather than inherited. -C names
+//     the repository camp is asking about, and a dozen ambient variables
+//     name a different one; see environment.
 package gitwire
 
 import (
@@ -102,13 +105,15 @@ const (
 // The two failures are told apart by git's own exit code and its message
 // under LC_ALL=C, which is why every call in this package sets it: 128
 // with "not a git repository" is git saying no, and anything else is git
-// not answering.
+// not answering. And git's no is looked at once more before it is
+// believed, because a repository camp cannot read produces the same
+// sentence -- see gitSaidNo.
 func Open(path string) (*Repo, State, error) {
 	repo := &Repo{Path: path}
 	out, err := repo.run("rev-parse", "--is-inside-work-tree", "--show-prefix")
 	if err != nil {
 		if notARepository(err) {
-			return nil, NotAWorkTree, nil
+			return gitSaidNo(path, err)
 		}
 		return nil, Unreadable, err
 	}
@@ -136,6 +141,52 @@ func notARepository(err error) bool {
 	}
 	return strings.Contains(err.Error(), "not a git repository") ||
 		strings.Contains(err.Error(), "this operation must be run in a work tree")
+}
+
+// gitSaidNo separates the two facts git spells the same way: there is no
+// repository here, and there is one here that git could not read.
+//
+// git prints "fatal: not a git repository" for both. Measured on this
+// machine: a directory holding a .git file whose gitdir does not exist
+// gives "fatal: not a git repository: <the missing path>", and a
+// directory holding an empty .git directory gives "fatal: not a git
+// repository (or any parent up to mount point /)" -- character for
+// character what a plain directory gives. Believing that word makes a
+// damaged repository an ordinary "this is not a working tree", the
+// tracked-content rule then has nothing to check, and a mount can cover
+// tracked code while camp believes there is none. The tri-state exists
+// because those two answers are opposite; this is where they are told
+// apart.
+//
+// **The frame is the directory camp asked about, and not one component
+// above it.** Git searches upward and camp does not, and the disagreement
+// is deliberate in both directions. An ancestor's .git is somebody else's
+// repository: camp was asked about this directory, and refusing a
+// composition because a directory three levels up is damaged refuses it
+// for a repository the configuration never named. Nor does walking up
+// have a stopping rule that matches git's -- git halts at a filesystem
+// boundary and at GIT_CEILING_DIRECTORIES -- so an upward scan would find
+// .git entries git deliberately never considered and invent a damaged
+// repository out of them. What the narrow frame gives up, plainly: a
+// damaged repository whose root is *above* the directory camp opened
+// still reads as "not a working tree". Every production caller opens a
+// configured repository path, which is where .git is.
+func gitSaidNo(path string, err error) (*Repo, State, error) {
+	info, statErr := pathx.StatBeneath(path, []string{".git"})
+	switch {
+	case statErr != nil:
+		// Whether there is a repository here has itself become a question
+		// nobody answered, and an unanswered question is never the ordinary
+		// no.
+		return nil, Unreadable, fmt.Errorf(
+			"git does not read %s as a repository, and whether it holds a .git "+
+				"could not be looked at: %w (git said: %v)", path, statErr, err)
+	case info.Exists():
+		return nil, Unreadable, fmt.Errorf(
+			"%s holds a .git %s and git does not read it as a repository: %w",
+			path, info.Type, err)
+	}
+	return nil, NotAWorkTree, nil
 }
 
 // scoped turns a path relative to the opened directory into one relative
@@ -178,11 +229,77 @@ func (r *Repo) unscoped(paths []string) []string {
 	return kept
 }
 
+// environment is what every git subprocess here runs with. It is built,
+// never inherited.
+//
+// The repository camp asks about is named by -C and by nothing else --
+// and git takes that name straight back out of the environment. Three
+// measurements on this machine, all against a real checkout that -C
+// named:
+//
+//   - GIT_DIR at a path that does not exist: exit 128, "fatal: not a git
+//     repository", which is git's own word for no and used to arrive here
+//     as "this is not a working tree";
+//   - GIT_WORK_TREE somewhere else: --is-inside-work-tree prints false and
+//     exits 0 -- an ordinary no, with no failure anywhere to notice;
+//   - GIT_INDEX_FILE at a path that does not exist: still a working tree,
+//     and ls-files prints nothing and exits 0 -- an empty tracked set,
+//     which is how camp reads "this mount covers nothing tracked".
+//
+// Each of those switches off the one rule camp asks git about, and two of
+// them do it without an error anywhere. GIT_COMMON_DIR,
+// GIT_OBJECT_DIRECTORY, GIT_CEILING_DIRECTORIES and the GIT_CONFIG_*
+// family reach the same place by their own routes.
+//
+// **An allowlist, not a denylist.** A denylist is a list of the variables
+// that existed on the day it was written: the next git release adds one,
+// and the denylist goes on letting it through in silence -- and silence
+// here means the guard is off. An allowlist that misses something new
+// costs a variable git no longer receives, which is a bug somebody sees.
+// What survives, one reason each:
+//
+//   - PATH -- how git itself is found, and the same PATH Available looked
+//     in, so the git that runs is the git camp checked for. It names no
+//     repository.
+//   - HOME and XDG_CONFIG_HOME -- where git finds the user's own
+//     configuration, which is the configuration the user's own git reads
+//     in that repository; camp's answer to "what does this repository
+//     track" should be git's answer, not a different one. Both or
+//     neither: keeping one of the two would read a configuration nobody
+//     has. Neither is a discovery control -- measured, core.worktree in a
+//     global configuration is ignored, and honoured only from the
+//     repository's own config -- and what does live there is
+//     safe.directory, so dropping them would make camp refuse a
+//     repository whose owner has explicitly allowed it.
+//
+// Nothing else, and no GIT_* at all, not even a GIT_PAGER or a GIT_TRACE
+// that steers nothing: an allowlist that starts making exceptions for the
+// ones that look harmless is a denylist again.
+//
+// GIT_* is also not the whole of what steers git, which is the other
+// reason the rule is what survives rather than what is caught: LD_PRELOAD
+// and LD_LIBRARY_PATH put code inside the process before main, and TMPDIR
+// says where it writes. They go with everything else, for free.
+//
+// LC_ALL and LANGUAGE are camp's own, set here rather than inherited, and
+// now the only locale settings the process has at all. notARepository is
+// what they are load-bearing for.
+func environment() []string {
+	kept := []string{"PATH", "HOME", "XDG_CONFIG_HOME"}
+	env := make([]string, 0, len(kept)+2)
+	for _, name := range kept {
+		if value, found := os.LookupEnv(name); found {
+			env = append(env, name+"="+value)
+		}
+	}
+	return append(env, "LC_ALL=C", "LANGUAGE=C")
+}
+
 // run executes one read-only git command and returns its raw output.
 func (r *Repo) run(args ...string) ([]byte, error) {
 	full := append([]string{"--no-optional-locks", "-C", r.Path}, args...)
 	cmd := exec.Command("git", full...)
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANGUAGE=C")
+	cmd.Env = environment()
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	if err := cmd.Run(); err != nil {

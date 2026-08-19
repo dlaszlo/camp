@@ -293,12 +293,13 @@ func withoutAStep(built plan.Plan) (Output, refusal.List) {
 
 	out.Islands = map[string][]islands.Entry{}
 	for _, mount := range built.IslandsMounts {
-		// The raw listing, and git is not asked at all. This branch used to
-		// call the same function the shipped step calls, which opens git and
-		// prefers tracked content when the source happens to be a
-		// repository -- so a composition that declares no generation step
-		// still had git knowledge in it, and the fallback it documents was
-		// not the fallback it ran.
+		// The raw listing, and git is not asked what the source
+		// contributes. This branch used to call the same function the
+		// shipped step calls, which opens git and prefers tracked content
+		// when the source happens to be a repository -- so a composition
+		// that declares no generation step still asked git that question,
+		// and the fallback this branch documents was not the fallback it
+		// ran.
 		entries, problems := listed(built, mount)
 		refused.Extend(problems)
 		out.Islands[mount.Target.String()] = entries
@@ -313,11 +314,14 @@ func withoutAStep(built plan.Plan) (Output, refusal.List) {
 
 // listed derives the islands from the source's raw directory listing.
 //
-// Every entry, tracked or not: without a generation step there is nothing
-// that knows what a repository contributes, and camp's core carries no
-// git of its own. The note beside it says so, because a raw listing is a
-// usable answer and not an equivalent one -- the source's own runtime
-// files become islands under it.
+// Every entry, tracked or not: what a repository *contributes* is known
+// to a generation step and to nothing else, and this branch has none, so
+// it asks git nothing. (The core does ask git one question elsewhere --
+// what the code repository tracks under a mount target -- which is a
+// different question and a rule rather than an artefact; the package
+// comment on exclude.go says where that lives.) The note beside this says
+// so, because a raw listing is a usable answer and not an equivalent one
+// -- the source's own runtime files become islands under it.
 func listed(built plan.Plan, mount plan.Islands) ([]islands.Entry, refusal.List) {
 	var refused refusal.List
 	infos, err := pathx.ReadDirBeneath(built.Config.Env, mount.SourceParts)
