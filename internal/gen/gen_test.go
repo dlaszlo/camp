@@ -549,6 +549,95 @@ func TestAnAmbientGitVariableCannotUnlockAMountOverTrackedCode(t *testing.T) {
 	}
 }
 
+// A mount target is excluded even when its name is allow-listed.
+//
+// The two policies answer different questions, and one used to be read as
+// an exemption from the other. allow_overlap decides which lower content
+// may merge into a directory; it says nothing about a mount somebody
+// placed over that directory. With /shared missing from the exclude, the
+// mount source's files stand in the composed tree as untracked code, and
+// 'git add .' stages machine-local storage -- or another repository's
+// data -- into this repository's index.
+//
+// The fixture is the review's: shared/ in both roots, allow_overlap
+// naming it, and a mount at target shared. The tracked-target rule passes
+// legitimately, because the code side of shared/ is untracked, so nothing
+// else stops the composition.
+func TestAMountTargetIsExcludedEvenWhenItsNameIsAllowListed(t *testing.T) {
+	env := testenv.NewEnv(t)
+	testenv.Write(t, filepath.Join(env.Workspace, "shared", "env.md"), "the environment's own note\n")
+	testenv.Write(t, filepath.Join(env.Code, "shared", "code.md"), "the product's own note\n")
+
+	yaml := strings.Replace(env.YAML(), "allow_overlap: [.gitignore]",
+		"allow_overlap: [.gitignore, shared]", 1)
+	yaml = strings.Replace(yaml,
+		`      - { source: "registry",  target: ".registry" }`,
+		`      - { source: "registry",  target: "shared" }`, 1)
+
+	built, out, refused := prepared(t, env, yaml)
+	if !refused.Empty() {
+		t.Fatalf("generation was refused:\n%v", refused)
+	}
+
+	var atShared, beneathShared []string
+	for _, pattern := range out.Patterns {
+		switch {
+		case pattern == "/shared":
+			atShared = append(atShared, pattern)
+		case strings.HasPrefix(pattern, "/shared/"):
+			beneathShared = append(beneathShared, pattern)
+		}
+	}
+	if len(atShared) != 1 {
+		t.Fatalf("the exclude has %d lines for the mount target /shared, wanted "+
+			"exactly one: %v", len(atShared), out.Patterns)
+	}
+	// The coarser line wins over the per-child enumeration without either
+	// knowing about the other: the walk that produces those children skips
+	// a name a mount target covers completely, because nothing of the merge
+	// underneath is ever visible through such a mount.
+	if len(beneathShared) > 0 {
+		t.Errorf("the exclude enumerates inside a directory a mount covers "+
+			"entirely: %v", beneathShared)
+	}
+
+	// Deterministic, because the payload is compared byte for byte against
+	// the mounted file at every up.
+	again, _ := gen.ExcludeLines(built.Config, built)
+	if strings.Join(again, "\n") != strings.Join(out.Patterns, "\n") {
+		t.Errorf("two derivations of the same exclude differ:\n  %v\n  %v",
+			again, out.Patterns)
+	}
+
+	// And git agrees. There is no mount here -- nothing in this repository
+	// may make one -- but git's answer depends on two things only: the
+	// bytes of .git/info/exclude, and what stands in the working tree. Both
+	// are exactly what the composed tree would present, so this is the
+	// question the review asked, put to the real git.
+	testenv.Write(t, filepath.Join(env.Code, ".git", "info", "exclude"), string(out.Exclude))
+	fromTheMount := testenv.Write(t,
+		filepath.Join(env.Code, "shared", "from-the-mount-source.txt"), "storage\n")
+
+	ignored := exec.Command("git", "-C", env.Code, "check-ignore",
+		"--", "shared/from-the-mount-source.txt")
+	ignored.Env = []string{"PATH=" + os.Getenv("PATH"), "LC_ALL=C",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null"}
+	if out, err := ignored.CombinedOutput(); err != nil {
+		t.Errorf("git does not ignore %s through the generated exclude: %v\n%s",
+			fromTheMount, err, out)
+	}
+
+	staged := exec.Command("git", "-C", env.Code, "add", "-n", ".")
+	staged.Env = ignored.Env
+	added, err := staged.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git add -n: %v\n%s", err, added)
+	}
+	if strings.Contains(string(added), "shared/") {
+		t.Errorf("'git add .' would stage what only the mount source supplies:\n%s", added)
+	}
+}
+
 // A composition with no generation step has no exclude at all. That is
 // legal; what is not legal is being quiet about it.
 func TestNoGenerationStepMeansNoExclude(t *testing.T) {

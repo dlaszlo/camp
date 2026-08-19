@@ -119,12 +119,30 @@ func ExcludeLines(cfg config.Config, built plan.Plan) ([]string, refusal.List) {
 		add(path)
 	}
 
+	// Every live mount target, whatever allow_overlap says about its first
+	// component. The two terms of the formula answer different questions
+	// and one used to be read as an exemption from the other: overlap
+	// policy decides which lower content may merge into a directory, and
+	// says nothing about a mount somebody placed over that directory. A
+	// store or a repository mounted at an allow-listed root came through
+	// with no exclude line at all, so its files stood in the composed tree
+	// as untracked code and 'git add .' staged them into the code
+	// repository -- machine-local storage, or another repository's data,
+	// entering this repository's index.
+	//
+	// The coarser line wins over the per-child enumeration above without
+	// either of them knowing about the other: the walk behind
+	// plan.LowerOnlyInsideAllowed skips a name a mount target covers
+	// completely, because nothing of the merge underneath is ever visible
+	// through such a mount. What is left for the seen map is the
+	// exact-string case -- a target whose path is also a workspace root
+	// name -- and one line is what comes out. That line is also the only
+	// one such a name can get: a workspace root entry a mount target covers
+	// gets no read-only bind and no line of its own either
+	// (plan.rootGuards), so while the exception stood, the name was in the
+	// exclude nowhere at all.
 	for _, mount := range built.Mounts {
 		if !mount.InLive || mount.Rel.Empty() {
-			continue
-		}
-		components := mount.Rel.Components()
-		if len(components) == 1 && cfg.AllowsOverlap(components[0]) {
 			continue
 		}
 		add(mount.Rel.String())
