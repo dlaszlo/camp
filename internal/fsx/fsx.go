@@ -214,6 +214,33 @@ func Scratch(prefix string) (Area, func() error, error) {
 	}, nil
 }
 
+// EnsureBase creates a directory camp was pointed at but did not make.
+//
+// The one caller is the state directory. camp keeps its records under
+// $XDG_STATE_HOME, or $HOME/.local/state when that is unset -- and a user
+// who has never run anything that keeps state has no ~/.local at all, so
+// camp's records would be the first thing in it. Refusing there is
+// refusing to run on a machine nobody has used yet, which is exactly the
+// machine somebody is trying camp on for the first time. Measured: a fresh
+// account on a fresh machine, where 'camp up' got as far as the record and
+// stopped.
+//
+// The specification says an application that needs the directory creates
+// it, 0700. That is the whole of what this does, and it is here rather
+// than at the caller because everything camp creates is created in this
+// file.
+//
+// It is not an Area and cannot become one. An Area is confined beneath a
+// root camp holds open, and this is the call that makes such a root
+// possible in the first place -- the same exception Scratch has, for the
+// same reason, and the reason both are so short.
+func EnsureBase(path string, mode os.FileMode) error {
+	if err := os.MkdirAll(path, mode); err != nil {
+		return fmt.Errorf("creating %s: %w", path, err)
+	}
+	return nil
+}
+
 // removeTree is Scratch's own cleanup: the whole directory, including
 // itself.
 func removeTree(root string) error {

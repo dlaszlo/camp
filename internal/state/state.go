@@ -294,8 +294,19 @@ func root() (pathx.Root, error) {
 	}
 	opened, err := pathx.OpenRoot(base)
 	if err != nil {
-		return pathx.Root{}, fmt.Errorf("camp keeps its records in %s, which "+
-			"could not be opened: %w", base, err)
+		// Not there yet is the ordinary first run, not a failure: a user who
+		// has never run anything that keeps state has no ~/.local, and the
+		// specification says whoever needs the directory makes it. Made once
+		// and opened again, so what camp holds is still a directory it
+		// resolved rather than one it assumed.
+		if made := fsx.EnsureBase(base, 0o700); made != nil {
+			return pathx.Root{}, fmt.Errorf("camp keeps its records in %s, "+
+				"which could not be opened (%v) or created: %w", base, err, made)
+		}
+		if opened, err = pathx.OpenRoot(base); err != nil {
+			return pathx.Root{}, fmt.Errorf("camp keeps its records in %s, "+
+				"which could not be opened: %w", base, err)
+		}
 	}
 	// Only a process that was pointed somewhere else mid-run gets here
 	// twice -- the environment does not change under a command -- and the
