@@ -261,9 +261,23 @@ func writer(t *testing.T, label, env, meeting string, size int) *exec.Cmd {
 // directory both processes can see. No pipe, because either side may be
 // blocked inside a syscall this test is about and a reader that has to be
 // serviced would add a schedule of its own.
+// announce publishes one rendezvous name, and does it atomically.
+//
+// Written to a temporary and renamed into place, which is the same rule
+// the code under test is about -- for the same reason, and this file is
+// where forgetting it was measured. os.WriteFile creates the name first
+// and fills it afterwards, so a reader that waits for the name to exist
+// can read it while it is still empty. That is not a theoretical window:
+// on a loaded machine the first writer's outcome came back as the empty
+// string, and the test reported it as a failed write with no reason
+// given.
 func announce(t *testing.T, meeting, name, body string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(meeting, name), []byte(body), 0o644); err != nil {
+	temporary := filepath.Join(meeting, "."+name+".partial")
+	if err := os.WriteFile(temporary, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(temporary, filepath.Join(meeting, name)); err != nil {
 		t.Fatal(err)
 	}
 }
