@@ -1,0 +1,100 @@
+# What runs on every push, and why it can run all of it.
+#
+# The measurements camp needs are the ones a laptop cannot give you: a
+# machine where sudo does not ask, where an install is free, and where
+# mounting for the whole machine disturbs nobody. A hosted runner is
+# exactly that -- it is a virtual machine that exists for the length of one
+# job and is thrown away afterwards -- so the group that used to need a
+# person at a terminal runs here directly, with no machine inside the
+# machine.
+#
+# The same stage files run here and on the throwaway machine
+# measure/vm boots locally. They are in measure/vm/guest, they run in
+# name order, and each is a program that exits non-zero when what it
+# measures does not hold. Adding a measurement is adding a file there and
+# nothing else -- this workflow discovers them.
+name: build, test, measure
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The half anybody can run, on any machine, with no privilege at all.
+  # Separated because a failure here is a failure of the code, and a
+  # failure below is a failure of the code on a machine.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: the ordinary build
+        run: |
+          go build ./...
+          go vet ./...
+          CAMP_TEST_ROOT="$RUNNER_TEMP/plain" go test ./...
+
+      - name: the build with the barriers, which nobody ships
+        run: |
+          go build -tags camptest ./...
+          go vet -tags camptest ./...
+          CAMP_TEST_ROOT="$RUNNER_TEMP/barriers" go test -tags camptest ./...
+
+      - name: the package builds
+        run: packaging/deb/build
+
+  # And the half that needs a machine of its own, which this is.
+  measure:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: camp }
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: camp/go.mod
+          cache-dependency-path: camp/go.sum
+          cache: true
+
+      - name: what machine this is
+        run: bash camp/measure/vm/guest/05-the-machine
+
+      # overlay is a module, and camp reads /proc/filesystems and refuses
+      # when it is not listed -- correctly, because a user namespace cannot
+      # load one. A runner has it loaded already; asking costs nothing and
+      # says so when it does not.
+      - name: overlay
+        run: sudo modprobe overlay || true
+
+      - name: every stage, in name order
+        run: |
+          set -e
+          export CAMP_SRC="$GITHUB_WORKSPACE/camp"
+          export CAMP_MEASURE="$CAMP_SRC/measure"
+          export CAMP_ENV="$HOME/campcheck"
+          for stage in "$CAMP_MEASURE"/vm/guest/*; do
+              name=$(basename "$stage")
+              case "$name" in
+                  05-*) continue ;;   # already run, above
+              esac
+              printf '\n=== %s ===\n\n' "$name"
+              bash "$stage"
+          done
+
+      - name: what it left behind, if it failed
+        if: failure()
+        run: |
+          echo "--- mounts under the composition and in /run/camp ---"
+          awk -v e="$HOME/campcheck" '$5 == e || index($5, e "/") == 1 ||
+              index($5, "/run/camp") == 1 {print $1, $5}' /proc/self/mountinfo || true
+          echo "--- records ---"
+          ls -la "$HOME/.local/state/camp" 2>/dev/null || echo "none"

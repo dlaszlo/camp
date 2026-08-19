@@ -1,0 +1,66 @@
+# A tag becomes a release with a package attached to it.
+#
+# The version in the package and the version 'camp --version' prints are
+# the same string, because packaging/deb/build puts the one it was given
+# into both. Tag v0.3.1 and the package is 0.3.1.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: the version to build, without the leading v
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Nothing is released that has not passed the suite on the machine
+      # that is about to build it.
+      - name: both builds
+        run: |
+          go build ./... && go vet ./...
+          CAMP_TEST_ROOT="$RUNNER_TEMP/plain" go test ./...
+          go build -tags camptest ./... && go vet -tags camptest ./...
+          CAMP_TEST_ROOT="$RUNNER_TEMP/barriers" go test -tags camptest ./...
+
+      - name: build the package
+        id: package
+        run: |
+          version="${{ inputs.version }}"
+          [ -n "$version" ] || version="${GITHUB_REF_NAME#v}"
+          package=$(packaging/deb/build "$version")
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          dpkg-deb -I "$package"
+
+      - name: publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.package }}
+          generate_release_notes: true
+          body: |
+            Install on Debian or Ubuntu:
+
+            ```
+            sudo dpkg -i ${{ steps.package.outputs.package }}
+            camp doctor
+            ```
+
+            The package installs the binary at `/usr/bin/camp`, the AppArmor
+            profile that grants the rootless mode its user namespace, and a
+            request for the `overlay` module at boot. It needs `git` at run
+            time and nothing else.
