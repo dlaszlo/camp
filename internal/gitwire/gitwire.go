@@ -309,6 +309,31 @@ func (r *Repo) run(args ...string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// fed executes one read-only git command with names on its standard
+// input, and returns its raw output.
+//
+// It exists for check-ignore, which is the one command here that takes a
+// list rather than a pathspec -- and which accepts the null-separated
+// form only when the list arrives on stdin. That form is not a
+// nicety: a filename may contain a newline, and the line-separated
+// output quotes such a name instead of printing it, so a reader splitting
+// on newlines would either mis-read the name or have to un-quote it.
+// Null-separated is the same rule this package reads git's other output
+// by.
+func (r *Repo) fed(stdin []byte, args ...string) ([]byte, error) {
+	full := append([]string{"--no-optional-locks", "-C", r.Path}, args...)
+	cmd := exec.Command("git", full...)
+	cmd.Env = environment()
+	cmd.Stdin = bytes.NewReader(stdin)
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if err := cmd.Run(); err != nil {
+		return out.Bytes(), fmt.Errorf("git %s in %s: %w: %s",
+			strings.Join(args, " "), r.Path, err, strings.TrimSpace(errOut.String()))
+	}
+	return out.Bytes(), nil
+}
+
 // literal builds a pathspec that means exactly this path: no wildcard
 // interpretation, anchored at the repository root.
 //
@@ -325,6 +350,52 @@ func splitZero(data []byte) []string {
 		}
 	}
 	return out
+}
+
+// Ignored reports which of these names the repository's ignore rules
+// cover.
+//
+// What it is for, and what it deliberately does not do: the accepted
+// snapshot records what is in a repository's root rather than what git
+// tracks, because the composed tree shows what is on disk -- an ignored
+// file at a root still appears in the tree and still collides with a name
+// on the other side. So this never filters anything. It answers the
+// question a person asks when camp reports a new root entry and they have
+// to choose between accepting it and removing it: is this content, or is
+// it something a tool left?
+//
+// A tracked path is not reported, which is git's own rule and the right
+// one here: ignore patterns do not apply to what is tracked, so a tracked
+// file matching one is content that somebody added deliberately.
+//
+// A nil repository ignores nothing. There is no work tree to ask, which
+// is an answer rather than a failure -- the composition is not required
+// to be a git repository at all.
+func (r *Repo) Ignored(names []string) (map[string]bool, error) {
+	covered := map[string]bool{}
+	if r == nil || len(names) == 0 {
+		return covered, nil
+	}
+	var asked bytes.Buffer
+	for _, name := range names {
+		asked.WriteString(name)
+		asked.WriteByte(0)
+	}
+	out, err := r.fed(asked.Bytes(), "check-ignore", "-z", "--stdin")
+	if err != nil {
+		// One is "nothing matched", which is an answer and not a failure.
+		// git reserves it for exactly that, and anything above it is a real
+		// error worth reporting.
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return covered, nil
+		}
+		return nil, err
+	}
+	for _, name := range splitZero(out) {
+		covered[name] = true
+	}
+	return covered, nil
 }
 
 // TracksUnder reports whether anything the repository tracks resolves at

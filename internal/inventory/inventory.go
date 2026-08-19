@@ -212,6 +212,29 @@ type Difference struct {
 	// Blocks is true when the difference stops an up. A new workspace root
 	// entry and a type change block; everything else warns.
 	Blocks bool
+	// Ignored says the code repository's ignore rules cover this name.
+	//
+	// It changes nothing about what camp does -- the snapshot records what
+	// is in a root because the composed tree shows what is on disk, and an
+	// ignored file at a root appears in the tree like any other. It is
+	// said because it is what the reader is about to go and find out: a new
+	// root entry has to be accepted or removed, and "git ignores it" is
+	// most of the answer.
+	Ignored bool
+}
+
+// Ignoring is the only thing this package asks of anything git-shaped,
+// and it is an interface here rather than an import so that it asks it of
+// whatever the caller has open.
+//
+// The snapshot itself stays free of git on purpose: what it records is
+// what a root holds, because that is what the overlay merges and what the
+// derived binds and the generated exclude are built from. A snapshot
+// filtered by ignore rules would answer a different question from the one
+// the kernel answers, and it shares its enumeration with the exclude, so
+// the two would start describing different sets.
+type Ignoring interface {
+	Ignored(names []string) (map[string]bool, error)
 }
 
 // Describe renders one difference for a person.
@@ -222,8 +245,15 @@ func (d Difference) Describe() string {
 	}
 	switch d.Kind {
 	case "appeared":
-		return fmt.Sprintf("%s has a new root entry %q (%s)",
+		said := fmt.Sprintf("%s has a new root entry %q (%s)",
 			where, d.Entry.Name, d.Entry.Type)
+		if d.Ignored {
+			// Only on an entry that appeared: the question this answers is
+			// whether to accept it or remove it, and that question is only
+			// asked about something new.
+			said += " -- and git ignores it, so it is likely something a tool left"
+		}
+		return said
 	case "disappeared":
 		return fmt.Sprintf("%s no longer has the root entry %q (%s)",
 			where, d.Was.Name, d.Was.Type)
@@ -273,7 +303,7 @@ func Compare(accepted, current Snapshot) []Difference {
 // A missing snapshot is refused rather than generated: an up that wrote
 // the file it was supposed to be checked against would swallow the signal
 // entirely.
-func Check(root pathx.Root, current Snapshot) (refused refusal.List, warnings []string) {
+func Check(root pathx.Root, current Snapshot, code Ignoring) (refused refusal.List, warnings []string) {
 	accepted, found, err := Load(root)
 	switch {
 	case err != nil:
@@ -299,7 +329,7 @@ func Check(root pathx.Root, current Snapshot) (refused refusal.List, warnings []
 		return refused, nil
 	}
 
-	for _, difference := range Compare(accepted, current) {
+	for _, difference := range marked(Compare(accepted, current), code) {
 		if !difference.Blocks {
 			warnings = append(warnings, difference.Describe())
 			continue
@@ -307,6 +337,38 @@ func Check(root pathx.Root, current Snapshot) (refused refusal.List, warnings []
 		refused.Group(unaccepted(difference.Kind, root.Name()), "%s", difference.Describe())
 	}
 	return refused, warnings
+}
+
+// marked asks the code repository which of the new names it ignores.
+//
+// The upper side only, and that is where the churn is: a repository that
+// is built and tested in grows caches and artefacts at its root, and the
+// workspace is the side nothing runs in. Asking about the other side
+// would mean opening a second repository for a clause in a sentence.
+//
+// It never fails the comparison. Nothing asked, git unreadable, a
+// repository that is not one: the differences come back unmarked, which
+// is what they were before anybody thought to ask.
+func marked(differences []Difference, code Ignoring) []Difference {
+	if code == nil {
+		return differences
+	}
+	var names []string
+	for _, difference := range differences {
+		if difference.Kind == "appeared" && difference.Entry.Side == Upper {
+			names = append(names, difference.Entry.Name)
+		}
+	}
+	ignored, err := code.Ignored(names)
+	if err != nil {
+		return differences
+	}
+	for index, difference := range differences {
+		if difference.Kind == "appeared" && ignored[difference.Entry.Name] {
+			differences[index].Ignored = true
+		}
+	}
+	return differences
 }
 
 // unaccepted is how a blocking difference says itself.
@@ -336,7 +398,7 @@ func unaccepted(kind, env string) refusal.Group {
 // as an empty report: the caller prints what this returns, and empty
 // reads as "nothing has changed" -- which is a statement about the two
 // repositories made on the strength of not having looked at them.
-func Report(root pathx.Root, current Snapshot) (string, error) {
+func Report(root pathx.Root, current Snapshot, code Ignoring) (string, error) {
 	accepted, found, err := Load(root)
 	switch {
 	case err != nil:
@@ -349,7 +411,7 @@ func Report(root pathx.Root, current Snapshot) (string, error) {
 			"nothing to compare the two repositories against. 'camp accept' "+
 			"takes one", Path(root.Name()))
 	}
-	differences := Compare(accepted, current)
+	differences := marked(Compare(accepted, current), code)
 	if len(differences) == 0 {
 		return "", nil
 	}

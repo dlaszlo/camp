@@ -90,7 +90,7 @@ func Scan(built plan.Plan) Report {
 	}
 
 	report.gate(built)
-	report.inventory(built)
+	report.inventory(built, code)
 	return report
 }
 
@@ -224,9 +224,9 @@ func (r *Report) gate(built plan.Plan) {
 	}
 }
 
-func (r *Report) inventory(built plan.Plan) {
+func (r *Report) inventory(built plan.Plan, code *gitwire.Repo) {
 	current := inventory.Take(built.LowerRoot, built.UpperRoot)
-	text, err := inventory.Report(built.Config.Root, current)
+	text, err := inventory.Report(built.Config.Root, current, code)
 	if err != nil {
 		// A snapshot that is missing or damaged is the comparison not
 		// running, and it is named here rather than reported as no

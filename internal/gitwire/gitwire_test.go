@@ -561,3 +561,66 @@ func TestAWorktreePathWithASpaceIsReadWhole(t *testing.T) {
 		t.Errorf("the checkout at %q was not read back as itself: %q", checkout, paths)
 	}
 }
+
+// What a repository ignores, asked about the names at its root.
+//
+// This is not a filter and must never become one: the accepted snapshot
+// records what a root holds, because the composed tree shows what is on
+// disk and an ignored file collides with a name on the other side like
+// any other. What it is for is the sentence camp says when a new root
+// entry turns up -- whether to accept it or to remove it is the reader's
+// question, and this is most of the answer.
+func TestWhatARepositoryIgnoresAtItsRoot(t *testing.T) {
+	directory := filepath.Join(testenv.Root(t), "code")
+	testenv.GitRepo(t, directory)
+	testenv.Write(t, filepath.Join(directory, ".gitignore"), "/build\n/camp\n*.log\n")
+	testenv.Write(t, filepath.Join(directory, "README.md"), "the product\n")
+	testenv.Write(t, filepath.Join(directory, "kept.log"), "tracked despite the pattern\n")
+	// Force, because "git add -A" will not stage what the rules cover --
+	// which is the only way to arrive at a tracked file matching an ignore
+	// pattern, and the case this has to tell apart.
+	testenv.Force(t, directory, "kept.log")
+	testenv.Commit(t, directory, "the code")
+
+	testenv.Write(t, filepath.Join(directory, "build", "artefact"), "output\n")
+	testenv.Write(t, filepath.Join(directory, "camp"), "a built binary\n")
+	testenv.Write(t, filepath.Join(directory, "notes.log"), "left by something\n")
+
+	repo := open(t, directory)
+	ignored, err := repo.Ignored([]string{
+		"README.md", "kept.log", "build", "camp", "notes.log", "never-existed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"build", "camp", "notes.log"} {
+		if !ignored[name] {
+			t.Errorf("%q is ignored and was not reported as ignored", name)
+		}
+	}
+	// A tracked path is not reported, which is git's own rule and the right
+	// one here: an ignore pattern does not apply to what is tracked, so a
+	// tracked file matching one is content somebody added deliberately.
+	if ignored["kept.log"] {
+		t.Error("a tracked file matching an ignore pattern was reported as ignored")
+	}
+	if ignored["README.md"] || ignored["never-existed"] {
+		t.Errorf("something not ignored was reported as ignored: %v", ignored)
+	}
+
+	// Nothing matching is an answer and not a failure: git says so with an
+	// exit status this has to tell apart from a real error.
+	none, err := repo.Ignored([]string{"README.md"})
+	if err != nil {
+		t.Fatalf("asking about a name nothing covers failed: %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("nothing is ignored and %v came back", none)
+	}
+
+	// And a composition is not required to be a git repository at all.
+	var absent *gitwire.Repo
+	if covered, err := absent.Ignored([]string{"camp"}); err != nil || len(covered) != 0 {
+		t.Errorf("a repository that is not there answered %v, %v", covered, err)
+	}
+}

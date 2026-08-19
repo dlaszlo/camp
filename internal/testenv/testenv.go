@@ -344,6 +344,15 @@ func Commit(t *testing.T, path, message string) {
 	git(t, path, "commit", "--quiet", "--allow-empty", "-m", message)
 }
 
+// Force stages a path the ignore rules cover, which "git add -A" will not
+// do -- the one way to end up with a tracked file that an ignore pattern
+// matches, and the case a reader of those rules has to be able to tell
+// apart.
+func Force(t *testing.T, path, name string) {
+	t.Helper()
+	git(t, path, "add", "-f", "--", name)
+}
+
 func git(t *testing.T, path string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", path}, args...)...)

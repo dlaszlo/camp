@@ -107,7 +107,12 @@ func (c *checker) run() (Plan, refusal.List) {
 	// The accepted snapshot: a new name at the workspace root changes what
 	// the derived binds protect and what the exclude covers, so it has to
 	// be a change somebody decided rather than one that happened.
-	problems, warnings := inventory.Check(c.cfg.Root, inventory.Take(lowerRoot, upperRoot))
+	// The code repository comes with it, so a new root entry it ignores can
+	// say so. It is the same repository this checker already opened, and
+	// nothing about the comparison depends on it: the snapshot records what
+	// a root holds either way.
+	problems, warnings := inventory.Check(
+		c.cfg.Root, inventory.Take(lowerRoot, upperRoot), c.code)
 	c.refused.Extend(problems)
 	built.Warnings = append(c.warnings, warnings...)
 

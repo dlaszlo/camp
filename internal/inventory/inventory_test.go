@@ -170,3 +170,40 @@ func TestADamagedSnapshotIsRefusedRatherThanIgnored(t *testing.T) {
 		t.Fatalf("the rules that fired were %v", refused.Rules())
 	}
 }
+
+// A new name at the code root that git ignores is said to be ignored.
+//
+// It is not filtered, and that is the point of testing it: the snapshot
+// records what a root holds because the composed tree shows what is on
+// disk, so a build artefact at the root is a real root entry and collides
+// with a name on the other side like any other. What changes is the
+// sentence. The reader's question is whether to accept the entry or
+// remove it, and "git ignores it" is most of the answer -- measured on
+// this repository, whose root grew a six-megabyte binary from 'go build
+// -o camp' and reported it beside two directories that belonged there.
+func TestANewCodeRootEntryGitIgnoresSaysSo(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+	testenv.Write(t, filepath.Join(env.Code, ".gitignore"), "/camp\n")
+	testenv.Commit(t, env.Code, "ignore what the build leaves")
+	testenv.Write(t, filepath.Join(env.Code, "camp"), "a built binary\n")
+	testenv.Write(t, filepath.Join(env.Code, "CHANGELOG.md"), "content\n")
+
+	built, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Empty() {
+		t.Fatalf("a new name on the code side should not stop a composition:\n%v", refused)
+	}
+	said := strings.Join(built.Warnings, "\n")
+
+	if !strings.Contains(said, `"camp"`) {
+		t.Fatalf("the ignored entry was filtered out instead of reported:\n%s", said)
+	}
+	for _, line := range built.Warnings {
+		switch {
+		case strings.Contains(line, `"camp"`) && !strings.Contains(line, "git ignores it"):
+			t.Errorf("an ignored entry was reported without saying so:\n  %s", line)
+		case strings.Contains(line, `"CHANGELOG.md"`) && strings.Contains(line, "git ignores it"):
+			t.Errorf("an entry git tracks was called ignored:\n  %s", line)
+		}
+	}
+}
