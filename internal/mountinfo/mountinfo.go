@@ -14,7 +14,9 @@ package mountinfo
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -84,6 +86,23 @@ func (e Entry) Has(option string) bool {
 }
 
 // Read parses a mount table.
+//
+// There is no size limit here, and no number that could be the wrong one.
+// A bufio.Scanner needs a maximum token length decided in advance, and
+// the 1 MiB this used to carry was nobody's measurement: the mount API
+// takes an overlay's lower layers one at a time, so the option string the
+// kernel prints back is bounded by how many layers a composition has and
+// not by the single page an option string was once written in. A legal
+// line refused for its length would be the same refusal this reader
+// exists to prevent, so the line is read with bufio.Reader.ReadString,
+// which grows to whatever the kernel wrote and stops at nothing else.
+//
+// A record ends at \n and at no other byte. bufio.ScanLines also drops a
+// trailing \r, and \r is a byte the kernel does not escape: an overlay
+// whose lowerdir ends in one puts it at the end of the super options,
+// which is the last field of the line. Scanning would have taken it off
+// and renamed that layer quietly -- the same class of bug as splitting on
+// it, one field further along.
 func Read(path string) ([]Entry, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -92,32 +111,45 @@ func Read(path string) ([]Entry, error) {
 	defer file.Close()
 
 	var entries []Entry
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	reader := bufio.NewReader(file)
 	number := 0
-	for scanner.Scan() {
-		number++
-		entry, err := parse(scanner.Text())
-		if err != nil {
-			// The whole snapshot goes, and camp says why. A dropped line is a
-			// partial answer presented as a complete one: the line camp could
-			// not read may be the mount that completeness, the residue scan,
-			// the guard against a second composition or a teardown needed to
-			// see, and every one of those decides by what the table does not
-			// contain.
-			return nil, fmt.Errorf("the mount table %s could not be read: line "+
-				"%d does not parse: %w.\n%s\ncamp reads the whole table or none "+
-				"of it: a line it cannot read may be the mount a check is looking "+
-				"for, and dropping it would turn a partial answer into a complete "+
-				"one", path, number, err, scanner.Text())
+	for {
+		line, readErr := reader.ReadString('\n')
+		// ReadString returns what it read before the error, so the last
+		// record of a file that does not end in a newline is still a record.
+		if line != "" {
+			number++
+			record := strings.TrimSuffix(line, "\n")
+			entry, err := parse(record)
+			if err != nil {
+				// The whole snapshot goes, and camp says why. A dropped line is a
+				// partial answer presented as a complete one: the line camp could
+				// not read may be the mount that completeness, the residue scan,
+				// the guard against a second composition or a teardown needed to
+				// see, and every one of those decides by what the table does not
+				// contain.
+				return nil, fmt.Errorf("the mount table %s could not be read: line "+
+					"%d does not parse: %w.\n%s\ncamp reads the whole table or none "+
+					"of it: a line it cannot read may be the mount a check is looking "+
+					"for, and dropping it would turn a partial answer into a complete "+
+					"one", path, number, err, record)
+			}
+			entries = append(entries, entry)
 		}
-		entries = append(entries, entry)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return entries, nil
+			}
+			return nil, fmt.Errorf("reading the mount table %s: %w", path, readErr)
+		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("reading the mount table %s: %w", path, err)
-	}
-	return entries, nil
 }
+
+// mandatory is how many fields stand before the optional ones: id,
+// parent, major:minor, root, mount point, per-mount options. The search
+// for the separator starts past them because those six are positional --
+// a "-" standing in one of them is a name, not this record's separator.
+const mandatory = 6
 
 // parse reads one record.
 //
@@ -125,15 +157,41 @@ func Read(path string) ([]Entry, error) {
 // fstype source superoptions. The optional fields are what make this
 // worth a parser rather than a field index -- there may be none, and the
 // separator is the only thing that says where they end.
+//
+// The grammar is the kernel's, not Go's. show_mountinfo writes one
+// literal 0x20 between fields and escapes exactly " \t\n\\" inside the
+// pathnames it prints; carriage return, vertical tab and form feed are
+// legal in a filename and go out raw. strings.Fields splits on every byte
+// Unicode calls whitespace and coalesces runs of them, so one unrelated
+// mount whose name carried a \r turned into an extra field or a shifted
+// separator -- and since a record that does not parse stops the whole
+// table, that one mount made every camp command on the machine refuse,
+// 'camp down' among them, with no way to get out of it. So: split on
+// 0x20 and on nothing else, and hand every other byte to the escape
+// decoder exactly as the kernel wrote it.
 func parse(line string) (Entry, error) {
-	fields := strings.Fields(line)
+	if line == "" {
+		return Entry{}, errors.New("the record is empty")
+	}
+	fields := strings.Split(line, " ")
+	// Nothing is coalesced. The kernel writes one space between fields, so
+	// two in a row are an empty field: a record camp cannot read rather
+	// than one to absorb quietly, because absorbing it would mean guessing
+	// which mount the line describes.
+	for index, field := range fields {
+		if field == "" {
+			return Entry{}, fmt.Errorf("field %d of %d is empty: the kernel "+
+				"separates fields with one space and never with two, so this "+
+				"record is not one it wrote", index+1, len(fields))
+		}
+	}
 	if len(fields) < 10 {
 		return Entry{}, fmt.Errorf("a record has at least ten fields and this "+
 			"one has %d", len(fields))
 	}
 
 	separator := -1
-	for index := 6; index < len(fields); index++ {
+	for index := mandatory; index < len(fields); index++ {
 		if fields[index] == "-" {
 			separator = index
 			break
@@ -143,9 +201,27 @@ func parse(line string) (Entry, error) {
 		return Entry{}, fmt.Errorf("there is no \"-\" separating the optional " +
 			"fields from the filesystem type")
 	}
-	if separator+3 > len(fields) {
+	// Exactly three, in both directions.
+	//
+	// Not fewer: the guard here read separator+3 > len(fields), which is
+	// false when two fields remain, so a record whose super options were
+	// missing parsed with an empty one -- and an empty super options field
+	// is how the overlay comparison reads "no upperdir".
+	//
+	// Not more either, and that is safe because none of the three can
+	// carry a raw separator byte. show_mountinfo prints the filesystem
+	// type and the source through mangle(), which is seq_escape over
+	// " \t\n\\"; the super options go out through the helpers a
+	// filesystem's show_options is written against, and seq_show_option in
+	// include/linux/seq_file.h escapes ", \t\n\\" -- the space is in every
+	// one of those sets. So a fourth field after "-" is not a source with
+	// a space in its name, which arrives as \040. It is a line no reader
+	// of this ABI can assign fields to, and refusing it is the same answer
+	// as refusing any other malformed record.
+	if got := len(fields) - separator - 1; got != 3 {
 		return Entry{}, fmt.Errorf("the separator is followed by %d fields and "+
-			"a record needs three after it", len(fields)-separator-1)
+			"a record has exactly three after it: the filesystem type, the "+
+			"source and the super options", got)
 	}
 
 	id, err := strconv.Atoi(fields[0])
@@ -162,24 +238,26 @@ func parse(line string) (Entry, error) {
 	}
 
 	entry := Entry{
-		ID:       id,
-		Parent:   parent,
-		Major:    major,
-		Minor:    minor,
-		Root:     Unescape(fields[3]),
-		Point:    Unescape(fields[4]),
-		Options:  strings.Split(fields[5], ","),
-		Optional: fields[6:separator],
+		ID:      id,
+		Parent:  parent,
+		Major:   major,
+		Minor:   minor,
+		Root:    Unescape(fields[3]),
+		Point:   Unescape(fields[4]),
+		Options: strings.Split(fields[5], ","),
+		// Carried, not vetted. The kernel is free to add a tag, and a parser
+		// that refused an unknown one would refuse a legal host on a newer
+		// kernel for a field camp reads only as "is there anything here at
+		// all" -- which is what Private() asks, and any tag answers it.
+		Optional: fields[mandatory:separator],
 		FSType:   Unescape(fields[separator+1]),
 		Source:   Unescape(fields[separator+2]),
 		Line:     line,
 		Super:    map[string]string{},
 	}
-	if separator+3 < len(fields) {
-		entry.SuperRaw = fields[separator+3]
-		for key, value := range SplitOptions(entry.SuperRaw) {
-			entry.Super[key] = value
-		}
+	entry.SuperRaw = fields[separator+3]
+	for key, value := range SplitOptions(entry.SuperRaw) {
+		entry.Super[key] = value
 	}
 	return entry, nil
 }
@@ -242,13 +320,28 @@ func splitEscaped(raw string, separator byte) []string {
 	return parts
 }
 
+// escaped is the whole vocabulary show_mountinfo can write, built once
+// because it is applied to four fields of every line of a table that has
+// hundreds.
+var escaped = strings.NewReplacer(
+	`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`,
+)
+
 // Unescape undoes mountinfo's octal escaping of space, tab, newline and
 // backslash.
-func Unescape(field string) string {
-	return strings.NewReplacer(
-		`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`,
-	).Replace(field)
-}
+//
+// Those four and no others, because the kernel escapes exactly the set
+// " \t\n\\". The bytes a filename may carry that Go also calls
+// whitespace -- \r, \v, \f -- arrive raw and belong in the name
+// unchanged; that is the same fact the field split rests on.
+//
+// Anything else that looks like an escape is left byte for byte as it
+// was read. The kernel cannot have written it, so decoding it would be
+// guessing at a name, and a name camp guessed at is one it goes on to
+// compare against a real path. There is no ambiguity to resolve: a
+// backslash of its own is always \134, so a file genuinely called \040
+// arrives as \134040 and comes back out as the four characters it is.
+func Unescape(field string) string { return escaped.Replace(field) }
 
 // At returns every mount whose point is exactly this path. There can be
 // several: a mount stacked on another stays listed, and only the topmost

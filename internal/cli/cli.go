@@ -274,13 +274,29 @@ func cmdDoctor(ctx *context, args []string) error {
 		ctx.printf("both modes are available.\n\n")
 	}
 
+	// The table is read before the configuration, because doctor is the
+	// command somebody runs to find out why the others refuse and a table
+	// camp cannot read is exactly why. Read after it, the answer would
+	// exist only on a machine that has a configuration -- which is the
+	// machine whose owner needs it least.
+	table, tableErr := mountinfo.Read(doctorTable)
+
 	cfg, err := resolve(ctx, *file)
 	if err != nil {
 		fmt.Fprintf(ctx.err, "%s\n", render(err))
+	}
+	// Said here, one step after the read, because resolve is where camp
+	// learns which environment's log to keep this in -- and the line camp
+	// could not read is precisely what somebody will go looking for in
+	// that log afterwards.
+	if tableErr != nil {
+		fmt.Fprintf(ctx.err, "%s\n", render(unreadableTable(tableErr)))
+	}
+	if err != nil {
 		if len(usable) == 0 {
 			return failure(ExitPrecondition, "", "this machine is missing something camp needs")
 		}
-		return nil
+		return incomplete(tableErr)
 	}
 
 	ctx.printf("composition: %s\n\n", report.ConfigSummary(cfg))
@@ -300,7 +316,10 @@ func cmdDoctor(ctx *context, args []string) error {
 		}
 	}
 
-	table, tableErr := mountinfo.Read(mountinfo.Self)
+	// The whole section, not the notes that happen to need the table. Half
+	// of it under the same heading would be an incomplete answer printed
+	// in the shape of a complete one, which is what this command was
+	// reported for.
 	if tableErr == nil {
 		if notes := health.Look(cfg, built, table); len(notes) > 0 {
 			ctx.printf("\nthis environment:\n%s", health.Render(notes))
@@ -310,7 +329,57 @@ func cmdDoctor(ctx *context, args []string) error {
 	if len(usable) == 0 {
 		return failure(ExitPrecondition, "", "this machine is missing something camp needs")
 	}
-	return nil
+	return incomplete(tableErr)
+}
+
+// doctorTable is where doctor reads the kernel's table from.
+//
+// A variable, where every other command names the constant, because the
+// test that pins what doctor says when the table cannot be read has no
+// other way to produce one: /proc/self/mountinfo parses on any machine
+// camp can run on at all, and the state being tested is the one nobody
+// can arrange on purpose.
+var doctorTable = mountinfo.Self
+
+// unreadableTable is what doctor says at the moment it finds the kernel's
+// table will not parse.
+//
+// Said here rather than at the end because it is also the reason the
+// environment section further down is missing, and a section that is
+// simply absent reads as a section with nothing to report. What camp did
+// not check is named, so that nothing above is mistaken for an answer to
+// it.
+func unreadableTable(err error) *Error {
+	return failure(ExitPrecondition,
+		"the line camp could not read is quoted above: either the mount it "+
+			"describes goes, or camp's parser is wrong about the kernel's "+
+			"grammar, and that second one is a bug in camp",
+		"mount-table-unreadable: %v.\n"+
+			"So doctor did not check what this environment sits on: which "+
+			"filesystem each of its paths is on, and which flags are locked "+
+			"there for a read-only remount to replicate. Nothing else in this "+
+			"report answers those -- they were not asked. Every camp command "+
+			"reads this same table, so 'camp up', 'camp status' and 'camp "+
+			"down' refuse here too until it parses.", err)
+}
+
+// incomplete is doctor's ending when the table could not be read: nil
+// when it could.
+//
+// Its own answers went out above it, and a command that printed those and
+// then exited 0 would have described this machine as sound while every
+// other camp command refuses on it -- one host state, two accounts of it,
+// which is the thing being repaired. The exit code says incomplete
+// instead, and the last line says which of doctor's answers are the
+// missing ones.
+func incomplete(err error) error {
+	if err == nil {
+		return nil
+	}
+	return failure(ExitPrecondition, "",
+		"mount-table-unreadable: this report is incomplete, not clean. What "+
+			"this environment sits on was not checked, for the reason given "+
+			"further up.")
 }
 
 // cmdInit writes the skeleton and refuses to overwrite an existing one.
