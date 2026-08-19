@@ -20,8 +20,15 @@ env=${CAMP_ENV:-$HOME/campcheck}
 
 cd "$src"
 
-sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
-trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
+# The switch is Ubuntu's and not every machine has it. Where it is absent
+# nothing is restricting the namespace in the first place, which is the
+# state this asks for -- so its absence is not a failure, and neither is
+# putting it back.
+restricted=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo "")
+if [ -n "$restricted" ]; then
+    sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+    trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns='"$restricted" EXIT
+fi
 
 # On ext4 and on tmpfs, both, and named. A read-only remount inside a user
 # namespace has to preserve the flags the source mount has locked, and
