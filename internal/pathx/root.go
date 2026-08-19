@@ -3,6 +3,7 @@ package pathx
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -119,6 +120,32 @@ func (r Root) Identity() (Identity, error) {
 		return Identity{}, fmt.Errorf("looking at %s: %w", r.state.name, err)
 	}
 	return Identity{Device: uint64(st.Dev), Inode: st.Ino}, nil
+}
+
+// Current is the path this directory has now.
+//
+// A Root is the one thing camp holds that a rename cannot move: every
+// operation starts at the descriptor, so the name it was opened by can be
+// changed without changing where camp acts. That is the whole point of it
+// -- and it leaves camp unable to notice that the name *was* changed,
+// which matters wherever camp compares its own paths against something
+// that reports paths of its own.
+//
+// The mount table is that something. It reports a mount at the path it is
+// at now, and a mount point cannot be renamed (C34) while an ancestor
+// can, so renaming the environment root moves every camp mount's reported
+// path while camp goes on looking them up under the old one -- and "no
+// mount is at that path" then answers a question about a name.
+//
+// /proc/self/fd/<descriptor> is the kernel's own answer, recomputed from
+// the dentry tree at every read. A caller compares it against the path it
+// believes this Root to be, and acts on the difference; nothing here
+// decides what that difference means.
+func (r Root) Current() (string, error) {
+	if err := r.held(); err != nil {
+		return "", err
+	}
+	return os.Readlink(fmt.Sprintf("/proc/self/fd/%d", r.state.fd))
 }
 
 // Close releases the descriptor. Closing twice is not an error, and every

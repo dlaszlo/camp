@@ -840,11 +840,25 @@ func (m Mount) OverlayDrift(path string, table []mountinfo.Entry) []string {
 	if !found {
 		return nil
 	}
-	var differences []string
+	// A different filesystem is the end of the comparison, not the first
+	// item of it. Every operand below is read out of the mount's own super
+	// options, and a mount that is not an overlay has none of them -- so
+	// comparing them produces one line per operand saying it is empty,
+	// which reads as a composed tree with five things wrong rather than as
+	// a path with something else at it.
+	//
+	// Measured by the kill matrix: a run killed before the overlay was made
+	// leaves camp's own self-bind at the path the record names for it, and
+	// 'camp status' described that as a composed tree disagreeing with its
+	// record in five ways. One line, saying which filesystem is there, is
+	// the whole of what can be said.
 	if m.FSType != "" && entry.FSType != m.FSType {
-		differences = append(differences, fmt.Sprintf(
-			"it answers as %q and the record says %q", entry.FSType, m.FSType))
+		return []string{fmt.Sprintf("it answers as %q and the record says %q, "+
+			"so what is mounted at %s is not this composed tree",
+			entry.FSType, m.FSType, path)}
 	}
+
+	var differences []string
 	for _, wrong := range m.Overlay().Mismatches(entry) {
 		if wrong.Flag {
 			differences = append(differences, fmt.Sprintf(

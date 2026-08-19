@@ -130,6 +130,16 @@ func Helper(action Action, in io.Reader, out io.Writer) int {
 	return finish(out, reply, code)
 }
 
+// refused puts a ruled refusal into a reply that already carries results.
+func refused(reply Reply, err error) Reply {
+	reply.Error = err.Error()
+	var named ruled
+	if errors.As(err, &named) {
+		reply.Rule = named.rule
+	}
+	return reply
+}
+
 func finish(out io.Writer, reply Reply, code int) int {
 	reply.Version = JobVersion
 	encoded, err := json.Marshal(reply)
@@ -793,6 +803,53 @@ func held(root pathx.Root, parts []string, path string) (mountx.Mounted, error) 
 	return mountx.Mounted{FD: fd, Dir: dir, Name: name, Path: path}, nil
 }
 
+// whereTheBaseIs refuses when the environment root has moved since the job
+// was built.
+//
+// The teardown asks the mount table which of its recorded paths still have
+// something at them, and the table answers about paths. A mount point
+// cannot be renamed while it is mounted -- C34 -- but an ancestor can, and
+// the invoking user owns every one of them: rename the environment root
+// and the kernel reports every camp mount under the new name, while the
+// job still names the old one. Every remaining target then reads "nothing
+// is mounted there", which is a true answer to a question about a name and
+// a false one about the machine.
+//
+// Measured, by the rename race at stands-there: 'camp down' removed the
+// first target, the name was swapped, and it reported the remaining five
+// absent and exited 0 -- so the front end released the record while camp's
+// own composition stood, and no record was left to take it apart with.
+//
+// The descriptor is what answers. It cannot be redirected and it knows
+// where it is, so comparing where it is against where the job says it
+// should be costs one readlink and closes the whole class. A teardown that
+// finds them different stops with nothing unmounted: the record is kept,
+// and putting the directory back where the record names it makes 'camp
+// down' work again.
+func whereTheBaseIs(job Job, root pathx.Root) error {
+	now, err := root.Current()
+	if err != nil {
+		return refuse("helper-base-unreadable",
+			"camp cannot tell where the environment root it opened is now: %v.\n"+
+				"A teardown compares the mount table's paths against the ones the "+
+				"record names, and that comparison is only worth making while "+
+				"those are the same directory. Nothing has been unmounted.", err)
+	}
+	if now == job.Base {
+		return nil
+	}
+	return refuse("helper-base-renamed",
+		"this job is for %s and the directory this helper opened is now at "+
+			"%s.\nSomething renamed it after the job was built. The kernel "+
+			"reports every mount at the path it is at now, so every path in this "+
+			"record would answer \"nothing is mounted there\" -- and a teardown "+
+			"that reported itself finished on that would leave this "+
+			"composition standing with nothing left to take it apart with.\n"+
+			"Nothing has been unmounted and the record is unchanged. Put the "+
+			"directory back at %s and run 'camp down' again.",
+		job.Base, now, job.Base)
+}
+
 // unmount removes the recorded targets, in the order given.
 //
 // It never detaches anything lazily. A mount it cannot remove stays
@@ -828,6 +885,15 @@ func unmount(job Job, root pathx.Root, grave *mountx.Graveyard) Reply {
 		if err != nil {
 			reply.Error = err.Error()
 			return reply
+		}
+
+		// Asked with every read of the table, because the rename can happen
+		// at any point in this loop and everything below reads that table by
+		// path. A rename between this check and the answer below it costs one
+		// target read as absent, and the next turn of the loop stops the job
+		// -- with the record kept, which is what makes that recoverable.
+		if err := whereTheBaseIs(job, root); err != nil {
+			return refused(reply, err)
 		}
 
 		// Whether anything is mounted there at all is the first question,
@@ -911,6 +977,13 @@ func unmount(job Job, root pathx.Root, grave *mountx.Graveyard) Reply {
 			reply.Stranded = append(reply.Stranded, target.Path)
 		}
 		reply.Results = append(reply.Results, result)
+	}
+
+	// And once more after the last target, which the loop's own check
+	// cannot cover: a rename during the final unmount would otherwise be
+	// reported as a teardown that finished.
+	if err := whereTheBaseIs(job, root); err != nil {
+		return refused(reply, err)
 	}
 
 	// The one thing the kernel creates as root: the overlay's leftover
