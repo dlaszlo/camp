@@ -1,0 +1,247 @@
+#!/bin/bash
+#
+# Everything camp can be measured by, on a machine that exists for the
+# length of one run and belongs to nobody.
+#
+# Why this exists. Three things used to need a person: sudo's password,
+# which cannot be typed without a terminal (C33); the apparmor gate, which
+# grants the namespace permission to one *installed* binary path and so
+# needs an install; and the fact that the privileged mode is machine-wide,
+# so it cannot run beside anybody's work. A throwaway virtual machine
+# answers all three at once. Inside it, passwordless sudo is not a hole
+# because there is nothing behind it, an install is free, and the machine
+# is the only thing on the machine.
+#
+# What it is not: a container. The privileged mode needs a real filesystem
+# for the trusted.overlay.* namespace, a systemd machine so that / is
+# shared and the propagation rules camp is written around actually apply,
+# and no overlay underneath its own overlay. A container fails all three
+# and would measure something else while looking like it had measured this.
+#
+#   ./run                 prepare if needed, then run every stage
+#   ./run 50-kill-matrix  one stage, by name
+#   ./run --shell         boot and leave an ssh session open, for a person
+#   ./run --rebuild       throw the prepared image away and make it again
+#
+# It needs qemu, KVM and about 3 GB of disk. It uses no root on this
+# machine and touches nothing outside its cache directory: the virtual
+# machine is an ordinary user process with user-mode networking.
+#
+# Adding a measurement is adding a file to guest/. They run in name order,
+# the run stops at the first one that fails, and each one is a program that
+# exits non-zero when what it measures does not hold.
+
+set -u -o pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+repo=${CAMP_REPO:-$(cd "$here/../.." && pwd)}
+cache=${CAMP_VM_CACHE:-$HOME/.cache/camp-vm}
+log=${CAMP_VM_LOG:-$here/vm.log}
+
+# The newest release, on purpose: every constraint in this project is a
+# fact about a kernel, so a machine measuring them should carry a kernel of
+# the same generation as the one camp runs on.
+#
+# Not because an older one was measured to fail. On the first image tried
+# here -- two releases back -- the overlay probe did fail, but that machine
+# also had no overlay module loaded, which is enough on its own to explain
+# it, and the two were never separated. Which kernels camp needs is written
+# in docs/install.md from what the syscalls it uses were added in, and it
+# has not been measured against a range of them.
+image_url=${CAMP_VM_IMAGE_URL:-https://cloud-images.ubuntu.com/stonking/current/stonking-server-cloudimg-amd64.img}
+base=$cache/base.img
+prepared=$cache/prepared.qcow2
+seed=$cache/seed.iso
+key=$cache/id_ed25519
+disk=$cache/run.qcow2
+console=$cache/console.log
+pidfile=$cache/qemu.pid
+port=${CAMP_VM_PORT:-2242}
+memory=${CAMP_VM_MEMORY:-4096}
+cpus=${CAMP_VM_CPUS:-4}
+
+say() { printf '\n=== %s ===\n\n' "$*"; }
+die() { printf '%s\n' "$*" >&2; exit 2; }
+
+ssh_to() {
+    ssh -q -i "$key" -p "$port" \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=5 -o LogLevel=ERROR \
+        camp@127.0.0.1 "$@"
+}
+
+# --- the machine ----------------------------------------------------------
+
+need_tools() {
+    for tool in qemu-system-x86_64 qemu-img xorriso ssh ssh-keygen rsync curl; do
+        command -v "$tool" >/dev/null || die "$tool is not installed"
+    done
+    [ -r /dev/kvm ] && [ -w /dev/kvm ] ||
+        die "/dev/kvm is not yours to open. Without it this would run under
+emulation, which is slow enough that nobody would run it."
+}
+
+# make_seed writes the one-off configuration the machine reads at first
+# boot: who may log in, and what to install before anything else runs.
+make_seed() {
+    local work="$cache/seed"
+    rm -rf "$work"
+    mkdir -p "$work"
+    sed "s|CAMP_VM_PUBLIC_KEY|$(cat "$key.pub")|" \
+        "$here/cloud-init/user-data" > "$work/user-data"
+    cp "$here/cloud-init/meta-data" "$work/meta-data"
+    xorriso -as mkisofs -quiet -output "$seed" -volid CIDATA -joliet -rock \
+        "$work/user-data" "$work/meta-data" || die "the seed image could not be made"
+}
+
+# prepare boots the machine once, lets it install what the measurements
+# need, and keeps the result. Every later run starts from it, so the
+# download and the install happen once rather than every time.
+prepare() {
+    mkdir -p "$cache"
+    [ -f "$key" ] || ssh-keygen -q -t ed25519 -N '' -f "$key" -C camp-vm
+
+    # Fetched again when the image asked for is not the one on disk, so
+    # that changing the release in this file is enough to change the
+    # machine. A cached image nobody notices is a measurement of a kernel
+    # nobody chose.
+    if [ ! -f "$base" ] || [ "$(cat "$base.url" 2>/dev/null)" != "$image_url" ]; then
+        say "fetching the machine image (once)"
+        curl -fL --progress-bar "$image_url" -o "$base.part" || die "the image could not be fetched"
+        mv "$base.part" "$base"
+        printf '%s\n' "$image_url" > "$base.url"
+    fi
+
+    make_seed
+
+    say "preparing the machine (once)"
+    rm -f "$prepared"
+    qemu-img create -q -f qcow2 -F qcow2 -b "$base" "$prepared" 20G ||
+        die "the disk could not be made"
+
+    # cloud-init powers it off when it is done, so this run ends by itself.
+    boot "$prepared" || die "the machine would not start"
+    local waited=0
+    while kill -0 "$(cat "$pidfile")" 2>/dev/null; do
+        sleep 5
+        waited=$((waited + 5))
+        [ "$waited" -lt 600 ] || die "the machine did not finish preparing.
+The console is in $console"
+    done
+    printf '  prepared: %s\n' "$prepared"
+}
+
+boot() {
+    local image=$1
+    : > "$console"
+    qemu-system-x86_64 \
+        -accel kvm -cpu host -smp "$cpus" -m "$memory" \
+        -drive "file=$image,if=virtio,format=qcow2" \
+        -drive "file=$seed,if=virtio,format=raw,readonly=on" \
+        -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$port-:22" \
+        -device virtio-net-pci,netdev=n0 \
+        -display none -serial "file:$console" \
+        -pidfile "$pidfile" -daemonize 2>>"$console"
+}
+
+wait_for_ssh() {
+    local waited=0
+    while ! ssh_to true 2>/dev/null; do
+        kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null ||
+            die "the machine stopped before it came up. The console is in $console"
+        sleep 3
+        waited=$((waited + 3))
+        [ "$waited" -lt 300 ] || die "the machine never answered on ssh.
+The console is in $console"
+    done
+}
+
+stop() {
+    [ -f "$pidfile" ] || return 0
+    local pid
+    pid=$(cat "$pidfile")
+    ssh_to sudo poweroff 2>/dev/null
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 60 ]; do
+        sleep 2
+        waited=$((waited + 2))
+    done
+    kill -0 "$pid" 2>/dev/null && kill "$pid"
+    rm -f "$pidfile"
+}
+
+# --- the run --------------------------------------------------------------
+
+main() {
+    local stages=("$@")
+    local shell_only=false rebuild=false
+    local wanted=()
+    for argument in "${stages[@]}"; do
+        case "$argument" in
+            --shell) shell_only=true ;;
+            --rebuild) rebuild=true ;;
+            *) wanted+=("$argument") ;;
+        esac
+    done
+
+    need_tools
+    mkdir -p "$cache"
+    $rebuild && rm -f "$prepared"
+    [ -f "$prepared" ] || prepare
+    [ -f "$seed" ] || make_seed
+
+    say "starting a machine of its own"
+    rm -f "$disk"
+    qemu-img create -q -f qcow2 -F qcow2 -b "$prepared" "$disk" 20G ||
+        die "the disk could not be made"
+    boot "$disk" || die "the machine would not start"
+    trap 'stop; rm -f "$disk"' EXIT
+    wait_for_ssh
+    printf '  up, and it is nobody else'"'"'s\n'
+
+    say "copying the work in"
+    rsync -a --delete -e "ssh -q -i $key -p $port -o StrictHostKeyChecking=no \
+-o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+        --exclude /camp --exclude '*.log' --exclude '*.deb' \
+        "$repo/" camp@127.0.0.1:camp/ || die "the repository could not be copied"
+
+    if $shell_only; then
+        say "yours until you leave it"
+        ssh -i "$key" -p "$port" -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR camp@127.0.0.1
+        return 0
+    fi
+
+    # The stages, in name order, stopping at the first that does not hold.
+    # Their output is the run's output: each is a program that says what it
+    # measured and exits non-zero when it did not hold.
+    local names
+    if [ ${#wanted[@]} -gt 0 ]; then
+        names=("${wanted[@]}")
+    else
+        names=()
+        for stage in "$here"/guest/*; do
+            [ -x "$stage" ] && names+=("$(basename "$stage")")
+        done
+    fi
+
+    local failed=""
+    for name in "${names[@]}"; do
+        say "$name"
+        if ! ssh_to "PATH=/usr/local/go/bin:\$PATH bash camp/measure/vm/guest/$name"; then
+            failed=$name
+            break
+        fi
+    done
+
+    if [ -n "$failed" ]; then
+        say "$failed did not hold -- stopping here"
+        return 1
+    fi
+    say "every stage held"
+}
+
+main "$@" 2>&1 | tee "$log"
+status=${PIPESTATUS[0]}
+printf '\nall of it is in %s\n' "$log"
+exit "$status"

@@ -1,0 +1,44 @@
+#cloud-config
+# What the throwaway machine is, and why each line is here.
+#
+# NOPASSWD is the whole point rather than a shortcut: camp's front end
+# refuses to run as root, so the tests have to be driven by an ordinary
+# user who can elevate without a terminal to type into. On a real machine
+# that arrangement is the one camp's threat model names as dangerous --
+# whoever can edit a configuration reaches root through it. Here the
+# machine exists for twenty minutes and has nothing on it worth reaching.
+users:
+  - name: camp
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    ssh_authorized_keys:
+      - CAMP_VM_PUBLIC_KEY
+
+# Nothing here needs the network afterwards; this is the one moment it
+# does. Go is taken from upstream because the archive's is older than the
+# module needs, and apparmor-utils is what loads the profile the namespace
+# mode is gated behind.
+package_update: true
+packages: [git, rsync, apparmor-utils, curl]
+
+# overlay is a module and a cloud image has never used it, so it is not
+# loaded and /proc/filesystems does not list it -- which camp reads and
+# refuses on, correctly. A user namespace cannot load a module, so waiting
+# for first use would refuse every namespace composition on this machine.
+write_files:
+  - path: /etc/modules-load.d/overlay.conf
+    content: |
+      overlay
+
+runcmd:
+  - [modprobe, overlay]
+  - [sh, -c, "curl -fsSL https://go.dev/dl/go1.25.0.linux-amd64.tar.gz -o /tmp/go.tgz"]
+  - [tar, -C, /usr/local, -xzf, /tmp/go.tgz]
+  - [sh, -c, "echo 'export PATH=/usr/local/go/bin:$PATH' > /etc/profile.d/go.sh"]
+  - [rm, -f, /tmp/go.tgz]
+  - [touch, /var/lib/camp-vm-prepared]
+
+power_state:
+  mode: poweroff
+  timeout: 30

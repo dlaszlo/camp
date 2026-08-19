@@ -58,6 +58,10 @@ func TestEveryFilesystemWriteGoesThroughOnePackage(t *testing.T) {
 			return nil
 		}
 
+		if !testenv.OwnModule(t, root, path) {
+			return nil
+		}
+
 		relative, err := filepath.Rel(root, path)
 		if err != nil {
 			return err

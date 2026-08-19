@@ -1,0 +1,42 @@
+#!/bin/bash
+# The namespace group again, in a namespace of its own rather than inside
+# one camp already made.
+#
+# Why both. The gate grants the namespace to one installed binary path, so
+# a test binary cannot create one -- which is why the group is otherwise
+# run from inside a composition camp opened, with the test making a second
+# namespace inside camp's. That nesting is an arrangement of its own: a
+# mount inherited from another user namespace is locked, and what a nested
+# namespace may do to it is not what a first one may.
+#
+# So this machine, which exists for one run and has nothing to protect,
+# turns the restriction off and runs the same tests unnested. The two
+# together say which arrangement a failure belongs to -- and that is the
+# whole question when one of them fails and the other does not.
+set -eu
+src=${CAMP_SRC:-$HOME/camp}
+measure=${CAMP_MEASURE:-$src/measure}
+env=${CAMP_ENV:-$HOME/campcheck}
+
+cd "$src"
+
+sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
+
+# On ext4 and on tmpfs, both, and named. A read-only remount inside a user
+# namespace has to preserve the flags the source mount has locked, and
+# which flags those are is a property of the filesystem the test tree is
+# on -- so a suite run on one of them has measured one of them.
+rm -rf "$HOME/testroot" /tmp/testroot
+mkdir -p "$HOME/testroot" /tmp/testroot
+
+echo "-- the whole suite, test tree on $(df -T "$HOME/testroot" | tail -1 | awk '{print $2}')"
+CAMP_TEST_ROOT="$HOME/testroot" go test ./internal/... -count=1
+
+# And again on the other filesystem, for the group that depends on which
+# flags a mount carries: /tmp is nosuid,nodev on most machines and a
+# read-only remount inside a user namespace has to replicate exactly those.
+# A suite that only ever ran on one of the two has measured one of them.
+echo
+echo "-- the namespace group again, test tree on $(df -T /tmp/testroot | tail -1 | awk '{print $2}')"
+CAMP_TEST_ROOT=/tmp/testroot go test ./internal/nsx/... ./internal/session/... -count=1

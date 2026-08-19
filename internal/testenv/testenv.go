@@ -28,6 +28,38 @@ import (
 
 // RepoRoot returns the module's own root, for the tests that read camp's
 // source as data -- the guards that keep a rule true by failing the build.
+// OwnModule reports whether a path belongs to this module rather than to
+// one nested inside its tree.
+//
+// The source guards walk the repository and hold every .go file in it to
+// a rule about camp -- that every write goes through fsx, that no unmount
+// is lazy, that every fsconfig call goes through the description. A
+// directory with a go.mod of its own is not camp: measure/ is the
+// instruments, a separate module that imports nothing of camp's on
+// purpose, and it reads and writes with the standard library because that
+// is what measuring camp from outside means.
+//
+// So the guards ask this. It is the same test RepoRoot uses to find the
+// root, applied downwards: the nearest go.mod above a file is the module
+// it is in.
+func OwnModule(t *testing.T, root, path string) bool {
+	t.Helper()
+	directory := filepath.Dir(path)
+	for {
+		if directory == root {
+			return true
+		}
+		if _, err := os.Stat(filepath.Join(directory, "go.mod")); err == nil {
+			return false
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory || len(parent) < len(root) {
+			return true
+		}
+		directory = parent
+	}
+}
+
 func RepoRoot(t *testing.T) string {
 	t.Helper()
 	directory, err := os.Getwd()

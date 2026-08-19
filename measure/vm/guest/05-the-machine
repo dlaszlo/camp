@@ -1,0 +1,21 @@
+#!/bin/bash
+# What machine this is.
+#
+# Every constraint in this project is a fact about a kernel, so a log that
+# does not say which kernel answered is a log of nothing. It is also the
+# first thing to look at when a measurement disagrees with the one before
+# it.
+set -eu
+src=${CAMP_SRC:-$HOME/camp}
+measure=${CAMP_MEASURE:-$src/measure}
+env=${CAMP_ENV:-$HOME/campcheck}
+
+echo "kernel:     $(uname -r)"
+echo "release:    $(. /etc/os-release && echo "$PRETTY_NAME")"
+echo "overlayfs:  $(grep -c overlay /proc/filesystems) entr(y|ies) in /proc/filesystems"
+# The per-mount options, which is field six and not the super options at
+# the end: those are the flags a user namespace locks, and what a
+# read-only remount inside one has to replicate.
+echo "/tmp:       $(awk '$5 == "/tmp" {print $6}' /proc/self/mountinfo | head -1) ($(df -T /tmp | tail -1 | awk '{print $2}'))"
+echo "/:          $(awk '$5 == "/" {print $6}' /proc/self/mountinfo | head -1) ($(df -T / | tail -1 | awk '{print $2}'))"
+echo "userns:     $(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 'no such switch')"

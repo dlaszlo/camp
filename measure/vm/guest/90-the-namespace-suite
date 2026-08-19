@@ -1,0 +1,29 @@
+#!/bin/bash
+# The whole suite again, from inside a composition camp opened.
+#
+# This is the group that cannot run from a checkout at all: the tests that
+# need a real composition skip unless the namespace they need can be
+# created, and creating it needs the installed binary the profile names.
+# Here they run, and nothing may skip for that reason.
+set -eu
+src=${CAMP_SRC:-$HOME/camp}
+measure=${CAMP_MEASURE:-$src/measure}
+env=${CAMP_ENV:-$HOME/campcheck}
+
+cd "$env"
+
+root=/tmp/camp-namespace-test
+rm -rf "$root"
+mkdir -p "$root"
+
+out=$(camp run -- env CAMP_TEST_ROOT="$root" go test -C "$HOME/camp" ./internal/... -count=1 2>&1) || {
+    printf '%s\n' "$out" >&2
+    exit 1
+}
+printf '%s\n' "$out"
+
+if printf '%s' "$out" | grep -q "SKIP.*namespace\|skipping.*install"; then
+    printf '\na test skipped for want of the installed binary, inside the '\
+'composition the installed binary opened\n' >&2
+    exit 1
+fi

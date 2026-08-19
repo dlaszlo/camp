@@ -39,7 +39,7 @@ func TestNothingInCampCanDetachAMountLazily(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") {
+		if !strings.HasSuffix(path, ".go") || !testenv.OwnModule(t, root, path) {
 			return nil
 		}
 		data, err := os.ReadFile(path)
@@ -100,7 +100,7 @@ func TestEveryFsconfigCallGoesThroughTheDescription(t *testing.T) {
 	}
 	var offenders []string
 	for _, path := range testenv.Tracked(t) {
-		if !strings.HasSuffix(path, ".go") {
+		if !strings.HasSuffix(path, ".go") || !testenv.OwnModule(t, root, path) {
 			continue
 		}
 		relative, err := filepath.Rel(root, path)

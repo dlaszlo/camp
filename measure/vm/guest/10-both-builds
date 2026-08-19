@@ -1,0 +1,26 @@
+#!/bin/bash
+# The suite as anybody can run it, in both builds.
+#
+# Nothing here needs the machine to be a machine of its own -- this is what
+# runs on a laptop too. It is first because everything after it assumes the
+# code compiles and its own tests agree with it.
+set -eu
+src=${CAMP_SRC:-$HOME/camp}
+measure=${CAMP_MEASURE:-$src/measure}
+env=${CAMP_ENV:-$HOME/campcheck}
+
+cd "$src"
+
+root=$(mktemp -d /tmp/camp-test-XXXXXX)
+trap 'rm -rf "$root"' EXIT
+
+echo "-- the ordinary build"
+go build ./...
+go vet ./...
+CAMP_TEST_ROOT="$root/plain" go test ./...
+
+echo
+echo "-- the build with the barriers, which nobody ships"
+go build -tags camptest ./...
+go vet -tags camptest ./...
+CAMP_TEST_ROOT="$root/barriers" go test -tags camptest ./...

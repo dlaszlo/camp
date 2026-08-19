@@ -1,0 +1,53 @@
+#!/bin/bash
+# A composition of two repositories, the same shape as the one the
+# measurements have always used.
+#
+# Made here rather than copied in, so that what is measured is a
+# composition camp accepted on this machine rather than one carried from
+# somewhere else with a history nobody looked at.
+set -eu
+src=${CAMP_SRC:-$HOME/camp}
+measure=${CAMP_MEASURE:-$src/measure}
+env=${CAMP_ENV:-$HOME/campcheck}
+
+
+rm -rf "$env"
+mkdir -p "$env"/{workspace,code,live}
+
+git -C "$env/workspace" init -q -b main
+printf 'the workspace, read-only inside the composition\n' > "$env/workspace/notes"
+printf '/live/\n' > "$env/workspace/.gitignore"
+git -C "$env/workspace" add -A
+git -C "$env/workspace" -c user.email=camp@vm -c user.name=camp commit -qm "the workspace"
+
+git -C "$env/code" init -q -b main
+printf '# the code repository, where writes land\n' > "$env/code/README.md"
+printf '/live/\n' > "$env/code/.gitignore"
+git -C "$env/code" add -A
+git -C "$env/code" -c user.email=camp@vm -c user.name=camp commit -qm "the code"
+
+mkdir -p "$env/.camp"
+cat > "$env/.camp/config.yml" <<YAML
+env: $env
+merged: live
+
+repositories:
+  - { name: workspace, path: workspace }
+  - { name: code,      path: code }
+
+overlayfs:
+  lower: [workspace]
+  upper: code
+
+allow_overlap: [.gitignore]
+
+steps:
+  - mount_rw:
+      - { source: "code/.git", target: ".git" }
+  - git_exclude
+YAML
+
+cd "$env"
+camp accept
+camp plan --privileged >/dev/null
+echo "   $env is composed of two repositories and camp accepted it"

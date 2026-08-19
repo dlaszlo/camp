@@ -1,0 +1,25 @@
+#!/bin/bash
+# camp installed the way somebody putting it on a machine would install it.
+#
+# Not "build and copy the binary": build the package and let dpkg put it
+# where it goes. What that measures beyond the binary is the part nobody
+# tests by hand -- the apparmor profile landing with a path that matches
+# where the binary actually is, the overlay module being asked for, and the
+# maintainer scripts running without complaint on a machine that has never
+# had camp on it.
+set -eu
+src=${CAMP_SRC:-$HOME/camp}
+measure=${CAMP_MEASURE:-$src/measure}
+env=${CAMP_ENV:-$HOME/campcheck}
+
+cd "$src"
+
+package=$(packaging/deb/build)
+sudo dpkg -i "$package"
+
+command -v camp
+camp --version
+test -f /etc/apparmor.d/camp
+grep -q "/usr/bin/camp" /etc/apparmor.d/camp ||
+    { echo "the profile does not name the path the package installed to" >&2; exit 1; }
+echo "   installed from $package"

@@ -1,0 +1,26 @@
+#!/bin/bash
+# Up and down, once, with nothing in the way.
+#
+# What it proves is small and it is the thing everything after it rests on:
+# the mount path and the teardown path both work on a machine that has
+# never had a composition on it. A failure here is worth reading on its own
+# rather than from inside a driver's census.
+set -eu
+src=${CAMP_SRC:-$HOME/camp}
+measure=${CAMP_MEASURE:-$src/measure}
+env=${CAMP_ENV:-$HOME/campcheck}
+
+cd "$env"
+
+camp up
+camp down
+
+left=$(awk -v e="$env" '$5 == e || index($5, e "/") == 1 ||
+                        $5 == "/run/camp" || index($5, "/run/camp/") == 1 {print $1, $5}' \
+       /proc/self/mountinfo)
+if [ -n "$left" ]; then
+    echo "still mounted after an ordinary teardown:" >&2
+    echo "$left" >&2
+    exit 1
+fi
+echo "   clean: nothing of camp's is mounted"

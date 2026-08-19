@@ -1,0 +1,26 @@
+#!/bin/bash
+# What camp says this machine and this configuration lack.
+#
+# Asked from inside the composition, because half of what doctor answers is
+# about a configuration and there is one now. The line that decides is the
+# namespace: with kernel.apparmor_restrict_unprivileged_userns set, the
+# permission belongs to one installed binary path, and a real overlay
+# inside a real namespace is what proves the permission is worth having.
+set -eu
+src=${CAMP_SRC:-$HOME/camp}
+measure=${CAMP_MEASURE:-$src/measure}
+env=${CAMP_ENV:-$HOME/campcheck}
+
+cd "$env"
+
+camp doctor || true
+
+if camp doctor 2>&1 | grep -q "could not be mounted here"; then
+    echo >&2
+    echo "a real overlay could not be mounted inside a namespace on this machine." >&2
+    echo "Every measurement after this one would be measuring that instead." >&2
+    camp doctor 2>&1 | grep -n "could not be mounted here" >&2
+    exit 1
+fi
+echo
+echo "   the namespace is permitted and a real overlay inside one works"
