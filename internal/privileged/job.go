@@ -22,8 +22,17 @@
 // then have been about a different object than the mount. The helper
 // re-resolves every operand itself, descriptor-relative, following no
 // symlink and never leaving the recorded base, verifies each endpoint's
-// device and inode against the plan, and mounts by descriptor. Any
-// mismatch fails closed.
+// device and inode and its kind against the plan, and mounts by
+// descriptor. Any mismatch fails closed.
+//
+// The base is the first of those descriptors and the one the rest hang
+// off. It is opened once, following nothing, checked for the invoking
+// user's ownership on that descriptor, and held for the whole
+// invocation; nothing after that names it again. A base checked by name
+// and used by name is two directories the moment its owner renames it,
+// and its owner is exactly the person the helper is acting for -- which
+// made every strict walk beneath it a strict walk beneath whatever the
+// name reached at that instant.
 //
 // sudo is exercised exactly once per command. That is why the helper also
 // runs the first verification pass and performs the move: the sequence
@@ -57,9 +66,13 @@ type Job struct {
 	Version int    `json:"version"`
 	Action  Action `json:"action"`
 
-	// Base is the environment root, already resolved. Every operand is
-	// addressed as components beneath it, and the helper opens them one
-	// component at a time without following anything.
+	// Base is the environment root, already resolved. The helper opens it
+	// once, following nothing -- it is already resolved, so a symlink at
+	// its final component was put there afterwards -- checks the invoking
+	// user owns the descriptor it got, and holds that descriptor for the
+	// whole invocation. Every operand is addressed as components beneath
+	// it, opened one component at a time from that descriptor, following
+	// nothing. Nothing the helper does resolves this string a second time.
 	Base string `json:"base"`
 
 	// UID and GID are the invoking user's. Everything the helper touches
@@ -146,10 +159,12 @@ type JobMount struct {
 	// mount in the same sequence, inside the staging tree.
 	//
 	// It exists so that a missing identity means one thing rather than
-	// two. An identity that is simply empty used to be accepted, so a
-	// target the front end could not look at -- for any reason -- was
-	// mounted onto without a single check, and the difference between
-	// "not there yet" and "camp could not tell" was invisible on the wire.
+	// two, and the helper requires it: a mount point with no identity is
+	// refused unless it is inside the staging tree *and* this says why.
+	// An identity that was simply empty used to be accepted, so a target
+	// the front end could not look at -- for any reason -- was mounted
+	// onto without a single check, and the difference between "not there
+	// yet" and "camp could not tell" was invisible on the wire.
 	TargetAbsent bool `json:"target_absent,omitempty"`
 
 	// The overlay's operands, as paths for the messages and the record.
@@ -174,8 +189,19 @@ type JobMount struct {
 	WorkParts   []string   `json:"work_parts,omitempty"`
 	WorkIdent   string     `json:"work_ident,omitempty"`
 
-	// SourceType is what the source has to be: a directory binds onto a
-	// directory, a file onto a file.
+	// SourceType is what the front end saw the source to be, in pathx's
+	// vocabulary: "directory" or "file", and nothing else -- camp binds
+	// neither a socket nor a device.
+	//
+	// Required on every non-overlay operation that names a source, and
+	// compared against the descriptor the helper is about to bind: a
+	// directory binds onto a directory and a file onto a file, and the
+	// kernel refuses to mix them. So the kind is part of what makes an
+	// operand the operand camp planned, and a source that changed kind
+	// after the front end looked is refused with nothing mounted. It
+	// travels beside SourceIdent and comes from the same single look, so
+	// the job can never carry the identity of one object and the kind of
+	// another.
 	SourceType string `json:"source_type,omitempty"`
 }
 
@@ -203,7 +229,9 @@ type Result struct {
 	Target string `json:"target"`
 	Device uint64 `json:"device,omitempty"`
 	Inode  uint64 `json:"inode,omitempty"`
-	// Outcome is "mounted", "unmounted", "absent" or "busy".
+	// Outcome is "mounted", "unmounted", "absent", "busy", or "mismatch"
+	// for a target the helper refused to touch because what stands there
+	// is not what camp put there.
 	Outcome string `json:"outcome"`
 	Error   string `json:"error,omitempty"`
 }

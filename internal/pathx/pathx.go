@@ -16,9 +16,11 @@
 //     directory, and a check that compares strings would let exactly the
 //     configuration mistake through that corrupts an upper layer.
 //
-// Nothing here follows a symlink except the one deliberate resolution a
-// Root performs when it is opened -- once per root, after which the
-// descriptor is the base and the name is only a string for messages.
+// Nothing here follows a symlink except the one deliberate resolution
+// OpenRoot performs -- once per root, after which the descriptor is the
+// base and the name is only a string for messages. A root over a path
+// somebody else already resolved does not want even that one, and
+// OpenRootExactly is the constructor that refuses it.
 package pathx
 
 import (

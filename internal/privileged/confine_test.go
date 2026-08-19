@@ -244,3 +244,41 @@ func TestTheHelperRefusesWhenNothingSaysWhoInvokedIt(t *testing.T) {
 func contains(haystack, needle string) bool {
 	return len(needle) == 0 || bytes.Contains([]byte(haystack), []byte(needle))
 }
+
+// The base arrives already resolved, so a symbolic link at its name is
+// not somebody's convenience: it was put there after the front end
+// looked, and following it would address this composition's operands
+// beneath whatever it points at.
+//
+// Everything the old, name-based check asked is true of this fixture --
+// the link points at a directory, and at one the invoking user owns -- so
+// the only thing that can refuse it is the descriptor. The base is opened
+// following nothing, and it is that open, and the check on what it
+// returned, that decide.
+func TestTheHelperRefusesABaseThatIsALink(t *testing.T) {
+	asInvoker(t)
+	scratch := t.TempDir()
+	real := filepath.Join(scratch, "env")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(scratch, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	reply := askJob(t, privileged.ActionUnmount, privileged.Job{
+		Version: 1, Action: privileged.ActionUnmount, Base: link,
+		Targets: []privileged.JobTarget{{Path: filepath.Join(link, "live")}},
+	})
+	if reply.Rule != "helper-base-invalid" {
+		t.Fatalf("the helper answered %q (%s), wanted helper-base-invalid",
+			reply.Rule, reply.Error)
+	}
+	if !contains(reply.Error, "symbolic link") {
+		t.Errorf("the refusal does not say the base is a link:\n%s", reply.Error)
+	}
+	if len(reply.Results) != 0 {
+		t.Errorf("the helper acted before refusing: %+v", reply.Results)
+	}
+}

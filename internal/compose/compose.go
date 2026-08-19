@@ -139,12 +139,30 @@ func marker(area fsx.Area, p plan.Plan) error {
 	return area.Write(MarkerName, content, 0o644)
 }
 
-// ReadMarker reads a work or storage directory's attribution.
+// ReadMarker reads a work or storage directory's attribution, by name.
+//
+// For the callers asking about a directory camp holds no capability for:
+// doctor walking what is on the machine, and the sweep. Where the answer
+// decides what a privileged step then removes, the bytes come from a
+// descriptor beneath a held root and go to ParseMarker instead -- a
+// marker read through a name says nothing about the directory something
+// else is about to act in.
 func ReadMarker(directory string) (live, config string, err error) {
-	data, err := os.ReadFile(filepath.Join(directory, MarkerName))
+	path := filepath.Join(directory, MarkerName)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", "", err
 	}
+	return ParseMarker(path, data)
+}
+
+// ParseMarker reads an attribution out of a marker's own bytes.
+//
+// Separate from the reading so that a caller who obtained the bytes some
+// other way -- through a descriptor it already holds, which is what the
+// privileged helper does -- gets the same answer from the same code. The
+// name is for the message only.
+func ParseMarker(name string, data []byte) (live, config string, err error) {
 	records, err := enc.Parse(data)
 	if err != nil {
 		return "", "", err
@@ -161,7 +179,7 @@ func ReadMarker(directory string) (live, config string, err error) {
 		}
 	}
 	if live == "" {
-		return "", "", fmt.Errorf("%s names no live directory", filepath.Join(directory, MarkerName))
+		return "", "", fmt.Errorf("%s names no live directory", name)
 	}
 	return live, config, nil
 }

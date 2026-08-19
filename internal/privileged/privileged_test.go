@@ -3,12 +3,16 @@ package privileged_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/dlaszlo/camp/internal/compose"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/privileged"
 	"github.com/dlaszlo/camp/internal/state"
@@ -451,9 +455,11 @@ func TestTheHelperRefusesAnOperandItCannotCheck(t *testing.T) {
 	cases := []struct {
 		name string
 		job  privileged.Job
+		says string
 	}{
 		{
 			name: "a mount point outside the staging tree with no identity",
+			says: "not inside the staging tree",
 			job: privileged.Job{
 				Version: 1, Action: privileged.ActionMount, Base: base,
 				StagingParts: []string{"work", "staging"},
@@ -467,7 +473,62 @@ func TestTheHelperRefusesAnOperandItCannotCheck(t *testing.T) {
 			},
 		},
 		{
+			name: "a mount point inside the staging tree that nothing says was absent",
+			says: "does not say it was absent",
+			job: privileged.Job{
+				Version: 1, Action: privileged.ActionMount, Base: base,
+				StagingParts: []string{"work", "staging"},
+				LiveParts:    []string{"live"},
+				Mounts: []privileged.JobMount{{
+					Kind:        string(plan.BindRO),
+					Target:      filepath.Join(base, "work", "staging", "point"),
+					TargetParts: []string{"work", "staging", "point"},
+					Source:      filepath.Join(base, "lower"),
+					SourceParts: []string{"lower"},
+					SourceIdent: "1:1",
+					SourceType:  string(pathx.Dir),
+				}},
+			},
+		},
+		{
+			name: "a bind whose source carries no identity",
+			says: "no identity for the mount source",
+			job: privileged.Job{
+				Version: 1, Action: privileged.ActionMount, Base: base,
+				StagingParts: []string{"work", "staging"},
+				LiveParts:    []string{"live"},
+				Mounts: []privileged.JobMount{{
+					Kind:         string(plan.BindRO),
+					Target:       filepath.Join(base, "work", "staging", "point"),
+					TargetParts:  []string{"work", "staging", "point"},
+					TargetAbsent: true,
+					Source:       filepath.Join(base, "lower"),
+					SourceParts:  []string{"lower"},
+					SourceType:   string(pathx.Dir),
+				}},
+			},
+		},
+		{
+			name: "a bind whose source carries no kind",
+			says: "camp binds directories and regular files",
+			job: privileged.Job{
+				Version: 1, Action: privileged.ActionMount, Base: base,
+				StagingParts: []string{"work", "staging"},
+				LiveParts:    []string{"live"},
+				Mounts: []privileged.JobMount{{
+					Kind:         string(plan.BindRO),
+					Target:       filepath.Join(base, "work", "staging", "point"),
+					TargetParts:  []string{"work", "staging", "point"},
+					TargetAbsent: true,
+					Source:       filepath.Join(base, "lower"),
+					SourceParts:  []string{"lower"},
+					SourceIdent:  "1:1",
+				}},
+			},
+		},
+		{
 			name: "an overlay whose upper layer carries no identity",
+			says: "composed tree's upper layer",
 			job: privileged.Job{
 				Version: 1, Action: privileged.ActionMount, Base: base,
 				StagingParts: []string{"work", "staging"},
@@ -476,10 +537,14 @@ func TestTheHelperRefusesAnOperandItCannotCheck(t *testing.T) {
 					Kind:        string(plan.Overlay),
 					Target:      filepath.Join(base, "work", "staging"),
 					TargetParts: []string{"work", "staging"},
-					Lower:       []string{filepath.Join(base, "lower")},
-					LowerParts:  [][]string{{"lower"}},
-					LowerIdents: []string{"1:1"},
-					Upper:       filepath.Join(base, "upper"),
+					// The mount point is inside the staging tree and the job says
+					// it was not there yet, so the refusal this measures is the
+					// upper layer's and not the target's.
+					TargetAbsent: true,
+					Lower:        []string{filepath.Join(base, "lower")},
+					LowerParts:   [][]string{{"lower"}},
+					LowerIdents:  []string{"1:1"},
+					Upper:        filepath.Join(base, "upper"),
 				}},
 			},
 		},
@@ -492,6 +557,12 @@ func TestTheHelperRefusesAnOperandItCannotCheck(t *testing.T) {
 			if reply.Rule != "helper-operand-unchecked" {
 				t.Fatalf("the helper answered %q (%s), wanted helper-operand-unchecked",
 					reply.Rule, reply.Error)
+			}
+			// Each case has to be refused for its own reason, or a job that
+			// fixed the field this one is about would still be refused and the
+			// test would say nothing about it.
+			if !contains(reply.Error, test.says) {
+				t.Errorf("the refusal does not mention %q:\n%s", test.says, reply.Error)
 			}
 			if len(reply.Results) != 0 {
 				t.Errorf("the helper acted before refusing: %+v", reply.Results)
@@ -515,11 +586,12 @@ func TestTheHelperRefusesAnOperandThatChanged(t *testing.T) {
 		StagingParts: []string{"work", "staging"},
 		LiveParts:    []string{"live"},
 		Mounts: []privileged.JobMount{{
-			Kind:        string(plan.Overlay),
-			Target:      filepath.Join(base, "work", "staging"),
-			TargetParts: []string{"work", "staging"},
-			Lower:       []string{filepath.Join(base, "lower")},
-			LowerParts:  [][]string{{"lower"}},
+			Kind:         string(plan.Overlay),
+			Target:       filepath.Join(base, "work", "staging"),
+			TargetParts:  []string{"work", "staging"},
+			TargetAbsent: true,
+			Lower:        []string{filepath.Join(base, "lower")},
+			LowerParts:   [][]string{{"lower"}},
 			// What no directory on this machine will answer as.
 			LowerIdents: []string{"999999:999999"},
 			Upper:       filepath.Join(base, "upper"),
@@ -536,4 +608,75 @@ func TestTheHelperRefusesAnOperandThatChanged(t *testing.T) {
 	if len(reply.Results) != 0 {
 		t.Errorf("the helper acted before refusing: %+v", reply.Results)
 	}
+}
+
+// A source that is not the kind of thing the front end saw stops the job
+// before anything is mounted.
+//
+// A bind puts one object over another, and the kernel refuses a directory
+// over a file or a file over a directory. So the kind is part of what
+// makes an operand the operand camp planned: a source that was a
+// directory when the front end looked and is a file now is not the same
+// source, even where the identity check cannot see it -- and an identity
+// somebody wrote into a hand-made job proves nothing at all. The kind
+// travels with the job and is compared against the descriptor the helper
+// opened.
+func TestTheHelperRefusesASourceThatIsNotTheKindCampChecked(t *testing.T) {
+	base := t.TempDir()
+	testenv.MkDir(t, filepath.Join(base, "work", "staging"))
+	testenv.MkDir(t, filepath.Join(base, "directory"))
+	testenv.Write(t, filepath.Join(base, "file"), "")
+
+	for _, test := range []struct {
+		name    string
+		source  string
+		claimed pathx.Type
+		says    string
+	}{
+		{"a file where the job says directory", "file", pathx.Dir, "is a file and camp checked a directory"},
+		{"a directory where the job says file", "directory", pathx.File, "is a directory and camp checked a file"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			asInvoker(t)
+			source := filepath.Join(base, test.source)
+			reply := askJob(t, privileged.ActionMount, privileged.Job{
+				Version: 1, Action: privileged.ActionMount, Base: base,
+				StagingParts: []string{"work", "staging"},
+				LiveParts:    []string{"live"},
+				Mounts: []privileged.JobMount{{
+					Kind:         string(plan.BindRO),
+					Target:       filepath.Join(base, "work", "staging", "point"),
+					TargetParts:  []string{"work", "staging", "point"},
+					TargetAbsent: true,
+					Source:       source,
+					SourceParts:  []string{test.source},
+					// The identity is the real one, so the only thing left to
+					// refuse this is the kind.
+					SourceIdent: identityOf(t, source),
+					SourceType:  string(test.claimed),
+				}},
+			})
+
+			if !contains(reply.Error, test.says) {
+				t.Fatalf("the helper answered %q (%s)", reply.Rule, reply.Error)
+			}
+			if len(reply.Results) != 0 || reply.Moved {
+				t.Errorf("the helper acted before refusing: %+v", reply)
+			}
+			if !reply.RolledBack {
+				t.Error("a refusal before the first mount reported a machine " +
+					"still carrying something")
+			}
+		})
+	}
+}
+
+// identityOf spells a path's device and inode the way the wire does.
+func identityOf(t *testing.T, path string) string {
+	t.Helper()
+	var st unix.Stat_t
+	if err := unix.Lstat(path, &st); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%d:%d", st.Dev, st.Ino)
 }

@@ -160,7 +160,7 @@ func statAt(dirfd int, name, full string) (Info, error) {
 
 	info := Info{
 		Name:  name,
-		Type:  typeOf(st.Mode),
+		Type:  TypeOf(st.Mode),
 		Ident: Identity{Device: uint64(st.Dev), Inode: st.Ino},
 	}
 	if info.Type == Symlink {
@@ -182,7 +182,14 @@ func isAbsent(err error) bool {
 	return errors.Is(err, unix.ENOENT)
 }
 
-func typeOf(mode uint32) Type {
+// TypeOf names the kind of object a stat's mode describes.
+//
+// Exported because a descriptor is the only honest place to ask this
+// question at the moment it matters -- the privileged helper reads the
+// type off the same descriptor it mounts, having opened it once -- and
+// the answer has to come from the same vocabulary as the answer a name
+// gives, or the two would be comparable only by accident.
+func TypeOf(mode uint32) Type {
 	switch mode & unix.S_IFMT {
 	case unix.S_IFDIR:
 		return Dir

@@ -82,19 +82,26 @@ func Helper(action Action, in io.Reader, out io.Writer) int {
 	}
 	job.UID, job.GID = uid, gid
 
-	if err := job.confine(); err != nil {
+	// The base is opened here, once, and held for the rest of this
+	// invocation. Nothing after this line names it again: every operand,
+	// every reopen and the work directory are resolved from this
+	// descriptor, so the directory the ownership check was made about is
+	// the directory root acts in, whatever happens to the name meanwhile.
+	root, err := job.confine()
+	if err != nil {
 		var named ruled
 		if errors.As(err, &named) {
 			return refuse(named.rule, "%s", named.message)
 		}
 		return refuse("helper-job-invalid", "%v", err)
 	}
+	defer root.Close()
 
 	switch action {
 	case ActionMount:
-		reply = mount(job)
+		reply = mount(job, root)
 	case ActionUnmount:
-		reply = unmount(job)
+		reply = unmount(job, root)
 	default:
 		reply.Error = fmt.Sprintf("unknown action %q", action)
 	}
@@ -127,11 +134,11 @@ func finish(out io.Writer, reply Reply, code int) int {
 // residue they cannot clear, and with no record naming it either, because
 // a rolled-back up forgets its record. That is being walled in by a
 // command that reported a clean machine.
-func unwind(job Job, made []string, reply Reply) Reply {
+func unwind(job Job, root pathx.Root, made []string, reply Reply) Reply {
 	reply.Stranded = rollback(made)
 	reply.RolledBack = len(reply.Stranded) == 0
 	if reply.RolledBack {
-		if err := clearWork(job); err != nil {
+		if err := clearWork(job, root); err != nil {
 			reply.Error += "\n\nand what the kernel left behind could not be " +
 				"cleared: " + err.Error()
 		}
@@ -141,29 +148,19 @@ func unwind(job Job, made []string, reply Reply) Reply {
 
 // clearWork removes the kernel's leftover inside camp's work directory and
 // gives the directory back to the invoking user.
-func clearWork(job Job) error {
+func clearWork(job Job, root pathx.Root) error {
 	if len(job.WorkParts) == 0 {
 		return nil
 	}
-	work := filepath.Join(append([]string{job.Base}, job.WorkParts...)...)
-	if err := campsOwn(work); err != nil {
+	work := filepath.Join(append([]string{root.Name()}, job.WorkParts...)...)
+	if err := campsOwn(root, job.WorkParts, work); err != nil {
 		return err
 	}
-	// Addressed from the job's own base -- which confine has already
-	// established the invoking user owns -- and by component, so that root
-	// removing and giving away a tree cannot be redirected by a symlink
-	// somewhere in it. The components were checked to be plain names.
-	//
-	// Provisional: the base is resolved here, at the moment of use, which
-	// is one resolution of that name more than a privileged step may make.
-	// It belongs to the single confined root the helper opens once in
-	// confine and holds for the whole job. That is a separate repair; this
-	// stands until it lands.
-	root, err := pathx.OpenRoot(job.Base)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
+	// Addressed from the root confine opened -- which the invoking user was
+	// established to own, on that descriptor -- and by component, so that
+	// root removing and giving away a tree cannot be redirected by a
+	// symlink somewhere in it, nor by the base's own name being replaced
+	// after the check. The components were checked to be plain names.
 	area := fsx.In("work", root, job.WorkParts...)
 	if err := area.RemoveTree("work"); err != nil {
 		return err
@@ -180,7 +177,7 @@ func clearWork(job Job) error {
 // command: giving the privilege back between mounting and moving and
 // asking for it again would open a window in which a half-built tree
 // exists and nothing is watching it.
-func mount(job Job) Reply {
+func mount(job Job, root pathx.Root) Reply {
 	reply := Reply{Version: JobVersion}
 	var made []string
 
@@ -191,7 +188,7 @@ func mount(job Job) Reply {
 	// moment before it happens -- that one is the authority, because it is
 	// the one with no gap after it -- it only means the common case fails
 	// early and cleanly.
-	if err := precheck(job); err != nil {
+	if err := precheck(job, root); err != nil {
 		reply.Error = err.Error()
 		if ruling, ok := err.(ruled); ok {
 			reply.Rule = ruling.rule
@@ -202,7 +199,7 @@ func mount(job Job) Reply {
 		// said the rollback had failed -- so an up that touched nothing
 		// reported the workspace frozen, listed no mounts as still mounted,
 		// and left a partial record for a composition that was never built.
-		return unwind(job, nil, reply)
+		return unwind(job, root, nil, reply)
 	}
 
 	// The staging tree gets a private parent before anything is built in
@@ -210,18 +207,26 @@ func mount(job Job) Reply {
 	// whose parent is shared, and on a systemd machine everything on / is.
 	// It is the first thing made and the last thing removed, so it is at
 	// the bottom of the rollback list.
-	staging := filepath.Join(append([]string{job.Base}, job.StagingParts...)...)
+	//
+	// Still open: the self-bind is made by name, so between this line and
+	// the descriptor work below it the kernel resolves the staging path
+	// itself. The name is built from the root's own, which nothing
+	// resolves again, but every component below the root is walked here by
+	// the mount syscall rather than by the strict walk. Closing it means
+	// open_tree and move_mount in place of the bind, which is the mount
+	// primitives' own repair and not this one.
+	staging := filepath.Join(append([]string{root.Name()}, job.StagingParts...)...)
 	if err := mountx.Detach(staging); err != nil {
 		reply.Error = err.Error()
-		return unwind(job, nil, reply)
+		return unwind(job, root, nil, reply)
 	}
 	made = append(made, staging)
 
 	for _, operation := range job.Mounts {
-		target, sourceFD, targetFD, ends, err := resolve(job, operation)
+		target, sourceFD, targetFD, ends, err := resolve(root, operation)
 		if err != nil {
 			reply.Error = err.Error()
-			return unwind(job, made, reply)
+			return unwind(job, root, made, reply)
 		}
 
 		mountable := operation.AsMount(target)
@@ -231,9 +236,7 @@ func mount(job Job) Reply {
 		// same root, following nothing, as it was opened the first time.
 		parts := operation.TargetParts
 		placed, err := mountx.MountByDescriptor(mountable, sourceFD, targetFD, ends,
-			func() (int, error) {
-				return pathx.OpenBeneath(job.Base, parts, unix.O_PATH)
-			})
+			func() (int, error) { return root.Open(parts, unix.O_PATH) })
 		closeAll(sourceFD, targetFD)
 		ends.Close()
 		// Recorded the moment the mount exists, not when the whole
@@ -245,11 +248,11 @@ func mount(job Job) Reply {
 		}
 		if err != nil {
 			reply.Error = err.Error()
-			return unwind(job, made, reply)
+			return unwind(job, root, made, reply)
 		}
 
 		result := Result{Target: target, Outcome: "mounted"}
-		if identity, err := identityOf(target); err == nil {
+		if identity, err := identityUnder(root, operation.TargetParts); err == nil {
 			result.Device, result.Inode = identity.Device, identity.Inode
 		}
 		reply.Results = append(reply.Results, result)
@@ -258,9 +261,9 @@ func mount(job Job) Reply {
 	// The first verification pass, here rather than in the front end,
 	// because the staging tree is where it has to be checked and the
 	// privilege must not be given back in between.
-	if problems := verifyStaging(job, staging); problems != "" {
+	if problems := verifyStaging(job, root, staging); problems != "" {
 		reply.Error = problems
-		return unwind(job, made, reply)
+		return unwind(job, root, made, reply)
 	}
 
 	// And the destination needs one too, for the other half of the same
@@ -271,34 +274,34 @@ func mount(job Job) Reply {
 	// afterwards is too late, because the copies in the peers were already
 	// made and are not camp's to remove. A private parent means no
 	// propagation happens at all.
-	live := filepath.Join(append([]string{job.Base}, job.LiveParts...)...)
+	live := filepath.Join(append([]string{root.Name()}, job.LiveParts...)...)
 	if err := mountx.Detach(live); err != nil {
 		reply.Error = err.Error()
-		return unwind(job, made, reply)
+		return unwind(job, root, made, reply)
 	}
 	made = append(made, live)
 
-	// Both ends of the move are opened beneath the base, following
-	// nothing, and the move is made through those descriptors: this is the
+	// Both ends of the move are opened from the root the helper pinned,
+	// following nothing, and the move is made through those descriptors: this is the
 	// step that makes the tree visible to the machine, and a live directory
 	// swapped between the verification and here would otherwise be root
 	// attaching a verified composition wherever the swap pointed.
-	stagingFD, err := pathx.OpenBeneath(job.Base, job.StagingParts, unix.O_PATH|unix.O_DIRECTORY)
+	stagingFD, err := root.Open(job.StagingParts, unix.O_PATH|unix.O_DIRECTORY)
 	if err != nil {
 		reply.Error = fmt.Sprintf("opening the staging tree %s again: %v", staging, err)
-		return unwind(job, made, reply)
+		return unwind(job, root, made, reply)
 	}
-	liveFD, err := pathx.OpenBeneath(job.Base, job.LiveParts, unix.O_PATH|unix.O_DIRECTORY)
+	liveFD, err := root.Open(job.LiveParts, unix.O_PATH|unix.O_DIRECTORY)
 	if err != nil {
 		unix.Close(stagingFD)
 		reply.Error = fmt.Sprintf("opening the composed tree's directory %s: %v", live, err)
-		return unwind(job, made, reply)
+		return unwind(job, root, made, reply)
 	}
 	err = mountx.Move(stagingFD, liveFD, staging, live)
 	closeAll(stagingFD, liveFD)
 	if err != nil {
 		reply.Error = err.Error()
-		return unwind(job, made, reply)
+		return unwind(job, root, made, reply)
 	}
 	reply.Moved = true
 
@@ -316,24 +319,24 @@ func mount(job Job) Reply {
 
 // precheck compares what the job says about its operands with what is on
 // the machine now, opening nothing that does not already exist.
-func precheck(job Job) error {
+func precheck(job Job, root pathx.Root) error {
 	for _, operation := range job.Mounts {
 		if operation.TargetIdent != "" {
-			if err := compare(job, operation.TargetParts, operation.TargetIdent,
-				operation.Target); err != nil {
+			if err := compare(root, operation.TargetParts, operation.TargetIdent,
+				"", operation.Target); err != nil {
 				return err
 			}
 		}
 		if operation.SourceIdent != "" {
-			if err := compare(job, operation.SourceParts, operation.SourceIdent,
-				operation.Source); err != nil {
+			if err := compare(root, operation.SourceParts, operation.SourceIdent,
+				operation.SourceType, operation.Source); err != nil {
 				return err
 			}
 		}
 		if operation.Kind != string(plan.Overlay) {
 			continue
 		}
-		ends, err := resolveOperands(job, operation)
+		ends, err := resolveOperands(root, operation)
 		if err != nil {
 			return err
 		}
@@ -342,19 +345,24 @@ func precheck(job Job) error {
 	return nil
 }
 
-// compare opens one operand beneath the base and checks its identity.
-func compare(job Job, parts []string, identity, path string) error {
-	fd, err := pathx.OpenBeneath(job.Base, parts, unix.O_PATH)
+// compare opens one operand beneath the pinned root and checks it against
+// what the front end recorded: its identity always, and the kind of thing
+// it is where the job carries one.
+func compare(root pathx.Root, parts []string, identity, kind, path string) error {
+	fd, err := root.Open(parts, unix.O_PATH)
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer unix.Close(fd)
-	return checkIdentity(fd, path, identity)
+	if err := checkIdentity(fd, path, identity); err != nil {
+		return err
+	}
+	return checkType(fd, path, kind)
 }
 
 // verifyStaging runs the path-based pass against the tree where it was
 // built.
-func verifyStaging(job Job, staging string) string {
+func verifyStaging(job Job, root pathx.Root, staging string) string {
 	table, err := mountinfo.Read(mountinfo.Self)
 	if err != nil {
 		return err.Error()
@@ -362,7 +370,7 @@ func verifyStaging(job Job, staging string) string {
 
 	built := plan.Plan{Live: staging}
 	for _, operation := range job.Mounts {
-		target := filepath.Join(append([]string{job.Base}, operation.TargetParts...)...)
+		target := filepath.Join(append([]string{root.Name()}, operation.TargetParts...)...)
 		mountable := operation.AsMount(target)
 		mountable.InLive = false
 		built.Mounts = append(built.Mounts, mountable)
@@ -386,11 +394,11 @@ func verifyStaging(job Job, staging string) string {
 
 // resolve opens both ends of one operation without following a symlink,
 // and checks that what it opened is what the front end saw.
-func resolve(job Job, operation JobMount) (string, int, int, mountx.Operands, error) {
-	target := filepath.Join(append([]string{job.Base}, operation.TargetParts...)...)
+func resolve(root pathx.Root, operation JobMount) (string, int, int, mountx.Operands, error) {
+	target := filepath.Join(append([]string{root.Name()}, operation.TargetParts...)...)
 	ends := mountx.NoOperands()
 
-	targetFD, err := pathx.OpenBeneath(job.Base, operation.TargetParts, unix.O_PATH)
+	targetFD, err := root.Open(operation.TargetParts, unix.O_PATH)
 	if err != nil {
 		return "", -1, -1, ends, fmt.Errorf("opening the mount point %s: %w", target, err)
 	}
@@ -400,7 +408,7 @@ func resolve(job Job, operation JobMount) (string, int, int, mountx.Operands, er
 	}
 
 	if operation.Kind == string(plan.Overlay) {
-		ends, err = resolveOperands(job, operation)
+		ends, err = resolveOperands(root, operation)
 		if err != nil {
 			unix.Close(targetFD)
 			return "", -1, -1, mountx.NoOperands(), err
@@ -411,12 +419,20 @@ func resolve(job Job, operation JobMount) (string, int, int, mountx.Operands, er
 	if len(operation.SourceParts) == 0 {
 		return target, -1, targetFD, ends, nil
 	}
-	sourceFD, err := pathx.OpenBeneath(job.Base, operation.SourceParts, unix.O_PATH)
+	sourceFD, err := root.Open(operation.SourceParts, unix.O_PATH)
 	if err != nil {
 		unix.Close(targetFD)
 		return "", -1, -1, ends, fmt.Errorf("opening the mount source %s: %w", operation.Source, err)
 	}
 	if err := checkIdentity(sourceFD, operation.Source, operation.SourceIdent); err != nil {
+		closeAll(sourceFD, targetFD)
+		return "", -1, -1, ends, err
+	}
+	// And what kind of thing it is, read off the descriptor that is about
+	// to be bound rather than off its name. The identity says it is the
+	// same object; this says the object is what the front end took it for,
+	// which is what decides whether the kernel will accept the bind at all.
+	if err := checkType(sourceFD, operation.Source, operation.SourceType); err != nil {
 		closeAll(sourceFD, targetFD)
 		return "", -1, -1, ends, err
 	}
@@ -449,10 +465,10 @@ func insideStaging(job Job, parts []string) bool {
 // mount time -- so a component the user owns, replaced in between, was a
 // composition mounted from somewhere else entirely and verified as
 // sound, because what was verified was the replacement.
-func resolveOperands(job Job, operation JobMount) (mountx.Operands, error) {
+func resolveOperands(root pathx.Root, operation JobMount) (mountx.Operands, error) {
 	ends := mountx.NoOperands()
 	open := func(parts []string, identity, path, what string) (int, error) {
-		fd, err := pathx.OpenBeneath(job.Base, parts, unix.O_PATH|unix.O_DIRECTORY)
+		fd, err := root.Open(parts, unix.O_PATH|unix.O_DIRECTORY)
 		if err != nil {
 			return -1, fmt.Errorf("opening the overlay's %s %s: %w", what, path, err)
 		}
@@ -524,6 +540,42 @@ func checkIdentity(fd int, path, expected string) error {
 	return nil
 }
 
+// checkType refuses when the object opened is not the kind of thing the
+// front end saw.
+//
+// A bind puts one object over another and the kernel refuses to put a
+// directory on a file or a file on a directory, so the kind is part of
+// what makes an operand the operand camp planned. It is read from the
+// descriptor that is about to be used, which is the only reading with no
+// gap after it: the name could be a directory when the front end looked,
+// a file by now, and a third thing by the time a second stat asked.
+//
+// An empty expectation means the job carries no kind for this operand --
+// the overlay's own operands and every mount point -- and there is
+// nothing to compare. checkable has already refused a source that arrived
+// without one.
+func checkType(fd int, path, expected string) error {
+	if expected == "" {
+		return nil
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return fmt.Errorf("looking at %s: %w", path, err)
+	}
+	got := pathx.TypeOf(st.Mode)
+	if got != pathx.Dir && got != pathx.File {
+		return fmt.Errorf("%s is a %s, and camp binds directories and regular "+
+			"files.\nNothing has been mounted", path, got)
+	}
+	if string(got) != expected {
+		return fmt.Errorf("%s is a %s and camp checked a %s.\nA bind puts one "+
+			"kind of thing over another and the kernel refuses to mix the two, "+
+			"so something replaced this between the check and the mount. "+
+			"Nothing has been mounted", path, got, expected)
+	}
+	return nil
+}
+
 // standsThere reports why a target must not be unmounted, or "" when it
 // may be.
 //
@@ -541,14 +593,20 @@ func checkIdentity(fd int, path, expected string) error {
 // compare and refusing would wall somebody in behind mounts camp made;
 // the path cannot be looked at, which the unmount itself will answer for;
 // and the identity matches.
-func standsThere(table []mountinfo.Entry, target JobTarget) string {
+//
+// What is compared comes from a descriptor resolved beneath the pinned
+// root, from the target's own components, and not from a second
+// resolution of the recorded path. The path is still what says which
+// mount table entry this is about, because a mount table is a table of
+// paths.
+func standsThere(table []mountinfo.Entry, root pathx.Root, parts []string, target JobTarget) string {
 	if target.Device == 0 && target.Inode == 0 {
 		return ""
 	}
 	if len(mountinfo.At(table, target.Path)) == 0 {
 		return ""
 	}
-	found, err := identityOf(target.Path)
+	found, err := identityUnder(root, parts)
 	if err != nil {
 		return ""
 	}
@@ -566,9 +624,20 @@ type identity struct {
 	Inode  uint64
 }
 
-func identityOf(path string) (identity, error) {
+// identityUnder answers for the object standing at parts below the root,
+// opened from the root's own descriptor and following no symlink.
+//
+// Below a mount point it is the mounted object that answers, which is
+// what the caller is asking about: a mount's identity is the identity of
+// what it put there.
+func identityUnder(root pathx.Root, parts []string) (identity, error) {
+	fd, err := root.Open(parts, unix.O_PATH)
+	if err != nil {
+		return identity{}, err
+	}
+	defer unix.Close(fd)
 	var st unix.Stat_t
-	if err := unix.Stat(path, &st); err != nil {
+	if err := unix.Fstat(fd, &st); err != nil {
 		return identity{}, err
 	}
 	return identity{Device: uint64(st.Dev), Inode: st.Ino}, nil
@@ -599,9 +668,25 @@ func rollback(made []string) []string {
 //
 // It never detaches anything lazily. A mount it cannot remove stays
 // mounted, is reported as still mounted, and makes the command fail.
-func unmount(job Job) Reply {
+func unmount(job Job, root pathx.Root) Reply {
 	reply := Reply{Version: JobVersion}
 	for _, target := range job.Targets {
+		// The recorded path written as components beneath the pinned root,
+		// once, so that the identity check and everything after it start at
+		// the descriptor confine opened rather than at the string. confine
+		// has already refused a target that is not beneath the base, so this
+		// only fails on a job that changed underneath us, and then the target
+		// is stepped over rather than acted on.
+		parts, err := componentsBeneath(root, target.Path)
+		if err != nil {
+			reply.Results = append(reply.Results, Result{
+				Target:  target.Path,
+				Outcome: "mismatch",
+				Error:   err.Error(),
+			})
+			continue
+		}
+
 		// Identity before the syscall. A recorded path proves nothing on its
 		// own: camp's mount may have gone and somebody else's may stand at
 		// the same name, and removing that one would be root unmounting a
@@ -618,7 +703,7 @@ func unmount(job Job) Reply {
 			reply.Error = err.Error()
 			return reply
 		}
-		if mismatch := standsThere(table, target); mismatch != "" {
+		if mismatch := standsThere(table, root, parts, target); mismatch != "" {
 			reply.Results = append(reply.Results, Result{
 				Target:  target.Path,
 				Outcome: "mismatch",
@@ -626,6 +711,15 @@ func unmount(job Job) Reply {
 			})
 			continue
 		}
+		// Still open, and deliberately: the identity is now decided on a
+		// descriptor resolved beneath the pinned root, and the unmount itself
+		// still hands the kernel a path it resolves again. umount2 takes a
+		// path, and the descriptor-safe form of it -- umount2 on the
+		// descriptor's own /proc/self/fd name -- depends on kernel behaviour
+		// nothing here has measured. Closing this needs that primitive
+		// measured first, in a namespace or a disposable machine; until then
+		// the check is on the descriptor and the act is on the name, and
+		// there is a window between them.
 		outcome, err := mountx.Unmount(target.Path)
 		result := Result{Target: target.Path, Outcome: string(outcome)}
 		if err != nil && outcome == mountx.Busy {
@@ -640,7 +734,7 @@ func unmount(job Job) Reply {
 	// the privilege to do it, so that the user is never left with a
 	// directory of camp's that they cannot clear.
 	if len(reply.Stranded) == 0 {
-		if err := clearWork(job); err != nil {
+		if err := clearWork(job, root); err != nil {
 			reply.Error = err.Error()
 			var named ruled
 			if errors.As(err, &named) {

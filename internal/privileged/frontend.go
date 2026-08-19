@@ -306,18 +306,21 @@ func UnmountJob(record state.Record) Job {
 func MountJob(built plan.Plan, staging string, exclude []byte) (Job, refusal.List) {
 	var refused refusal.List
 
-	stagingParts, ok := relativeTo(built.Config.Env, staging)
+	stagingParts, ok := relativeTo(built.Config.Root.Name(), staging)
 	if !ok {
 		refused.Add("staging-outside",
 			"the staging directory %s is not inside the environment root %s.",
-			staging, built.Config.Env)
+			staging, built.Config.Root.Name())
 		return Job{}, refused
 	}
 
 	job := Job{
-		Version:      JobVersion,
-		Action:       ActionMount,
-		Base:         built.Config.Env,
+		Version: JobVersion,
+		Action:  ActionMount,
+		// The root camp resolved once and has held open all along, named. The
+		// helper opens that name following nothing and checks the descriptor
+		// it gets, so the two halves are about one directory.
+		Base:         built.Config.Root.Name(),
 		UID:          os.Getuid(),
 		GID:          os.Getgid(),
 		StagingParts: stagingParts,
@@ -347,16 +350,35 @@ func MountJob(built plan.Plan, staging string, exclude []byte) (Job, refusal.Lis
 			Upper:       mount.Upper,
 			Work:        mount.Work,
 			Xattr:       mount.Xattr,
-			SourceType:  string(mount.Type),
 		}
+		// What the source is, from the same look that says which object it
+		// is. The helper requires both and compares both, so a bind can only
+		// happen onto the kind of thing somebody saw: the plan states the
+		// kind wherever it can know it in advance, and where it cannot -- a
+		// source the configuration named, which is whatever is on disk -- the
+		// look is the only thing that knows.
 		if mount.Kind != plan.Overlay && len(mount.SourceParts) > 0 {
-			identity, err := identityBeneath(built.Config.Env, mount.SourceParts)
+			identity, kind, err := lookBeneath(built.Config.Root, mount.SourceParts)
 			if err != nil {
 				refused.Add("source-vanished",
 					"the mount source %s could not be looked at: %v.", mount.Source, err)
 				continue
 			}
-			operation.SourceIdent = identity
+			if kind != pathx.Dir && kind != pathx.File {
+				refused.Add("source-type",
+					"the mount source %s is a %s, and camp binds directories and "+
+						"regular files.", mount.Source, kind)
+				continue
+			}
+			if mount.Type != "" && kind != mount.Type {
+				refused.Add("source-type-changed",
+					"the mount source %s is a %s and the plan was built over a %s.\n"+
+						"It changed kind between the composition being validated and "+
+						"this moment, and a bind puts one kind of thing over another. "+
+						"Nothing has been mounted.", mount.Source, kind, mount.Type)
+				continue
+			}
+			operation.SourceIdent, operation.SourceType = identity, string(kind)
 		}
 		if mount.Kind == plan.Overlay {
 			if problems := overlayOperands(&operation, built); !problems.Empty() {
@@ -370,7 +392,7 @@ func MountJob(built plan.Plan, staging string, exclude []byte) (Job, refusal.Lis
 		// must not happen is the two being confused, so absence is recorded
 		// as absence and anything else stops the job here, while nothing is
 		// mounted.
-		switch identity, err := identityBeneath(built.Config.Env, targetParts); {
+		switch identity, _, err := lookBeneath(built.Config.Root, targetParts); {
 		case err == nil:
 			operation.TargetIdent = identity
 		case errors.Is(err, os.ErrNotExist):
@@ -395,16 +417,17 @@ func MountJob(built plan.Plan, staging string, exclude []byte) (Job, refusal.Lis
 func overlayOperands(operation *JobMount, built plan.Plan) refusal.List {
 	var refused refusal.List
 	take := func(path, what string) ([]string, string, bool) {
-		parts, ok := relativeTo(built.Config.Env, path)
+		parts, ok := relativeTo(built.Config.Root.Name(), path)
 		if !ok {
 			refused.Add("overlay-operand-outside",
 				"the overlay's %s is %s, which is not inside the environment root "+
 					"%s.\nEvery operand the helper mounts is addressed as components "+
 					"beneath that root, so that root can never be pointed at "+
-					"something outside the composition.", what, path, built.Config.Env)
+					"something outside the composition.", what, path,
+				built.Config.Root.Name())
 			return nil, "", false
 		}
-		identity, err := identityBeneath(built.Config.Env, parts)
+		identity, _, err := lookBeneath(built.Config.Root, parts)
 		if err != nil {
 			refused.Add("overlay-operand-vanished",
 				"the overlay's %s %s could not be looked at: %v.", what, path, err)
@@ -442,24 +465,32 @@ func overlayOperands(operation *JobMount, built plan.Plan) refusal.List {
 // that a failed mount can clear what the kernel leaves inside it. Only a
 // privileged process can, and this is the only one there is.
 func workParts(built plan.Plan) []string {
-	parts, ok := relativeTo(built.Config.Env, built.Work)
+	parts, ok := relativeTo(built.Config.Root.Name(), built.Work)
 	if !ok {
 		return nil
 	}
 	return parts
 }
 
-func identityBeneath(base string, parts []string) (string, error) {
-	fd, err := pathx.OpenBeneath(base, parts, unix.O_PATH)
+// lookBeneath is the front end's one look at an operand, and the source
+// of everything the job says about it.
+//
+// From the environment root camp holds open, never from its name: the
+// helper compares what it opens against what this saw, and a comparison
+// is only worth making when both halves are about the same directory. The
+// identity and the kind come off one descriptor in one call, so the job
+// can never carry an identity from one object and a kind from another.
+func lookBeneath(root pathx.Root, parts []string) (string, pathx.Type, error) {
+	fd, err := root.Open(parts, unix.O_PATH)
 	if err != nil {
-		return "", err
+		return "", pathx.Absent, err
 	}
 	defer unix.Close(fd)
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		return "", err
+		return "", pathx.Absent, err
 	}
-	return fmt.Sprintf("%d:%d", st.Dev, st.Ino), nil
+	return fmt.Sprintf("%d:%d", st.Dev, st.Ino), pathx.TypeOf(st.Mode), nil
 }
 
 func relativeTo(base, path string) ([]string, bool) {

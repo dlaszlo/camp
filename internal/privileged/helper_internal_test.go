@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/mountinfo"
+	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 )
 
@@ -42,6 +43,15 @@ func TestOnlyAMountThatIsNotCampsIsRefused(t *testing.T) {
 	}
 	its := JobTarget{Path: path, Device: uint64(st.Dev), Inode: st.Ino}
 	mounted := []mountinfo.Entry{{Point: path}}
+
+	// The identity the check compares is taken from a descriptor resolved
+	// beneath the root the helper pinned, from the target's own
+	// components, so the root is what the test has to hand it.
+	root, err := pathx.OpenRootExactly(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
 
 	for _, probe := range []struct {
 		name    string
@@ -77,7 +87,11 @@ func TestOnlyAMountThatIsNotCampsIsRefused(t *testing.T) {
 		},
 	} {
 		t.Run(probe.name, func(t *testing.T) {
-			mismatch := standsThere(probe.table, probe.target)
+			parts, err := componentsBeneath(root, probe.target.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mismatch := standsThere(probe.table, root, parts, probe.target)
 			if probe.refused && mismatch == "" {
 				t.Error("a mount that is not camp's was let through")
 			}
@@ -158,6 +172,12 @@ func TestARefusalBeforeTheFirstMountReportsACleanMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	root, err := pathx.OpenRootExactly(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
 	reply := mount(Job{
 		Version:      JobVersion,
 		Action:       ActionMount,
@@ -170,7 +190,7 @@ func TestARefusalBeforeTheFirstMountReportsACleanMachine(t *testing.T) {
 			// What the front end saw, and not what is there now.
 			TargetIdent: "1:1",
 		}},
-	})
+	}, root)
 
 	if reply.Error == "" {
 		t.Fatal("an operand that is not the one camp checked was accepted")
