@@ -686,3 +686,87 @@ func TestARecordTransitionWaitsForTheOneBeforeIt(t *testing.T) {
 		t.Errorf("the record says %q, wanted the phase the transition wrote", saved.Phase)
 	}
 }
+
+// A record written by a build before this one still reads, and reads
+// correctly.
+//
+// The claim was argued in a comment and nothing held it. The fields this
+// schema added are absent there, and absent is a meaning rather than a
+// gap: such a record names where each mount ends up and the live
+// self-bind, which is what it named when it was written, and a teardown
+// derived from it addresses exactly those.
+func TestARecordFromTheSchemaBeforeThisOneStillReads(t *testing.T) {
+	const written = `{
+  "version": 1,
+  "uid": 1000, "gid": 1000,
+  "config": "/env/.camp/config.yml",
+  "env": "/env",
+  "live": "/env/live",
+  "upper": "/env/code",
+  "workspace": "/env/workspace",
+  "hash": "cbfbbb63ee0d",
+  "config_digest": "", "inventory_digest": "",
+  "mounts": [
+    {"kind": "overlay", "role": "frame", "source": "", "target": "/env/live",
+     "options": "lowerdir=/env/workspace,upperdir=/env/code,workdir=/env/.camp/work/cbfbbb63ee0d/work",
+     "fstype": "overlay", "device": 66, "inode": 2},
+    {"kind": "bind-ro", "role": "root-guard", "source": "/env/workspace/notes",
+     "target": "/env/live/notes", "device": 66, "inode": 3}
+  ],
+  "created": ["/env/.camp/work/cbfbbb63ee0d"],
+  "detached": ["/env/live"],
+  "phase": "up",
+  "tool_version": "test",
+  "created_at": "2026-08-18T00:00:00Z",
+  "updated_at": "2026-08-18T00:00:00Z"
+}`
+
+	record, err := state.Decode([]byte(written))
+	if err != nil {
+		t.Fatalf("a record from the previous schema did not read: %v", err)
+	}
+	if record.Version != 1 {
+		t.Errorf("the record reads as version %d", record.Version)
+	}
+
+	// What it can answer, it answers: the live targets in reverse, then
+	// the one self-bind it knows about.
+	var named []string
+	for _, place := range record.Teardown() {
+		named = append(named, place.Path)
+	}
+	want := []string{"/env/live/notes", "/env/live", "/env/live"}
+	if strings.Join(named, ",") != strings.Join(want, ",") {
+		t.Errorf("the teardown names\n  %v\nand a record of this schema names\n  %v",
+			named, want)
+	}
+
+	// And what it cannot: no staging location was ever written down, so
+	// none is invented.
+	for _, mount := range record.Mounts {
+		if mount.Staging != "" {
+			t.Errorf("%s carries a staging location %q that the record never "+
+				"held", mount.Target, mount.Staging)
+		}
+	}
+}
+
+// A record from a schema this build does not know is refused by its
+// version, and says so -- rather than failing on whichever field it met
+// first, which is what a strict unmarshal before the version check does.
+func TestARecordFromAnUnknownSchemaIsRefusedByItsVersion(t *testing.T) {
+	const later = `{"version": 99, "hash": "cbfbbb63ee0d", "phase": "up",
+		"whatever_this_build_adds": true}`
+
+	_, err := state.Decode([]byte(later))
+	if err == nil {
+		t.Fatal("a record from an unknown schema was accepted")
+	}
+	if !strings.Contains(err.Error(), "version 99") {
+		t.Errorf("the refusal does not name the version it met: %v", err)
+	}
+	if strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("the refusal is about a field rather than about the schema, "+
+			"which is the whole thing the version is read first for: %v", err)
+	}
+}

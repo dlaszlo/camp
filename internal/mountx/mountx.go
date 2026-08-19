@@ -42,35 +42,37 @@
 // the table is the only guard against a second composition on the same
 // upper. It was --force wearing another name.
 //
-// One part of this package has never been run. The privileged helper's
-// binds are made with open_tree and move_mount, and the attribute changes
-// that follow them are addressed through the created mount's own
-// /proc/self/fd name. That sequence is written against the documented
-// contract of those calls; nothing in this repository may mount, so
-// nothing in this repository has executed it. The first real 'camp up' on
-// a kernel is what proves it, and it proves the whole of it at once: that
-// OPEN_TREE_CLONE copies exactly the one mount MS_BIND would have made,
-// that move_mount attaches it where the target descriptor points, and
-// that a read-only remount and a propagation change made through the
-// clone's descriptor reach the attached mount rather than whatever it was
-// stacked on.
+// The privileged helper's binds are made with open_tree and move_mount,
+// and the attribute changes that follow them are addressed through the
+// created mount's own /proc/self/fd name. That sequence was written
+// against the documented contract of those calls, because nothing in
+// this repository may mount.
 //
-// One narrow thing about it is measured, and it is the cheap half:
-// open_tree(fd, "", OPEN_TREE_CLONE|AT_EMPTY_PATH) on an O_PATH
-// descriptor of a directory answers EPERM to a process without
-// CAP_SYS_ADMIN, and not ENOSYS or EINVAL (measured, kernel 7.0.0-29).
-// The kernel validates the flags and resolves the empty path against the
-// descriptor before it asks about the capability, so what that refusal
-// proves is that the call exists here and that this is a shape it
-// accepts. What it cannot prove is anything about the mount, because no
-// mount was made.
+// It has since been run (measured, kernel 7.0.0-29, through the
+// namespace mode's own end-to-end test): the clone is attached where the
+// target descriptor points, the target shows the source, the read-only
+// remount through the clone's descriptor takes, and so does the
+// propagation change. The control in the same test is what makes that a
+// measurement rather than a coincidence -- the identical MS_PRIVATE call
+// through the descriptor opened *before* the mount still fails, so it is
+// the clone's descriptor that made the difference. What is still unrun
+// is the privileged mode's own choreography around these calls, not the
+// calls.
 //
-// It is safe to land the rest unmeasured because camp does not believe
-// the call. Verification runs after the mounts and inspects the mount
-// table and the tree itself, in staging and again at the live path, so a
-// flag that did not take or a mount that landed somewhere else comes back
-// as a refusal and a rollback -- the same way the read-only bind that
-// MS_BIND silently ignores has always been caught.
+// One narrow thing was measured before any of that, and it is why the
+// shape was trusted enough to land: open_tree(fd, "",
+// OPEN_TREE_CLONE|AT_EMPTY_PATH) on an O_PATH descriptor of a directory
+// answers EPERM to a process without CAP_SYS_ADMIN, and not ENOSYS or
+// EINVAL (measured, kernel 7.0.0-29). The kernel validates the flags and
+// resolves the empty path against the descriptor before it asks about
+// the capability.
+//
+// And camp does not believe any of these calls in any case. Verification
+// runs after the mounts and inspects the mount table and the tree
+// itself, in staging and again at the live path, so a flag that did not
+// take or a mount that landed somewhere else comes back as a refusal and
+// a rollback -- the same way the read-only bind that MS_BIND silently
+// ignores has always been caught.
 package mountx
 
 import (

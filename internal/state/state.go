@@ -51,6 +51,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -64,9 +65,28 @@ import (
 	"github.com/dlaszlo/camp/internal/plan"
 )
 
-// Version is the schema this build writes. A reader refuses a version it
-// does not know rather than guessing at a field that moved.
-const Version = 1
+// Version is the schema this build writes, and Readable is every schema
+// it understands. A reader refuses a version it does not know rather
+// than guessing at a field that moved.
+//
+// Two, because the schema grew: a mount now carries where it stands
+// before the move and the calls the kernel was given for it, and a
+// record carries what a rollback could not remove. A version 1 record is
+// still read, and read correctly -- those fields are absent, and absent
+// is a meaning rather than a gap: such a record answers every question a
+// teardown asks, for the composition it was written for.
+//
+// The other direction is where a version number earns its keep, and it
+// only earns it from here on. A build older than this one meets a
+// version 2 record and says "unknown field" rather than the sentence
+// below, because it unmarshals strictly before it looks at the version
+// -- which is the order this build has now put right. Nothing can fix
+// that for a build already released; what this stops is the next schema
+// change doing it again.
+const Version = 2
+
+// Readable is every schema version this build understands.
+var Readable = []int{1, 2}
 
 // Phase is how far a composition got, and what has to happen next.
 type Phase string
@@ -529,6 +549,27 @@ func Load(hash string) (Record, bool, error) {
 // honour, and a record that parses while naming no mounts would be a
 // teardown that succeeds by doing nothing.
 func Decode(data []byte) (Record, error) {
+	// The version before anything else, and leniently, because it is the
+	// field that says whether the rest can be read at all. Read after a
+	// strict unmarshal, it never answers: a record from a build that added
+	// a field fails on that field, and the reader says "unknown field"
+	// where it meant to say "this was written by a different build". The
+	// version is the one thing every schema of this record has in common,
+	// so it is the one thing that may be read on its own.
+	var stated struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &stated); err != nil {
+		return Record{}, fmt.Errorf("the record does not parse: %w", err)
+	}
+	if !known(stated.Version) {
+		return Record{}, fmt.Errorf("the record is version %d and this camp "+
+			"writes version %d and reads %s. It was written by a different "+
+			"build; use that build to take the composition down, rather than "+
+			"letting this one guess at what the fields mean",
+			stated.Version, Version, versions())
+	}
+
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var record Record
@@ -538,12 +579,6 @@ func Decode(data []byte) (Record, error) {
 	if decoder.More() {
 		return Record{}, fmt.Errorf("the record is followed by more data, and " +
 			"one file is one composition")
-	}
-	if record.Version != Version {
-		return Record{}, fmt.Errorf("the record is version %d and this camp "+
-			"writes and reads version %d. It was written by a different build; "+
-			"use that build to take the composition down, rather than letting "+
-			"this one guess at what the fields mean", record.Version, Version)
 	}
 	return record, record.check()
 }
@@ -987,8 +1022,14 @@ func Release(record Record, table []mountinfo.Entry) error {
 		"not discard it while any of that is standing -- there would be nothing "+
 		"left that knows those mounts are camp's. 'camp status' says what is "+
 		"there and 'camp down' removes what camp made; the record goes when the "+
-		"last of it does.%s",
-		record.Hash, len(held), strings.Join(held, ", "), kept)
+		"last of it does.\n"+
+		"If what is standing is not camp's -- anything mounted inside %s, %s "+
+		"or %s counts here, because a mount in one of camp's own directories "+
+		"is camp's business -- then unmount it, or delete %s once you have "+
+		"looked at it. camp will not delete that file for you while it still "+
+		"describes something.%s",
+		record.Hash, len(held), strings.Join(held, ", "),
+		record.Live, record.Staging, workOf(record), Path(record.Hash), kept)
 }
 
 // Age renders how long ago the record was last written.
@@ -1008,4 +1049,32 @@ func (r Record) Age() string {
 	default:
 		return fmt.Sprintf("%dd ago", int(elapsed.Hours()/24))
 	}
+}
+
+// workOf names the work directory the areas rule covers, for a message
+// that has to tell somebody which directories it looked inside.
+func workOf(record Record) string {
+	if len(record.Created) > 0 {
+		return record.Created[0]
+	}
+	return "its work directory"
+}
+
+// known reports whether this build understands a record's schema.
+func known(version int) bool {
+	for _, readable := range Readable {
+		if version == readable {
+			return true
+		}
+	}
+	return false
+}
+
+// versions renders what this build reads, for the refusal above.
+func versions() string {
+	rendered := make([]string, 0, len(Readable))
+	for _, readable := range Readable {
+		rendered = append(rendered, strconv.Itoa(readable))
+	}
+	return strings.Join(rendered, " and ")
 }

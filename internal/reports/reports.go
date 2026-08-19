@@ -282,12 +282,41 @@ func hold(area fsx.Area) func() {
 	if err != nil {
 		return func() {}
 	}
-	if err := unix.Flock(int(directory.Fd()), unix.LOCK_EX); err != nil {
+	if !waitForLock(int(directory.Fd())) {
 		directory.Close()
 		return func() {}
 	}
 	return func() {
 		_ = unix.Flock(int(directory.Fd()), unix.LOCK_UN)
 		directory.Close()
+	}
+}
+
+// lockWait is how long a delivery waits for the one before it.
+//
+// A whole delivery is a listing, a read, a write to a terminal and a
+// rename, so the holder is gone in the time a terminal takes -- unless
+// its terminal is not reading, and then it is not gone at all. Waiting
+// without a bound would put that process in front of every later camp
+// command in this environment, at the point in startup where reports are
+// shown, which is before the command has done anything the person asked
+// for. The bound turns "somebody is wedged" into the case the comment
+// above already covers: the lock is not taken, the report is still
+// delivered, and MarkSeen still refuses to mark one twice.
+const lockWait = 2 * time.Second
+
+// waitForLock takes the lock without blocking, for as long as lockWait
+// allows, and reports whether it got it.
+func waitForLock(fd int) bool {
+	deadline := time.Now().Add(lockWait)
+	for {
+		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return true
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) || !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
