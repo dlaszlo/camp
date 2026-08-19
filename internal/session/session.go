@@ -44,6 +44,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"syscall"
 
@@ -250,7 +251,28 @@ func keepLog(sink *report.Sink, root pathx.Root) {
 }
 
 // Inside is the init: camp as pid 1 of the namespace.
+//
+// It runs on one thread from here to the workload, and that is not a
+// preference. Capabilities in Linux are per *thread*: capset, the ambient
+// clear and every bounding drop act on the thread that made the call, and
+// nothing else. Go moves a goroutine between threads whenever it likes, so
+// a program that drops its capabilities and then starts a child has no
+// guarantee that the two happened on the same thread -- and if they did
+// not, the child forks from a thread that still holds CAP_SYS_ADMIN and
+// inherits the mount capability the drop exists to take away.
+//
+// Measured, on a machine that exists for one run: the same test passed and
+// failed on consecutive runs of unchanged code, reporting the capabilities
+// still there after the drop. That is the goroutine having moved.
+//
+// Locking the thread also puts the drop where it can be seen. /proc/self
+// reports the thread group leader, which is the thread the main goroutine
+// starts on -- so a drop that happens here is a drop anybody looking at
+// this process can read, rather than one that took effect on a worker
+// thread nothing names.
 func Inside(configPath string, insideUID, insideGID int, argv []string) {
+	runtime.LockOSThread()
+
 	pipe := os.NewFile(pipeFD, "handshake")
 	send := func(note message) {
 		encoded, err := json.Marshal(note)
@@ -336,9 +358,21 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	say.Verified(len(result.Mounted), built.Live)
 
 	// Everything is mounted and verified. The capability goes back before
-	// anything the user asked for runs.
+	// anything the user asked for runs -- on this thread, which this
+	// function has been locked to since it started, and which is the thread
+	// the workload will be forked from. Inside's own comment says why that
+	// is load-bearing rather than tidy.
 	if err := capsx.Drop(); err != nil {
 		refuse("giving the mount capability back: %v", err)
+	}
+	if left, err := capsx.Read(0); err == nil && !left.Empty() {
+		// Read back rather than trusted. Every call the drop makes can
+		// answer success for the thread it ran on while the process still
+		// holds what it meant to give away, and a session that started a
+		// workload on that footing would be the one thing this design
+		// promises it never does.
+		refuse("the mount capability was given back and this process still "+
+			"holds %s.\nNo workload is started on that footing.", left.String())
 	}
 
 	// And only now is anything the configuration declared attached to a

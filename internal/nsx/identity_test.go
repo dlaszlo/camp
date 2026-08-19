@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -48,6 +49,14 @@ const (
 
 func TestMain(m *testing.M) {
 	if os.Getenv(insideEnv) != "" {
+		// One thread, from the first mount to the report. Capabilities are
+		// per thread: capset and the ambient clear act on the thread that
+		// made the call and on nothing else, and Go moves a goroutine
+		// between threads whenever it likes. Without this the spike measured
+		// whichever thread it happened to be on -- it passed and failed on
+		// consecutive runs of unchanged code, which is what sent somebody
+		// looking and found the same hole in the session's own init.
+		runtime.LockOSThread()
 		os.Exit(inside())
 	}
 	os.Exit(m.Run())
