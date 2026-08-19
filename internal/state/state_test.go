@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dlaszlo/camp/internal/mountinfo"
+	"github.com/dlaszlo/camp/internal/mountx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/state"
 	"github.com/dlaszlo/camp/internal/testenv"
@@ -24,6 +25,14 @@ func scratch(t *testing.T) {
 
 func fixture(t *testing.T) (state.Record, string) {
 	t.Helper()
+	record, built := recorded(t)
+	return record, built.Config.Source
+}
+
+// recorded is the fixture with the plan it was made from, for the tests
+// that hold the record against what would be mounted.
+func recorded(t *testing.T) (state.Record, plan.Plan) {
+	t.Helper()
 	env := testenv.NewEnv(t)
 	cfg := env.Config(t, "")
 	built, refused := plan.Prepare(cfg, plan.Privileged)
@@ -33,7 +42,7 @@ func fixture(t *testing.T) (state.Record, string) {
 	staging := filepath.Join(built.Work, "staging")
 	record := state.FromPlan(built, staging, "test", "cfgdigest", "invdigest",
 		os.Getuid(), os.Getgid())
-	return record, cfg.Source
+	return record, built
 }
 
 func TestARecordCarriesTheWholeConcretePlanInOrder(t *testing.T) {
@@ -536,14 +545,27 @@ func TestARecordThatCannotMeanWhatItSaysIsRefused(t *testing.T) {
 
 // Spec §12 lists what a record carries. Two of its fields were declared
 // and never filled: the overlay's options, and the paths camp created.
+//
+// And what "the overlay's options" has to mean, which is the repair the
+// review asked for: the calls the kernel was given, from the description
+// the mount is performed from. A record that rebuilt an option string of
+// its own out of the same plan fields was a second account of the mount,
+// free to drift from the first with nothing comparing them -- and it did
+// not drift only because nobody had changed an operand yet.
 func TestARecordCarriesTheOverlaysOptionsAndWhatCampCreated(t *testing.T) {
 	scratch(t)
-	record, _ := fixture(t)
+	record, built := recorded(t)
 
 	var overlay state.Mount
+	var planned plan.Mount
 	for _, mount := range record.Mounts {
 		if mount.FSType == "overlay" {
 			overlay = mount
+		}
+	}
+	for _, mount := range built.Mounts {
+		if mount.Kind == plan.Overlay {
+			planned = mount
 		}
 	}
 	if overlay.Options == "" {
@@ -554,6 +576,37 @@ func TestARecordCarriesTheOverlaysOptionsAndWhatCampCreated(t *testing.T) {
 		if !strings.Contains(overlay.Options, part) {
 			t.Errorf("the recorded options have no %s: %q", part, overlay.Options)
 		}
+	}
+
+	// Call for call, in order, and not "it contains the right words": the
+	// record is what a recovery holds a standing composed tree to.
+	described := mountx.DescribeOverlay(planned)
+	if overlay.FSType != described.FSType {
+		t.Errorf("the record says the composed tree answers as %q and it is "+
+			"mounted as %q", overlay.FSType, described.FSType)
+	}
+	if len(overlay.Operands) != len(described.Steps) {
+		t.Fatalf("the record keeps %d of the %d calls the kernel is given:\n"+
+			"%+v", len(overlay.Operands), len(described.Steps), overlay.Operands)
+	}
+	for index, step := range described.Steps {
+		kept := overlay.Operands[index]
+		if kept.Key != step.Key || kept.Path != step.Path {
+			t.Errorf("call %d is recorded as %q=%q and the kernel is given "+
+				"%q=%q", index+1, kept.Key, kept.Path, step.Key, step.Path)
+		}
+	}
+	if overlay.Options != described.Options() {
+		t.Errorf("the recorded option line is %q and the calls render as %q",
+			overlay.Options, described.Options())
+	}
+	// And the record's own rebuilt description is the one the mount was
+	// performed from, which is what makes the comparison in 'camp status'
+	// a comparison with the mount and not with a paraphrase of it.
+	rebuilt := overlay.Overlay()
+	if len(rebuilt.Steps) != len(described.Steps) {
+		t.Errorf("the record rebuilds %d calls out of %d", len(rebuilt.Steps),
+			len(described.Steps))
 	}
 
 	if len(record.Created) == 0 {

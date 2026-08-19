@@ -292,7 +292,7 @@ func describeRecord(ctx *context, record state.Record, table []mountinfo.Entry) 
 	ctx.printf("phase:   %s, written %s\n", record.Phase, record.Age())
 
 	counts := map[state.Presence]int{}
-	staged := 0
+	staged, drifted := 0, 0
 	ctx.printf("\n%d recorded mount(s), oldest first:\n", len(record.Mounts))
 	for _, mount := range record.Mounts {
 		presence, where, err := whereItStands(mount, table)
@@ -315,6 +315,24 @@ func describeRecord(ctx *context, record state.Record, table []mountinfo.Entry) 
 			note += fmt.Sprintf(" -- still in staging, not moved onto %s", mount.Target)
 		}
 		ctx.printf("  %-10s %s%s\n", presence, where, note)
+
+		// What the composed tree is made of, said for every record that
+		// carries it. Identity cannot say this: an overlay's device and
+		// inode prove the mount is camp's and say nothing about which
+		// layers are underneath it, so this line and the comparison below
+		// it are the only things that hold a standing composed tree to the
+		// record it was built from.
+		if mount.FSType == "" {
+			continue
+		}
+		ctx.printf("             %s, made with %s\n", mount.FSType, mount.Options)
+		if presence == state.Gone {
+			continue
+		}
+		for _, difference := range mount.OverlayDrift(where, table) {
+			drifted++
+			ctx.printf("             not as recorded: %s\n", difference)
+		}
 	}
 
 	// The self-binds are listed after the plan and never verified by
@@ -345,6 +363,18 @@ func describeRecord(ctx *context, record state.Record, table []mountinfo.Entry) 
 	ctx.printf("\n%s", verdict(record, counts))
 	ctx.printf("%s", configDrift(record))
 
+	// Said apart from the verdict and given its own ending, because it is
+	// a different claim. The verdict answers where the composition is;
+	// this answers whether what is standing is made of what the record
+	// says it was made of, and a composed tree over another lower is one
+	// nobody should go on working in.
+	if drifted > 0 {
+		ctx.printf("\n%d recorded thing(s) about the composed tree are not what "+
+			"is mounted. The record is what a teardown is derived from, so a "+
+			"tree that does not match it is a tree camp cannot account for.\n",
+			drifted)
+		return failure(ExitPrecondition, "", "run 'camp down' to take it apart")
+	}
 	if problem := disagreement(record, counts); problem != "" {
 		ctx.printf("\n%s", problem)
 		return failure(ExitPrecondition, "", "run 'camp down' to take it apart")

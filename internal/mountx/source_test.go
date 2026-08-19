@@ -76,3 +76,81 @@ func TestNothingInCampCanDetachAMountLazily(t *testing.T) {
 			strings.Join(offenders, "\n  "))
 	}
 }
+
+// Every fsconfig call camp makes goes through the described sequence,
+// and this is the guard that keeps it there.
+//
+// The behaviour is measured next door: the calls that fill a filesystem
+// context are held against the description they are performing. That
+// test can only see the calls that go through the two variables it
+// replaces, so this one keeps every other route closed -- a
+// unix.FsconfigSetFd written anywhere else is an operand the record does
+// not carry, the verification does not expect and 'camp status' cannot
+// compare, which is exactly the drift the description exists to make
+// impossible.
+//
+// The two declarations in mountx.go are what everything goes through,
+// and they are the only lines allowed to name the calls.
+func TestEveryFsconfigCallGoesThroughTheDescription(t *testing.T) {
+	root := testenv.RepoRoot(t)
+
+	allowed := map[string]bool{
+		"internal/mountx/mountx.go":      true,
+		"internal/mountx/source_test.go": true, // it names them to look for them
+	}
+	var offenders []string
+	for _, path := range testenv.Tracked(t) {
+		if !strings.HasSuffix(path, ".go") {
+			continue
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if allowed[relative] {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue // a tracked file that is not in this checkout
+		}
+		for number, line := range strings.Split(string(data), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") {
+				continue
+			}
+			if strings.Contains(line, "unix.FsconfigSet") {
+				offenders = append(offenders,
+					relative+":"+strconv.Itoa(number+1)+": "+trimmed)
+			}
+		}
+	}
+
+	// And in mountx itself, only where the two variables are declared.
+	body, err := os.ReadFile(filepath.Join(root, "internal", "mountx", "mountx.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for number, line := range strings.Split(string(body), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") || !strings.Contains(line, "unix.FsconfigSet") {
+			continue
+		}
+		if trimmed == "fsconfigFd   = unix.FsconfigSetFd" ||
+			trimmed == "fsconfigFlag = unix.FsconfigSetFlag" {
+			continue
+		}
+		offenders = append(offenders,
+			"internal/mountx/mountx.go:"+strconv.Itoa(number+1)+": "+trimmed)
+	}
+
+	if len(offenders) > 0 {
+		t.Errorf("an overlay operand reaches the kernel outside the described "+
+			"sequence:\n  %s\n\n"+
+			"What camp tells the kernel about a composed tree is one object: "+
+			"DescribeOverlay derives it, the mount is performed from it, the "+
+			"record keeps it and the verification compares the mounted "+
+			"filesystem against it. A call made anywhere else is an operand "+
+			"nothing else knows about.", strings.Join(offenders, "\n  "))
+	}
+}

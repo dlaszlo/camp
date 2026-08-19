@@ -19,6 +19,7 @@ import (
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/gen"
+	"github.com/dlaszlo/camp/internal/mountx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/refusal"
@@ -148,16 +149,20 @@ func Syscalls(p plan.Plan) string {
 	for _, mount := range p.Mounts {
 		switch mount.Kind {
 		case plan.Overlay:
-			b.WriteString("  fsopen(\"overlay\", FSOPEN_CLOEXEC)\n")
-			for _, lower := range mount.Lower {
-				fmt.Fprintf(&b, "  fsconfig(fs, FSCONFIG_SET_FD, \"lowerdir+\", NULL, fd of %s)\n", lower)
-			}
-			if mount.Upper != "" {
-				fmt.Fprintf(&b, "  fsconfig(fs, FSCONFIG_SET_FD, \"upperdir\", NULL, fd of %s)\n", mount.Upper)
-				fmt.Fprintf(&b, "  fsconfig(fs, FSCONFIG_SET_FD, \"workdir\", NULL, fd of %s)\n", mount.Work)
-			}
-			if mount.Xattr != "" {
-				fmt.Fprintf(&b, "  fsconfig(fs, FSCONFIG_SET_FLAG, %q, NULL, 0)\n", mount.Xattr)
+			// From the description the mount is performed from, so what this
+			// prints is what the kernel will be given rather than a fourth
+			// account of it. 'camp plan' is read to decide whether to run the
+			// thing it describes, so a sequence that has drifted from the one
+			// camp performs is worse than no sequence at all.
+			described := mountx.DescribeOverlay(mount)
+			fmt.Fprintf(&b, "  fsopen(%q, FSOPEN_CLOEXEC)\n", described.FSType)
+			for _, step := range described.Steps {
+				if step.Flag() {
+					fmt.Fprintf(&b, "  fsconfig(fs, FSCONFIG_SET_FLAG, %q, NULL, 0)\n", step.Key)
+					continue
+				}
+				fmt.Fprintf(&b, "  fsconfig(fs, FSCONFIG_SET_FD, %q, NULL, fd of %s)\n",
+					step.Key, step.Path)
 			}
 			b.WriteString("  fsconfig(fs, FSCONFIG_CMD_CREATE, NULL, NULL, 0)\n")
 			b.WriteString("  fsmount(fs, FSMOUNT_CLOEXEC, 0)\n")

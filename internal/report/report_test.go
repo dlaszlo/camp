@@ -2,12 +2,14 @@ package report_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/mountx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/report"
@@ -378,5 +380,49 @@ func TestWhatStopsNothingIsStillSaid(t *testing.T) {
 	// not agreed to must not read like a run where everything matched.
 	if strings.Contains(text, report.MarkOK+"    the workspace") {
 		t.Errorf("a warning was said as an outcome:\n%s", text)
+	}
+}
+
+// The printed mount calls are the calls camp would make, read from the
+// same description the mount is performed from.
+//
+// 'camp plan' is read by somebody deciding whether to run the thing it
+// describes, so a printed sequence that has drifted from the performed
+// one is worse than no sequence at all -- it reads as authority. This
+// was a fourth independent account of the overlay: the syscalls, the
+// record, the verification and this, none of them compared with any
+// other.
+func TestThePrintedCallsAreTheCallsCampWouldMake(t *testing.T) {
+	built := prepared(t, testenv.NewEnv(t), "", plan.Namespace)
+
+	var overlay plan.Mount
+	for _, mount := range built.Mounts {
+		if mount.Kind == plan.Overlay {
+			overlay = mount
+		}
+	}
+	if overlay.Target == "" {
+		t.Fatal("the fixture plans no composed tree")
+	}
+
+	printed := report.Syscalls(built)
+	var want []string
+	described := mountx.DescribeOverlay(overlay)
+	want = append(want, fmt.Sprintf("  fsopen(%q, FSOPEN_CLOEXEC)", described.FSType))
+	for _, step := range described.Steps {
+		if step.Flag() {
+			want = append(want, fmt.Sprintf(
+				"  fsconfig(fs, FSCONFIG_SET_FLAG, %q, NULL, 0)", step.Key))
+			continue
+		}
+		want = append(want, fmt.Sprintf(
+			"  fsconfig(fs, FSCONFIG_SET_FD, %q, NULL, fd of %s)", step.Key, step.Path))
+	}
+
+	// In order and adjacent: a sequence is only worth printing if it is
+	// the order the calls happen in.
+	if !strings.Contains(printed, strings.Join(want, "\n")) {
+		t.Errorf("the printed calls are not the described ones.\nexpected:\n%s"+
+			"\n\nprinted:\n%s", strings.Join(want, "\n"), printed)
 	}
 }

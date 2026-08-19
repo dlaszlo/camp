@@ -248,12 +248,20 @@ func stat(path string) (ident, error) {
 	return ident{device: uint64(st.Dev), inode: st.Ino}, nil
 }
 
-// overlayOptions compares the overlay's options per option.
+// overlayOptions compares the mounted overlay with the description the
+// mount was performed from.
 //
-// Never as one string: the kernel echoes what was passed plus its own
-// defaults -- redirect_dir, uuid, and userxattr inside a user namespace
-// whether or not it was asked for -- so string equality would fail on a
-// correct mount every time.
+// The expectation is not composed here. mountx derives what the kernel
+// is told about an overlay once, performs the mount from that
+// derivation, and compares against it -- so this pass cannot hold a
+// mount to operands the mount was never asked for, which is exactly what
+// a second expectation written out of the same plan fields was free to
+// do.
+//
+// The comparison is per operand and never one string: the kernel echoes
+// what was passed plus its own defaults -- redirect_dir, uuid, and
+// userxattr inside a user namespace whether or not it was asked for --
+// so string equality would fail on a correct mount every time.
 func overlayOptions(mount plan.Mount, target string, table []mountinfo.Entry) refusal.List {
 	var refused refusal.List
 	entry, found := mountinfo.Top(table, target)
@@ -264,42 +272,19 @@ func overlayOptions(mount plan.Mount, target string, table []mountinfo.Entry) re
 		return refused
 	}
 
-	want := map[string]string{
-		"lowerdir": strings.Join(mount.Lower, ":"),
-		"upperdir": mount.Upper,
-		"workdir":  mount.Work,
-	}
-	for key, expected := range want {
-		got := mountinfo.UnescapeOption(option(entry, key))
-		if got != expected {
-			refused.Group(overlayOptionsWrong, "%s is %q and the plan said %q",
-				key, got, expected)
-		}
-	}
-	if mount.Xattr != "" {
-		if _, present := entry.Super[mount.Xattr]; !present {
+	for _, wrong := range mountx.DescribeOverlay(mount).Mismatches(entry) {
+		if wrong.Flag {
 			refused.Add("verify-overlay-xattr",
 				"the composed tree was mounted without %s. The extended-attribute "+
 					"namespace is not a preference: a mount made inside a user "+
 					"namespace cannot write trusted.* at all, and one made as root "+
-					"must not use user.*.", mount.Xattr)
+					"must not use user.*.", wrong.Key)
+			continue
 		}
+		refused.Group(overlayOptionsWrong, "%s is %q and the plan said %q",
+			wrong.Key, wrong.Got, wrong.Want)
 	}
 	return refused
-}
-
-// option reads one of the overlay's operands out of the kernel's table.
-//
-// Two spellings, one operand. A layer given to the mount API as a
-// descriptor is reported under the key that appends it -- "lowerdir+" --
-// while the old option-string form reports "lowerdir". camp mounts the
-// composed tree the first way and reads both, because a mount made by an
-// older camp, or by hand, is still a mount this pass may be asked about.
-func option(entry mountinfo.Entry, key string) string {
-	if value, found := entry.Super[key]; found {
-		return value
-	}
-	return entry.Super[key+"+"]
 }
 
 // polarity asks whether each mount is writable exactly where it should

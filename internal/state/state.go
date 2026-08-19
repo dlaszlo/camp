@@ -110,15 +110,47 @@ type Mount struct {
 	// about: it is what an older record can support, and it is exactly
 	// what it supported when it was written.
 	Staging string `json:"staging,omitempty"`
-	// Options is the overlay's option string, empty for a bind.
+	// Options is the overlay's operands as one line, in the syntax
+	// mount(8) takes, and empty for a bind. It is what a person reads in
+	// 'camp status', and it is rendered from Operands below rather than
+	// derived a second time from the plan -- so the sentence and the
+	// calls cannot describe two different mounts.
 	Options string `json:"options,omitempty"`
-	// FSType is what the mount should answer as.
+	// FSType is what the mount should answer as, and what the mounted
+	// filesystem is held to.
 	FSType string `json:"fstype,omitempty"`
+	// Operands are the calls the kernel was given for this overlay, in
+	// the order it was given them: one per lower layer, then the upper
+	// and its work directory, then any flag.
+	//
+	// The record keeps them because they are what a comparison needs. A
+	// composed tree is the one mount whose identity says nothing about
+	// what it is made of -- device and inode prove that this is camp's
+	// overlay and not somebody else's, and say nothing about which lower
+	// layers are underneath it -- so this is the only thing a recovery
+	// can hold the mounted filesystem to.
+	//
+	// Empty for a bind, and empty in every record written before this
+	// field existed. Such a record still decodes and still answers every
+	// question a teardown asks; what it cannot support is this one
+	// comparison, which is what it supported when it was written.
+	Operands []Operand `json:"operands,omitempty"`
 	// Device and Inode are the target's identity once it is mounted. Zero
 	// until then, which is itself information: this mount had not happened
 	// when the record was last written.
 	Device uint64 `json:"device,omitempty"`
 	Inode  uint64 `json:"inode,omitempty"`
+}
+
+// Operand is one thing the kernel was told about an overlay: the key it
+// was given, and the directory it was given for that key.
+//
+// A key with no path is a flag, which is set by name and has no operand
+// at all -- the same rule the mount executor reads, so a record and a
+// mount cannot disagree about which kind of call a line describes.
+type Operand struct {
+	Key  string `json:"key"`
+	Path string `json:"path,omitempty"`
 }
 
 // Record is one composition.
@@ -334,12 +366,18 @@ func FromPlan(built plan.Plan, staging, tool, configDigest, inventoryDigest stri
 			// staging location somewhere nothing was ever mounted.
 			Staging: mount.InStaging(staging),
 		}
-		// The overlay's operands, as the string the kernel was given.
-		// Rendered by the same function that mounts it, so the record cannot
+		// The overlay's operands, as the calls the kernel is given. From
+		// the description the mount is performed from -- the same object,
+		// not a second rendering of the same fields -- so the record cannot
 		// describe a mount that was made differently.
 		if mount.Kind == plan.Overlay {
-			recorded.FSType = "overlay"
-			recorded.Options = mountx.Options(mount)
+			described := mountx.DescribeOverlay(mount)
+			recorded.FSType = described.FSType
+			recorded.Options = described.Options()
+			for _, step := range described.Steps {
+				recorded.Operands = append(recorded.Operands,
+					Operand{Key: step.Key, Path: step.Path})
+			}
 		}
 		record.Mounts = append(record.Mounts, recorded)
 	}
@@ -727,6 +765,62 @@ func (m Mount) PresenceAt(path string, table []mountinfo.Entry) (Presence, error
 		return Different, nil
 	}
 	return Same, nil
+}
+
+// Overlay is the description of the composed tree this record carries,
+// rebuilt from what was written down.
+//
+// The two fields a comparison needs and not the two the executor needs:
+// which descriptor carried an operand is how the mount was made, and it
+// is of no use to anything looking at a mount that already exists.
+func (m Mount) Overlay() mountx.OverlayConfig {
+	described := mountx.OverlayConfig{FSType: m.FSType}
+	for _, operand := range m.Operands {
+		described.Steps = append(described.Steps,
+			mountx.Fsconfig{Key: operand.Key, Path: operand.Path})
+	}
+	return described
+}
+
+// OverlayDrift compares what the record says this composed tree was made
+// of with what the kernel says the mount at a place is made of.
+//
+// This is what the recorded operands are for. Identity answers whether
+// the object at a path is the one camp mounted; it cannot answer what
+// that object is made of, because an overlay's device and inode say
+// nothing about its layers. A composed tree standing over the wrong
+// lower, or without the extended-attribute namespace it was made with,
+// is a tree whose writes land somewhere other than where the record
+// says -- and a teardown derived from that record would be addressing a
+// composition nobody built.
+//
+// Nothing for a bind, and nothing for a record written before the
+// operands were kept: a comparison with nothing to compare against is
+// not a disagreement.
+func (m Mount) OverlayDrift(path string, table []mountinfo.Entry) []string {
+	if len(m.Operands) == 0 && m.FSType == "" {
+		return nil
+	}
+	entry, found := mountinfo.Top(table, path)
+	if !found {
+		return nil
+	}
+	var differences []string
+	if m.FSType != "" && entry.FSType != m.FSType {
+		differences = append(differences, fmt.Sprintf(
+			"it answers as %q and the record says %q", entry.FSType, m.FSType))
+	}
+	for _, wrong := range m.Overlay().Mismatches(entry) {
+		if wrong.Flag {
+			differences = append(differences, fmt.Sprintf(
+				"it was mounted without %s, which the record says it was made "+
+					"with", wrong.Key))
+			continue
+		}
+		differences = append(differences, fmt.Sprintf(
+			"its %s is %q and the record says %q", wrong.Key, wrong.Got, wrong.Want))
+	}
+	return differences
 }
 
 // Digest is how the record fingerprints a file it wants to notice the
