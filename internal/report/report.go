@@ -169,14 +169,34 @@ func Syscalls(p plan.Plan) string {
 			fmt.Fprintf(&b, "  move_mount(mount, \"\", fd of %s, \"\", MOVE_MOUNT_F_EMPTY_PATH|MOVE_MOUNT_T_EMPTY_PATH)\n",
 				mount.Target)
 		default:
+			if p.Mode == plan.Privileged {
+				// A detached copy, attached to the descriptor the helper
+				// checked. The privileged mode makes no bind by name: a name
+				// resolved a second time is a second object, which is the whole
+				// reason that half of camp is written the way it is.
+				fmt.Fprintf(&b, "  open_tree(fd of %s, \"\", OPEN_TREE_CLONE|AT_EMPTY_PATH|OPEN_TREE_CLOEXEC)\n",
+					mount.Source)
+				fmt.Fprintf(&b, "  move_mount(clone, \"\", fd of %s, \"\", MOVE_MOUNT_F_EMPTY_PATH|MOVE_MOUNT_T_EMPTY_PATH)\n",
+					mount.Target)
+				break
+			}
 			fmt.Fprintf(&b, "  mount(%q, %q, \"\", MS_BIND, \"\")\n",
 				mount.Source, mount.Target)
-			if mount.Kind == plan.BindRO {
-				fmt.Fprintf(&b, "  mount(\"\", %q, \"\", MS_REMOUNT|MS_BIND|MS_RDONLY|<locked flags>, \"\")\n",
-					mount.Target)
-			}
 		}
-		fmt.Fprintf(&b, "  mount(\"\", %q, \"\", MS_PRIVATE, \"\")\n", mount.Target)
+		// What the two calls after the mount are addressed through, which
+		// is the other thing that differs by mode: the privileged half
+		// holds the mount it just made and speaks to that, and the
+		// namespace half names the target, where there is no boundary
+		// between the check and the mount to lose anything across.
+		handle := fmt.Sprintf("%q", mount.Target)
+		if p.Mode == plan.Privileged {
+			handle = "\"/proc/self/fd/<the mount just made>\""
+		}
+		if mount.Kind == plan.BindRO {
+			fmt.Fprintf(&b, "  mount(\"\", %s, \"\", MS_REMOUNT|MS_BIND|MS_RDONLY|<locked flags>, \"\")\n",
+				handle)
+		}
+		fmt.Fprintf(&b, "  mount(\"\", %s, \"\", MS_PRIVATE, \"\")\n", handle)
 	}
 	return b.String()
 }

@@ -426,3 +426,46 @@ func TestThePrintedCallsAreTheCallsCampWouldMake(t *testing.T) {
 			"\n\nprinted:\n%s", strings.Join(want, "\n"), printed)
 	}
 }
+
+// The printed calls are the calls of the mode they are printed for.
+//
+// The two halves of camp make a bind differently, and for a reason: the
+// privileged one has a boundary between the check and the mount, so it
+// takes a detached copy of the source through a descriptor and attaches
+// it to the descriptor it checked, then speaks to the mount it made
+// rather than to the name it landed on. Printing MS_BIND there described
+// a sequence camp stopped performing -- on the one command somebody
+// reads to decide whether to run it.
+func TestThePrintedCallsAreTheOnesThatModeMakes(t *testing.T) {
+	env := testenv.NewEnv(t)
+
+	inside := report.Syscalls(prepared(t, env, "", plan.Namespace))
+	elevated := report.Syscalls(prepared(t, env, "", plan.Privileged))
+
+	// The namespace mode binds by name, inside a namespace of its own,
+	// where there is no boundary to lose anything across.
+	if !strings.Contains(inside, `, "", MS_BIND, "")`) {
+		t.Errorf("the namespace mode's binds are not printed as binds:\n%s", inside)
+	}
+	if strings.Contains(inside, "open_tree(") {
+		t.Errorf("the namespace mode does not take detached copies, and its "+
+			"plan says it does:\n%s", inside)
+	}
+
+	// The privileged mode takes a copy and attaches it, and addresses
+	// what it made rather than the name.
+	if strings.Contains(elevated, `, "", MS_BIND, "")`) {
+		t.Errorf("the privileged mode makes no bind by name, and its plan "+
+			"says it does:\n%s", elevated)
+	}
+	for _, call := range []string{
+		"open_tree(fd of ",
+		"OPEN_TREE_CLONE|AT_EMPTY_PATH|OPEN_TREE_CLOEXEC",
+		"move_mount(clone, \"\", fd of ",
+		`mount("", "/proc/self/fd/<the mount just made>", "", MS_PRIVATE, "")`,
+	} {
+		if !strings.Contains(elevated, call) {
+			t.Errorf("the privileged plan does not print %q:\n%s", call, elevated)
+		}
+	}
+}
