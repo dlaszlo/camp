@@ -16,7 +16,7 @@ root=/tmp/camp-namespace-test
 rm -rf "$root"
 mkdir -p "$root"
 
-out=$(camp run -- env CAMP_TEST_ROOT="$root" go test -C "$HOME/camp" ./internal/... -count=1 2>&1) || {
+out=$(camp run -- env CAMP_TEST_ROOT="$root" go test -C "$src" ./internal/... -count=1 2>&1) || {
     printf '%s\n' "$out" >&2
     exit 1
 }
