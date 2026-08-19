@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/mountinfo"
+	"github.com/dlaszlo/camp/internal/mountx"
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/testenv"
@@ -55,10 +56,17 @@ func TestOnlyAMountThatIsNotCampsIsRefused(t *testing.T) {
 	defer root.Close()
 
 	for _, probe := range []struct {
-		name    string
-		table   []mountinfo.Entry
-		target  JobTarget
+		name   string
+		table  []mountinfo.Entry
+		target JobTarget
+		// refused says the comparison must report a stranger's mount.
 		refused bool
+		// unreachable says the walk never gets as far as the comparison:
+		// the table names a mount at a path that cannot be opened beneath
+		// the root camp pinned, which is what an ancestor renamed away
+		// looks like from in here. The teardown refuses those before it
+		// asks anything about identity.
+		unreachable bool
 	}{
 		{
 			name:   "nothing is mounted there any more",
@@ -76,9 +84,10 @@ func TestOnlyAMountThatIsNotCampsIsRefused(t *testing.T) {
 			target: its,
 		},
 		{
-			name:   "the path cannot be looked at",
-			table:  []mountinfo.Entry{{Point: filepath.Join(directory, "gone")}},
-			target: JobTarget{Path: filepath.Join(directory, "gone"), Device: 1, Inode: 1},
+			name:        "the path cannot be reached from the root camp pinned",
+			table:       []mountinfo.Entry{{Point: filepath.Join(directory, "gone")}},
+			target:      JobTarget{Path: filepath.Join(directory, "gone"), Device: 1, Inode: 1},
+			unreachable: true,
 		},
 		{
 			name:    "something else is mounted there",
@@ -92,7 +101,30 @@ func TestOnlyAMountThatIsNotCampsIsRefused(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			mismatch := standsThere(probe.table, root, parts, probe.target)
+			// The order the teardown asks in: is anything mounted there at
+			// all, can it be opened beneath the pinned root, and only then
+			// what is it.
+			if len(mountinfo.At(probe.table, probe.target.Path)) == 0 {
+				if probe.refused {
+					t.Fatal("a target with nothing mounted at it was expected to " +
+						"be refused, and the table is what answers that")
+				}
+				return
+			}
+			standing, err := held(root, parts, probe.target.Path)
+			if probe.unreachable {
+				if err == nil {
+					standing.Close()
+					t.Fatal("a path that is not there was opened")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer standing.Close()
+
+			mismatch := standsThere(standing.FD, probe.target)
 			if probe.refused && mismatch == "" {
 				t.Error("a mount that is not camp's was let through")
 			}
@@ -191,7 +223,7 @@ func TestARefusalBeforeTheFirstMountReportsACleanMachine(t *testing.T) {
 			// What the front end saw, and not what is there now.
 			TargetIdent: "1:1",
 		}},
-	}, root)
+	}, root, mountx.NewGraveyard())
 
 	if reply.Error == "" {
 		t.Fatal("an operand that is not the one camp checked was accepted")
@@ -237,7 +269,10 @@ func TestASelfBindThatWasNotMadeIsNotRecordedForRollback(t *testing.T) {
 	}
 	defer root.Close()
 
-	already := []string{filepath.Join(base, "something-earlier")}
+	already := []place{{
+		parts: []string{"something-earlier"},
+		path:  filepath.Join(base, "something-earlier"),
+	}}
 	made, err := detach(root, []string{"staging"}, staging, already)
 	if err == nil {
 		t.Fatalf("a process without CAP_SYS_ADMIN made a mount. There may now "+
@@ -288,7 +323,7 @@ func TestAStagingSelfBindThatFailedLeavesNothingBehind(t *testing.T) {
 		Action:       ActionMount,
 		Base:         base,
 		StagingParts: []string{"staging"},
-	}, root)
+	}, root, mountx.NewGraveyard())
 
 	if reply.Error == "" {
 		t.Fatalf("a process without CAP_SYS_ADMIN made a mount. There may now "+
@@ -306,5 +341,69 @@ func TestAStagingSelfBindThatFailedLeavesNothingBehind(t *testing.T) {
 	}
 	if reply.Moved || len(reply.Results) != 0 {
 		t.Errorf("the reply claims work that never happened: %+v", reply)
+	}
+}
+
+// A mount whose place cannot be opened is stranded, and never unmounted
+// by the name it was written down as.
+//
+// This is the rollback's half of the same rule the teardown states: what
+// comes down is decided on a descriptor resolved beneath the root the
+// helper pinned, from the components the mount was made through. When
+// that walk fails, root has nothing left to identify the mount by -- and
+// the one thing it must not do then is hand the kernel the recorded name,
+// because a name that no longer reaches camp's mount reaches somebody
+// else's. Stranded says "this is still there and camp could not take it
+// down", which is true, and the record keeps it for the next teardown.
+func TestAMountWhoseNameNoLongerReachesItIsStrandedAndNotUnmounted(t *testing.T) {
+	testenv.SkipIfItCouldMount(t)
+
+	base := t.TempDir()
+	root, err := pathx.OpenRootExactly(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	// Nothing was ever created at this name, which is what an ancestor
+	// renamed away between the mount and the rollback looks like from
+	// inside the helper: the components resolve to nothing.
+	gone := place{parts: []string{"renamed-away"}, path: filepath.Join(base, "renamed-away")}
+
+	stranded := rollback(root, []place{gone}, mountx.NewGraveyard())
+	if len(stranded) != 1 || stranded[0] != gone.path {
+		t.Errorf("stranded is %v, wanted just %s", stranded, gone.path)
+	}
+}
+
+// The environment root is not something this helper unmounts.
+//
+// A teardown target is a place a composition put a mount, and every one
+// of them is inside the environment. The base itself has no directory
+// above it that the helper holds, so a mount there could be neither
+// identified from a descriptor beneath the root nor put back if it would
+// not come down -- and a record naming it is a record that has been
+// edited. It is reported and stepped over, like any other target the
+// helper will not touch.
+func TestTheEnvironmentRootItselfIsNotATeardownTarget(t *testing.T) {
+	base := t.TempDir()
+	root, err := pathx.OpenRootExactly(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	reply := unmount(Job{
+		Version: JobVersion,
+		Action:  ActionUnmount,
+		Base:    base,
+		Targets: []JobTarget{{Path: base}},
+	}, root, mountx.NewGraveyard())
+
+	if len(reply.Results) != 1 || reply.Results[0].Outcome != "mismatch" {
+		t.Fatalf("the results are %+v, wanted one mismatch", reply.Results)
+	}
+	if !strings.Contains(reply.Results[0].Error, base) {
+		t.Errorf("the refusal does not name the directory: %q", reply.Results[0].Error)
 	}
 }

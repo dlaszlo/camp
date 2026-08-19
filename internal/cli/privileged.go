@@ -222,16 +222,18 @@ func cmdDown(ctx *context, args []string) error {
 			strings.Join(mismatched, "\n\n"), record.Hash)
 	}
 
-	// The helper's own last step -- clearing the kernel's root-owned work
-	// directory -- can fail after every unmount succeeded. Saying nothing
-	// about it would be a success reported over a teardown that did not
-	// finish.
+	// The helper can stop for something that is not one target's problem:
+	// clearing the kernel's root-owned work directory, after every unmount
+	// succeeded, or failing to make the place it takes a mount to before
+	// unmounting it, with nothing unmounted at all. Saying nothing about
+	// either would be a success reported over a teardown that did not
+	// finish. Which of the two this was, the counts above already say.
 	if reply.Error != "" {
 		record.Phase = state.Partial
 		_ = record.Save()
 		return failure(ExitFailure, "",
-			"every mount came down and the teardown did not finish: %s\n"+
-				"The record is kept until it does.", reply.Error)
+			"the teardown did not finish: %s\nThe record is kept until it does.",
+			reply.Error)
 	}
 
 	record.Phase = state.Down

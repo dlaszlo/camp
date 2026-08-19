@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/dlaszlo/camp/internal/pathx"
 )
 
@@ -190,4 +192,74 @@ func TestAFileInThePathIsNotAnAbsence(t *testing.T) {
 		t.Errorf("an absent name answered (%v, %v), and absence is not an error",
 			info.Type, err)
 	}
+}
+
+// One walk, three things about one object.
+//
+// The privileged teardown needs the mount, the directory it stands in and
+// the name it stands under, and it needs them to be about the same walk:
+// the identity is checked on the mount's descriptor, the handle that
+// removes it is taken from that descriptor, and a mount that would not
+// come down is put back into the directory descriptor under that name.
+// Resolving the path a second time to get the directory would be a second
+// chance to reach a different object, which is the whole class of defect
+// this package exists to close.
+func TestOpenInGivesTheObjectAndTheDirectoryItIsIn(t *testing.T) {
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, "one", "two"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := pathx.OpenRoot(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	fd, dir, name, err := root.OpenIn([]string{"one", "two"}, os.O_RDONLY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = unix.Close(fd)
+		_ = unix.Close(dir)
+	}()
+	if name != "two" {
+		t.Errorf("the name is %q, wanted \"two\"", name)
+	}
+	if got := sameFile(t, fd, filepath.Join(base, "one", "two")); !got {
+		t.Error("the descriptor is not the object that was asked for")
+	}
+	if got := sameFile(t, dir, filepath.Join(base, "one")); !got {
+		t.Error("the directory descriptor is not the one the object is in")
+	}
+
+	// And the confinement is the same one every other walk in here has: a
+	// symlink at the final component is refused rather than followed, so
+	// what comes back cannot be somewhere else.
+	if err := os.Symlink(base, filepath.Join(base, "one", "elsewhere")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := root.OpenIn([]string{"one", "elsewhere"}, os.O_RDONLY); err == nil {
+		t.Error("a symbolic link at the last component was followed")
+	}
+
+	// The root's own directory is above where this package's confinement
+	// starts, and asking for it is asking for something it does not hand
+	// out.
+	if _, _, _, err := root.OpenIn(nil, os.O_RDONLY); err == nil {
+		t.Error("the root itself was returned as something inside a directory")
+	}
+}
+
+// sameFile reports whether a descriptor holds the object at a path.
+func sameFile(t *testing.T, fd int, path string) bool {
+	t.Helper()
+	var held, named unix.Stat_t
+	if err := unix.Fstat(fd, &held); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Stat(path, &named); err != nil {
+		t.Fatal(err)
+	}
+	return held.Dev == named.Dev && held.Ino == named.Ino
 }

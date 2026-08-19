@@ -921,20 +921,14 @@ func Detach(fd int, named string) (bool, error) {
 
 	if err := unix.Mount("", fmt.Sprintf("/proc/self/fd/%d", clone), "",
 		unix.MS_PRIVATE, ""); err != nil {
-		failed := fmt.Errorf("making %s private so that what is built in it "+
+		// The bind stands and the caller is told so, which is the whole point
+		// of the flag: the self-bind has to come off and this does not take it
+		// off itself. Removing camp's own mounts is one operation with one
+		// route through the graveyard, and it belongs to the caller that keeps
+		// the rollback list -- a second removal path here would be the one
+		// unmount in the privileged half that nothing else can see or report.
+		return true, fmt.Errorf("making %s private so that what is built in it "+
 			"can be moved: %w", named, err)
-		// The self-bind has to come off, and whether it did is part of the
-		// answer. This unmount is by name because umount2 takes one and the
-		// descriptor-safe form of it is the primitive nothing here has
-		// measured -- the same one the teardown is waiting on. When it fails
-		// the caller is told so and told that a mount is standing; a
-		// discarded error here was a rollback reporting a clean machine over
-		// a self-bind that is still there.
-		if outcome, cleanup := Unmount(named); outcome == Busy {
-			return true, fmt.Errorf("%w.\nThe self-bind it made could not be "+
-				"removed either: %v", failed, cleanup)
-		}
-		return false, failed
 	}
 	return true, nil
 }

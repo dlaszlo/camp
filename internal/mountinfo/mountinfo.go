@@ -64,6 +64,22 @@ type Entry struct {
 // evidence.
 func (e Entry) Private() bool { return len(e.Optional) == 0 }
 
+// Shared reports whether this mount is a member of a peer group.
+//
+// It is the one propagation kind that decides what may be done to a
+// mount rather than only what happens around it: the kernel refuses to
+// move a mount that is shared, and refuses to move any mount out of a
+// shared parent. Slave and unbindable say nothing about that, so this
+// asks for the one field rather than for propagation in general.
+func (e Entry) Shared() bool {
+	for _, field := range e.Optional {
+		if strings.HasPrefix(field, "shared:") {
+			return true
+		}
+	}
+	return false
+}
+
 // ReadOnly reports what the per-mount options say. It is a cross-check on
 // statvfs, which is the authority.
 func (e Entry) ReadOnly() bool {

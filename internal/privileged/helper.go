@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/unix"
 
@@ -97,13 +98,28 @@ func Helper(action Action, in io.Reader, out io.Writer) int {
 	}
 	defer root.Close()
 
+	// One graveyard for the whole invocation, and nothing made until a
+	// mount actually has to come down. Every unmount the helper performs
+	// goes through it: the mount is named by a descriptor, moved into a
+	// directory only root can reach, and unmounted there, so the name the
+	// kernel finally resolves is not one the invoking user can replace.
+	// mountx's own file carries the measurements that shape it and says
+	// which mounts it cannot help.
+	grave := mountx.NewGraveyard()
+
 	switch action {
 	case ActionMount:
-		reply = mount(job, root)
+		reply = mount(job, root, grave)
 	case ActionUnmount:
-		reply = unmount(job, root)
+		reply = unmount(job, root, grave)
 	default:
 		reply.Error = fmt.Sprintf("unknown action %q", action)
+	}
+
+	// Before the reply is built, because what it could not clear is part of
+	// what this invocation left on the machine.
+	if err := grave.Close(); err != nil {
+		reply.Error = strings.TrimSpace(reply.Error + "\n\n" + err.Error())
 	}
 
 	code := 0
@@ -135,8 +151,22 @@ func finish(out io.Writer, reply Reply, code int) int {
 // residue they cannot clear, and with no record naming it either, because
 // a rolled-back up forgets its record. That is being walled in by a
 // command that reported a clean machine.
-func unwind(job Job, root pathx.Root, made []string, reply Reply) Reply {
-	reply.Stranded = rollback(made)
+func unwind(job Job, root pathx.Root, made []place, reply Reply,
+	grave *mountx.Graveyard) Reply {
+	// Said once, and only when there is something to unwind: a rollback
+	// removes camp's own mounts by descriptor through the graveyard, and on
+	// a machine where that cannot be made it removes them by name instead.
+	// It does remove them -- a rollback that refused to act because it
+	// could not act perfectly would leave a half-built composition standing
+	// -- and a reply that did not say which route it took would be claiming
+	// a guarantee this run did not have.
+	if len(made) > 0 {
+		if err := grave.Open(); err != nil {
+			reply.Error = strings.TrimSpace(reply.Error) + "\n\nWhat camp had " +
+				"mounted was removed by name rather than by descriptor: " + err.Error()
+		}
+	}
+	reply.Stranded = rollback(root, made, grave)
 	reply.RolledBack = len(reply.Stranded) == 0
 	if reply.RolledBack {
 		if err := clearWork(job, root); err != nil {
@@ -178,9 +208,9 @@ func clearWork(job Job, root pathx.Root) error {
 // command: giving the privilege back between mounting and moving and
 // asking for it again would open a window in which a half-built tree
 // exists and nothing is watching it.
-func mount(job Job, root pathx.Root) Reply {
+func mount(job Job, root pathx.Root, grave *mountx.Graveyard) Reply {
 	reply := Reply{Version: JobVersion}
-	var made []string
+	var made []place
 
 	// Every operand that exists is compared against what the front end
 	// recorded before the first syscall that changes anything, so a job
@@ -200,7 +230,7 @@ func mount(job Job, root pathx.Root) Reply {
 		// said the rollback had failed -- so an up that touched nothing
 		// reported the workspace frozen, listed no mounts as still mounted,
 		// and left a partial record for a composition that was never built.
-		return unwind(job, root, nil, reply)
+		return unwind(job, root, nil, reply, grave)
 	}
 	barrier(job, "prechecked")
 
@@ -213,7 +243,7 @@ func mount(job Job, root pathx.Root) Reply {
 	made, err := detach(root, job.StagingParts, staging, made)
 	if err != nil {
 		reply.Error = err.Error()
-		return unwind(job, root, made, reply)
+		return unwind(job, root, made, reply, grave)
 	}
 	barrier(job, "staging-bound")
 
@@ -221,7 +251,7 @@ func mount(job Job, root pathx.Root) Reply {
 		target, sourceFD, targetFD, ends, err := resolve(root, operation)
 		if err != nil {
 			reply.Error = err.Error()
-			return unwind(job, root, made, reply)
+			return unwind(job, root, made, reply, grave)
 		}
 
 		mountable := operation.AsMount(target)
@@ -237,11 +267,11 @@ func mount(job Job, root pathx.Root) Reply {
 		// not leaves a mount standing, and a rollback that skipped it would
 		// report a clean machine that is not clean.
 		if placed {
-			made = append(made, target)
+			made = append(made, place{parts: operation.TargetParts, path: target})
 		}
 		if err != nil {
 			reply.Error = err.Error()
-			return unwind(job, root, made, reply)
+			return unwind(job, root, made, reply, grave)
 		}
 
 		// What the mount answers as, read back from the root's own
@@ -262,7 +292,7 @@ func mount(job Job, root pathx.Root) Reply {
 				"back what it is: %v.\nA mount camp cannot identify is one a "+
 				"teardown could not tell from a stranger's, so it is removed "+
 				"again here rather than recorded as an identity of zero.", target, err)
-			return unwind(job, root, made, reply)
+			return unwind(job, root, made, reply, grave)
 		}
 		reply.Results = append(reply.Results, Result{
 			Target:  target,
@@ -278,7 +308,7 @@ func mount(job Job, root pathx.Root) Reply {
 	// privilege must not be given back in between.
 	if problems := verifyStaging(job, root, staging); problems != "" {
 		reply.Error = problems
-		return unwind(job, root, made, reply)
+		return unwind(job, root, made, reply, grave)
 	}
 	barrier(job, "staging-verified")
 
@@ -294,7 +324,7 @@ func mount(job Job, root pathx.Root) Reply {
 	made, err = detach(root, job.LiveParts, live, made)
 	if err != nil {
 		reply.Error = err.Error()
-		return unwind(job, root, made, reply)
+		return unwind(job, root, made, reply, grave)
 	}
 	barrier(job, "live-bound")
 
@@ -307,19 +337,19 @@ func mount(job Job, root pathx.Root) Reply {
 	stagingFD, err := root.Open(job.StagingParts, unix.O_PATH|unix.O_DIRECTORY)
 	if err != nil {
 		reply.Error = fmt.Sprintf("opening the staging tree %s again: %v", staging, err)
-		return unwind(job, root, made, reply)
+		return unwind(job, root, made, reply, grave)
 	}
 	liveFD, err := root.Open(job.LiveParts, unix.O_PATH|unix.O_DIRECTORY)
 	if err != nil {
 		unix.Close(stagingFD)
 		reply.Error = fmt.Sprintf("opening the composed tree's directory %s: %v", live, err)
-		return unwind(job, root, made, reply)
+		return unwind(job, root, made, reply, grave)
 	}
 	err = mountx.Move(stagingFD, liveFD, staging, live)
 	closeAll(stagingFD, liveFD)
 	if err != nil {
 		reply.Error = err.Error()
-		return unwind(job, root, made, reply)
+		return unwind(job, root, made, reply, grave)
 	}
 	reply.Moved = true
 	barrier(job, "moved")
@@ -327,11 +357,22 @@ func mount(job Job, root pathx.Root) Reply {
 	// The tree is at the live path now; what is left at the staging point
 	// is the self-bind that made the move possible, over an empty
 	// directory. It exists for the length of this one call and no record
-	// mentions it, so it goes here.
-	if outcome, err := mountx.Unmount(staging); outcome == mountx.Busy {
+	// mentions it, so it goes here -- through the same route as everything
+	// else the helper takes down, which for a self-bind means the name,
+	// because a mount whose parent is shared cannot be moved anywhere.
+	standing, err := held(root, job.StagingParts, staging)
+	if err != nil {
 		reply.Stranded = append(reply.Stranded, staging)
 		reply.Error = fmt.Sprintf("the composition is at %s, and the staging "+
-			"mount point %s could not be removed: %v", live, staging, err)
+			"mount point %s could not be opened to be removed: %v", live, staging, err)
+	} else {
+		outcome, failed := grave.Remove(standing)
+		standing.Close()
+		if outcome == mountx.Busy {
+			reply.Stranded = append(reply.Stranded, staging)
+			reply.Error = fmt.Sprintf("the composition is at %s, and the staging "+
+				"mount point %s could not be removed: %v", live, staging, failed)
+		}
 	}
 	barrier(job, "staging-unbound")
 	return reply
@@ -353,7 +394,7 @@ func mount(job Job, root pathx.Root) Reply {
 // The directory is opened from the pinned root, by component, following
 // no symlink, and the descriptor is what is handed to the mount: nothing
 // here resolves the staging or live name for the kernel to walk again.
-func detach(root pathx.Root, parts []string, named string, made []string) ([]string, error) {
+func detach(root pathx.Root, parts []string, named string, made []place) ([]place, error) {
 	fd, err := root.Open(parts, unix.O_PATH|unix.O_DIRECTORY)
 	if err != nil {
 		return made, fmt.Errorf("opening %s to bind it onto itself: %w", named, err)
@@ -362,7 +403,7 @@ func detach(root pathx.Root, parts []string, named string, made []string) ([]str
 
 	standing, err := mountx.Detach(fd, named)
 	if standing {
-		made = append(made, named)
+		made = append(made, place{parts: parts, path: named})
 	}
 	return made, err
 }
@@ -629,37 +670,31 @@ func checkType(fd int, path, expected string) error {
 // standsThere reports why a target must not be unmounted, or "" when it
 // may be.
 //
-// The first question is whether anything is mounted there at all, and it
-// has to be asked of the mount table rather than of the path. A path
-// whose mount is gone resolves to whatever was underneath it -- for the
-// live directory, the empty directory the composition stood on -- whose
-// device and inode are of course not the composition's. Comparing those
-// reads a finished job as a stranger's mount: measured, after a teardown
-// that unmounted everything and did not get to say so, where 'camp down'
-// then refused to remove eleven mounts that were already gone.
+// It is asked of the descriptor the caller opened, and of nothing else.
+// That descriptor is what the removal is then performed on, so the object
+// this compares and the object that comes down are one object rather than
+// one name resolved twice. The caller has already established that
+// something is mounted at the recorded path, which is the question only
+// the mount table can answer.
 //
-// Four cases pass: nothing is mounted there, so the unmount will answer
-// "absent"; the record carries no identity, so there is nothing to
-// compare and refusing would wall somebody in behind mounts camp made;
-// the path cannot be looked at, which the unmount itself will answer for;
-// and the identity matches.
+// Two cases pass without a comparison: the record carries no identity, so
+// there is nothing to compare and refusing would wall somebody in behind
+// mounts camp made; and the identity matches. A record with no identity is
+// what a run killed before its first reply leaves behind, and the two
+// self-binds never have one.
 //
-// What is compared comes from a descriptor resolved beneath the pinned
-// root, from the target's own components, and not from a second
-// resolution of the recorded path. The path is still what says which
-// mount table entry this is about, because a mount table is a table of
-// paths.
-func standsThere(table []mountinfo.Entry, root pathx.Root, parts []string, target JobTarget) string {
+// A mount whose identity is read as something else is left standing and
+// reported, because camp's own mount is then gone and what is there
+// belongs to somebody else.
+func standsThere(fd int, target JobTarget) string {
 	if target.Device == 0 && target.Inode == 0 {
 		return ""
 	}
-	if len(mountinfo.At(table, target.Path)) == 0 {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
 		return ""
 	}
-	found, err := identityUnder(root, parts)
-	if err != nil {
-		return ""
-	}
+	found := identity{Device: uint64(st.Dev), Inode: st.Ino}
 	if found.Device == target.Device && found.Inode == target.Inode {
 		return ""
 	}
@@ -701,24 +736,68 @@ func closeAll(descriptors ...int) {
 	}
 }
 
+// place is one mount camp made: the components it was addressed by
+// beneath the pinned root, and the name a person reads in a message.
+//
+// The components are what the rollback needs. A mount recorded only as a
+// path would have to be resolved again to be taken down, and the walk that
+// resolved it the first time is the one thing that established it is the
+// object camp made.
+type place struct {
+	parts []string
+	path  string
+}
+
 // rollback removes what was mounted, in reverse, and returns what it
 // could not remove.
-func rollback(made []string) []string {
+//
+// Each one is opened beneath the root the helper pinned, from the
+// components it was mounted through, and handed to the graveyard as a
+// descriptor -- the same route the teardown takes, for the same reason.
+// A mount whose place cannot be opened at all is stranded rather than
+// guessed at: root has nothing left to identify it by, and unmounting a
+// name in that state is unmounting whatever the name reaches now.
+func rollback(root pathx.Root, made []place, grave *mountx.Graveyard) []string {
 	var stranded []string
 	for index := len(made) - 1; index >= 0; index-- {
-		outcome, _ := mountx.Unmount(made[index])
+		standing, err := held(root, made[index].parts, made[index].path)
+		if err != nil {
+			stranded = append(stranded, made[index].path)
+			continue
+		}
+		outcome, _ := grave.Remove(standing)
+		standing.Close()
 		if outcome == mountx.Busy {
-			stranded = append(stranded, made[index])
+			stranded = append(stranded, made[index].path)
 		}
 	}
 	return stranded
+}
+
+// held opens one mount beneath the pinned root, out of a single walk.
+//
+// The identity check, the handle that removes it and the way back are all
+// made on what this returns, so they are all about one object. Two walks
+// would be two resolutions of one name, and everything the helper does
+// after confine exists so that there is one.
+func held(root pathx.Root, parts []string, path string) (mountx.Mounted, error) {
+	none := mountx.Mounted{FD: -1, Dir: -1}
+	if len(parts) == 0 {
+		return none, fmt.Errorf("%s is the environment root itself, and this "+
+			"helper takes down what a composition mounted inside it", path)
+	}
+	fd, dir, name, err := root.OpenIn(parts, unix.O_PATH)
+	if err != nil {
+		return none, err
+	}
+	return mountx.Mounted{FD: fd, Dir: dir, Name: name, Path: path}, nil
 }
 
 // unmount removes the recorded targets, in the order given.
 //
 // It never detaches anything lazily. A mount it cannot remove stays
 // mounted, is reported as still mounted, and makes the command fail.
-func unmount(job Job, root pathx.Root) Reply {
+func unmount(job Job, root pathx.Root, grave *mountx.Graveyard) Reply {
 	reply := Reply{Version: JobVersion}
 	for _, target := range job.Targets {
 		// The recorded path written as components beneath the pinned root,
@@ -728,11 +807,62 @@ func unmount(job Job, root pathx.Root) Reply {
 		// only fails on a job that changed underneath us, and then the target
 		// is stepped over rather than acted on.
 		parts, err := componentsBeneath(root, target.Path)
+		if err == nil && len(parts) == 0 {
+			err = fmt.Errorf("%s is the environment root itself, and this "+
+				"helper takes down what a composition mounted inside it",
+				target.Path)
+		}
 		if err != nil {
 			reply.Results = append(reply.Results, Result{
 				Target:  target.Path,
 				Outcome: "mismatch",
 				Error:   err.Error(),
+			})
+			continue
+		}
+
+		// The table is read again for each target, because every unmount
+		// changes it: a stale one would say a path is still mounted after
+		// this job removed it.
+		table, err := mountinfo.Read(mountinfo.Self)
+		if err != nil {
+			reply.Error = err.Error()
+			return reply
+		}
+
+		// Whether anything is mounted there at all is the first question,
+		// and only the table can answer it. A path whose mount is gone
+		// resolves to whatever was underneath -- for the live directory, the
+		// empty directory the composition stood on -- and every recorded
+		// place is empty in one of the two states the record covers. This is
+		// the answer that costs no syscall at all.
+		if len(mountinfo.At(table, target.Path)) == 0 {
+			reply.Results = append(reply.Results, Result{
+				Target:  target.Path,
+				Outcome: string(mountx.Absent),
+			})
+			continue
+		}
+
+		// One walk, and everything after it is about what that walk opened:
+		// the identity is read off this descriptor, the handle that removes
+		// the mount is taken from it, and the directory it stands in comes
+		// out of the same walk so a mount that will not come down can be put
+		// back without resolving anything.
+		//
+		// A mount the table names at a path this cannot reach beneath the
+		// pinned root is refused rather than unmounted. That is the shape of
+		// the attack: an ancestor renamed away between the record and now,
+		// so the name still reaches a mount and no longer reaches camp's.
+		standing, err := held(root, parts, target.Path)
+		if err != nil {
+			reply.Results = append(reply.Results, Result{
+				Target:  target.Path,
+				Outcome: "mismatch",
+				Error: fmt.Sprintf("something is mounted at %s and camp cannot "+
+					"reach that path from the environment root it opened: %v.\n"+
+					"This helper unmounts what it can identify, and it will not "+
+					"hand the kernel a name instead", target.Path, err),
 			})
 			continue
 		}
@@ -744,16 +874,8 @@ func unmount(job Job, root pathx.Root) Reply {
 		// mismatch is reported and stepped over rather than failing the
 		// whole teardown, because the rest of the composition still has to
 		// come down.
-		//
-		// The table is read again for each target, because every unmount
-		// changes it: a stale one would say a path is still mounted after
-		// this job removed it.
-		table, err := mountinfo.Read(mountinfo.Self)
-		if err != nil {
-			reply.Error = err.Error()
-			return reply
-		}
-		if mismatch := standsThere(table, root, parts, target); mismatch != "" {
+		if mismatch := standsThere(standing.FD, target); mismatch != "" {
+			standing.Close()
 			reply.Results = append(reply.Results, Result{
 				Target:  target.Path,
 				Outcome: "mismatch",
@@ -761,17 +883,28 @@ func unmount(job Job, root pathx.Root) Reply {
 			})
 			continue
 		}
-		// Still open, and deliberately: the identity is now decided on a
-		// descriptor resolved beneath the pinned root, and the unmount itself
-		// still hands the kernel a path it resolves again. umount2 takes a
-		// path, and the descriptor-safe form of it -- umount2 on the
-		// descriptor's own /proc/self/fd name -- depends on kernel behaviour
-		// nothing here has measured. Closing this needs that primitive
-		// measured first, in a namespace or a disposable machine; until then
-		// the check is on the descriptor and the act is on the name, and
-		// there is a window between them.
+
+		// The teardown will not act without the graveyard. Nothing has been
+		// touched at this point, so refusing costs the person a message and
+		// a second 'camp down'; acting without it would mean root resolving
+		// a name inside a directory whose owner is the one person this
+		// helper defends against. The rollback's answer is the other one,
+		// and unwind says why.
+		if err := grave.Open(); err != nil {
+			standing.Close()
+			reply.Rule = "helper-no-graveyard"
+			reply.Error = fmt.Sprintf("camp takes a mount somewhere only root "+
+				"can name before it unmounts it, and it could not make that "+
+				"place: %v.\nNothing has been unmounted and the record is "+
+				"unchanged. This is a fault of the machine rather than of the "+
+				"composition: %s has to be a directory root can create in.",
+				err, mountx.GraveyardBase)
+			return reply
+		}
+
 		barrier(job, "stands-there")
-		outcome, err := mountx.Unmount(target.Path)
+		outcome, err := grave.Remove(standing)
+		standing.Close()
 		result := Result{Target: target.Path, Outcome: string(outcome)}
 		if err != nil && outcome == mountx.Busy {
 			result.Error = err.Error()

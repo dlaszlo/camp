@@ -181,21 +181,56 @@ func (r Root) Open(parts []string, flags int) (int, error) {
 		}
 		return fd, nil
 	}
-	dir, err := openDirFrom(r.state.fd, r.state.name, parts[:len(parts)-1])
+	fd, dir, _, err := r.OpenIn(parts, flags)
 	if err != nil {
 		return -1, err
 	}
-	defer unix.Close(dir)
+	unix.Close(dir)
+	return fd, nil
+}
+
+// OpenIn opens parts below the root and the directory holding the last of
+// them, out of one walk, and returns that last component's name with
+// them.
+//
+// The teardown needs all three about one mount. The mount itself is what
+// its identity is checked on and what the handle that moves it is taken
+// from. The directory it stands in and the name it stands under are where
+// it goes back, if it was moved out and then could not be removed --
+// addressed as a descriptor and a single name, so putting a mount back
+// resolves nothing that anybody can replace in the meantime.
+//
+// Out of one walk, and not two, because two walks of one path are two
+// resolutions of it, and this package exists so that there is one. The
+// caller closes both descriptors.
+//
+// No parts is an error rather than an answer: the root's own directory is
+// above where this package's confinement starts, and a caller asking for
+// it is asking for a capability on something camp did not open.
+func (r Root) OpenIn(parts []string, flags int) (fd, dir int, name string, err error) {
+	if err := r.held(); err != nil {
+		return -1, -1, "", err
+	}
+	if len(parts) == 0 {
+		return -1, -1, "", fmt.Errorf("%s names nothing inside %s",
+			r.state.name, r.state.name)
+	}
+	dir, err = openDirFrom(r.state.fd, r.state.name, parts[:len(parts)-1])
+	if err != nil {
+		return -1, -1, "", err
+	}
+	name = parts[len(parts)-1]
 
 	how := &unix.OpenHow{
 		Flags:   uint64(flags) | unix.O_CLOEXEC,
 		Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_BENEATH,
 	}
-	fd, err := unix.Openat2(dir, parts[len(parts)-1], how)
+	fd, err = unix.Openat2(dir, name, how)
 	if err != nil {
-		return -1, translate(err, r.state.name, parts[len(parts)-1])
+		unix.Close(dir)
+		return -1, -1, "", translate(err, r.state.name, name)
 	}
-	return fd, nil
+	return fd, dir, name, nil
 }
 
 // ReadDir lists parts below the root, in the byte order every other
