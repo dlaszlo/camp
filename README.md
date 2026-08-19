@@ -142,10 +142,21 @@ repository contributes; two plain directories need none of it. Nothing
 else — camp makes its mounts by syscall and asks `/proc` for state, so
 there is no `mount(8)`, `fuser` or similar to install.
 
+On Debian and Ubuntu, a package does all of it at once — the binary, the
+AppArmor profile with the path already pointing at it, and the overlay
+module at boot:
+
+```
+sudo dpkg -i "$(packaging/deb/build)"
+camp doctor                     # says whether both modes are available
+```
+
+By hand, anywhere:
+
 ```
 go build -o camp ./cmd/camp
 sudo install -m 755 camp /usr/local/bin/camp
-camp doctor                     # says whether both modes are available
+camp doctor
 ```
 
 On most distributions that is all of it: unprivileged user namespaces

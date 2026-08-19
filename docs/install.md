@@ -62,7 +62,26 @@ state. There is nothing to install for those.
 
 To build it you need **Go 1.25 or newer**.
 
-## Build and install
+## Install from a package
+
+On Debian and Ubuntu, one command builds a package and one installs it:
+
+```
+git clone <this repository> camp
+cd camp
+sudo dpkg -i "$(packaging/deb/build)"
+```
+
+That is the whole installation. The package puts the binary at
+`/usr/bin/camp`, installs the AppArmor profile that grants the namespace
+permission with the path already pointing at it, and asks for the overlay
+module at boot — the three steps the sections below describe by hand. It
+needs `dpkg-deb` and a Go toolchain to build, and nothing at run time but
+`git`.
+
+To remove it: `sudo apt remove camp`, which takes the profile with it.
+
+## Build and install by hand
 
 ```
 git clone <this repository> camp
@@ -70,6 +89,10 @@ cd camp
 go build -o camp ./cmd/camp
 sudo install -m 755 camp /usr/local/bin/camp
 ```
+
+`/usr/local/bin` rather than `/usr/bin`, because that is where what a
+person installed by hand belongs — and the AppArmor profile names that
+path, so the two agree.
 
 You can stop here if you only want the system-wide mode (`camp up`). For
 the everyday mode, one more step.

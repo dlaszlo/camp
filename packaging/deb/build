@@ -1,0 +1,132 @@
+#!/bin/bash
+#
+# Build a .deb, so that putting camp on a Debian or Ubuntu machine is one
+# command rather than a build and two installs.
+#
+#   packaging/deb/build              a package of the current commit
+#   packaging/deb/build 0.3.1        a package with that version
+#
+# It needs dpkg-deb and a Go toolchain, and nothing else. The result is
+# camp_<version>_<arch>.deb in the directory it was run from.
+#
+# Why a script and not a debian/ directory with dh-golang: this produces
+# one binary package from one binary, and the packaging is three files.
+# A build-dependency chain that has to be installed before the package can
+# be built would be more machinery than the thing it packages.
+set -eu
+
+# The staged tree becomes the package's permissions, and a package that
+# carried a build machine's umask would install directories nobody meant.
+umask 022
+
+version=${1:-}
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../.." && pwd)
+
+if [ -z "$version" ]; then
+    # Described by git when git is there to ask, so a package built from a
+    # checkout says which commit it came from rather than "dev".
+    version=$(git -C "$repo" describe --tags --dirty 2>/dev/null || true)
+    if [ -n "$version" ]; then
+        version=${version#v}
+    else
+        # No tag to describe from. A Debian version has to begin with a
+        # digit, and a commit hash does not always, so the hash goes after
+        # a version that sorts below every real one.
+        version=0.0.0+git$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo 0)
+    fi
+fi
+# Debian versions may not carry a leading letter or a hyphen where this
+# would put one.
+version=$(printf '%s' "$version" | tr -c 'A-Za-z0-9.+~-' '-')
+
+arch=$(dpkg --print-architecture)
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+
+install -d "$stage/usr/bin" "$stage/etc/apparmor.d" \
+           "$stage/usr/share/doc/camp" "$stage/usr/lib/modules-load.d" \
+           "$stage/DEBIAN"
+
+# The version reaches the binary the same way it reaches the package, so
+# 'camp --version' and 'dpkg -l camp' cannot disagree.
+( cd "$repo" && go build -trimpath \
+    -ldflags "-X github.com/dlaszlo/camp/internal/cli.Version=$version" \
+    -o "$stage/usr/bin/camp" ./cmd/camp )
+
+# The profile names the path the binary is at, and a package puts it in
+# /usr/bin rather than /usr/local/bin -- /usr/local is for what a person
+# installed by hand, and a package that wrote there would fight them.
+sed 's|/usr/local/bin/camp|/usr/bin/camp|' \
+    "$repo/packaging/apparmor/camp" > "$stage/etc/apparmor.d/camp"
+
+# overlay is a module, and a machine that has never used one does not have
+# it loaded -- /proc/filesystems then lists nothing and camp refuses,
+# correctly, because a user namespace cannot load a module.
+printf 'overlay\n' > "$stage/usr/lib/modules-load.d/camp.conf"
+
+install -m 644 "$repo/README.md" "$stage/usr/share/doc/camp/README.md"
+install -m 644 "$repo/docs/getting-started.md" "$stage/usr/share/doc/camp/"
+install -m 644 "$repo/docs/how-it-works.md" "$stage/usr/share/doc/camp/"
+install -m 644 "$repo/docs/install.md" "$stage/usr/share/doc/camp/"
+install -m 644 "$repo/LICENSE" "$stage/usr/share/doc/camp/copyright"
+
+cat > "$stage/DEBIAN/control" <<CONTROL
+Package: camp
+Version: $version
+Section: devel
+Priority: optional
+Architecture: $arch
+Depends: git
+Recommends: apparmor
+Maintainer: David Laszlo <laszlo.david@gmail.com>
+Homepage: https://github.com/dlaszlo/camp
+Description: Compose several git repositories into one working directory
+ camp puts several git repositories into one directory without any of them
+ learning about the others: the code repository stays the product, a
+ workspace repository carries the development environment, and writes land
+ in the code repository or in machine-local storage -- never in the
+ workspace.
+ .
+ It has two modes. The rootless one composes inside a user namespace that
+ belongs to the session and vanishes with it. The system-wide one mounts
+ for the whole machine, for when something outside the session has to see
+ the tree, and needs root for that one step only.
+CONTROL
+
+cat > "$stage/DEBIAN/postinst" <<'POSTINST'
+#!/bin/sh
+set -e
+
+# The profile grants one binary the permission to create a user namespace,
+# which is what the rootless mode needs on a machine where
+# kernel.apparmor_restrict_unprivileged_userns is 1. Loading it is not
+# fatal: the system-wide mode does not need it, and a machine without
+# apparmor has nothing to load it into.
+if [ "$1" = configure ] && command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -r -T -W /etc/apparmor.d/camp || true
+fi
+
+if [ "$1" = configure ] && command -v modprobe >/dev/null 2>&1; then
+    modprobe overlay || true
+fi
+
+exit 0
+POSTINST
+
+cat > "$stage/DEBIAN/postrm" <<'POSTRM'
+#!/bin/sh
+set -e
+
+if [ "$1" = remove ] && command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -R /etc/apparmor.d/camp 2>/dev/null || true
+fi
+
+exit 0
+POSTRM
+
+chmod 755 "$stage/DEBIAN/postinst" "$stage/DEBIAN/postrm"
+
+package="camp_${version}_${arch}.deb"
+dpkg-deb --build --root-owner-group "$stage" "$package" >/dev/null
+printf '%s\n' "$package"
