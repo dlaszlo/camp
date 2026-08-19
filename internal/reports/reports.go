@@ -18,12 +18,15 @@
 package reports
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/fsx"
@@ -32,6 +35,21 @@ import (
 
 // SeenSuffix marks a report that has been printed.
 const SeenSuffix = ".seen"
+
+// attempts bounds the names tried when something already holds the one
+// this run wanted -- a session ending at the same nanosecond as another,
+// or a report already marked as read under the name this mark wants. A
+// hundred is far past the point where a collision means something other
+// than chance.
+const attempts = 100
+
+// ErrAlreadySeen says another camp command marked this report while this
+// one was delivering it.
+//
+// Returned rather than folded into success, because "the report has been
+// marked" and "this command marked it" are two different facts and the
+// once-only delivery is built on the second.
+var ErrAlreadySeen = errors.New("the report was marked as read by something else")
 
 // Dir is where reports live for an environment, as a path for a message.
 func Dir(root pathx.Root) string { return filepath.Join(root.Name(), config.Dir, "reports") }
@@ -42,50 +60,46 @@ func Dir(root pathx.Root) string { return filepath.Join(root.Name(), config.Dir,
 // same composition do not overwrite one another, and so the file itself
 // says when it was written.
 //
-// The moment is to the nanosecond and the name is claimed with O_EXCL
-// before anything is written into it. Seconds were not enough: two
-// sessions of one composition ending in the same second produced one
-// name, and the second report replaced the first -- a report about a
-// session nobody would ever see, lost to make room for another.
+// The moment is to the nanosecond, and the name appears only once the
+// whole body is written and synced. Seconds were not enough: two sessions
+// of one composition ending in the same second produced one name, and the
+// second report replaced the first -- a report about a session nobody
+// would ever see, lost to make room for another. Claiming the name first
+// with an empty file was not enough either: between the claim and the
+// body the final name existed as an unseen report of nothing, which a
+// camp command running at that moment would print and mark, and which a
+// failed write left there for good. The name and the body now arrive
+// together, so a report that exists is a report with something in it.
 func Write(root pathx.Root, hash string, body string) (string, error) {
 	area := fsx.Reports(root)
 	if err := area.Ensure(0o755); err != nil {
 		return "", err
 	}
-	name, err := claim(area, hash)
-	if err != nil {
-		return "", err
-	}
-	if err := area.Write(name, []byte(body), 0o644); err != nil {
-		return "", err
-	}
-	return filepath.Join(area.Root(), name), nil
-}
-
-// claim reserves a name nothing else holds.
-//
-// O_EXCL decides it rather than a look beforehand: two sessions ending at
-// once would both find the name free and both write it. The nanosecond is
-// what makes a second attempt land somewhere else.
-func claim(area fsx.Area, prefix string) (string, error) {
 	var last error
-	for attempt := 0; attempt < 100; attempt++ {
-		name := fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
-		_, created, err := area.Touch(name)
+	for attempt := 0; attempt < attempts; attempt++ {
+		name := fmt.Sprintf("%s-%d", hash, time.Now().UnixNano())
+		err := area.WriteNew(name, []byte(body), 0o644)
 		switch {
-		case err != nil:
+		case err == nil:
+			return filepath.Join(area.Root(), name), nil
+		case errors.Is(err, fsx.ErrExists):
 			last = err
-		case created:
-			return name, nil
+		default:
+			return "", err
 		}
 	}
 	if last == nil {
 		last = fmt.Errorf("every name tried was already taken")
 	}
-	return "", fmt.Errorf("naming a report for %s: %w", prefix, last)
+	return "", fmt.Errorf("naming a report for %s: %w", hash, last)
 }
 
 // Unseen returns the reports nobody has been shown yet, oldest first.
+//
+// A name beginning with a dot is not a report. The atomic write builds
+// its bytes in a temporary in this very directory, named that way, and a
+// session killed mid-write leaves one behind: listing it as a report
+// meant printing a fragment of one and marking the fragment as read.
 func Unseen(root pathx.Root) []string {
 	entries, err := os.ReadDir(Dir(root))
 	if err != nil {
@@ -93,7 +107,8 @@ func Unseen(root pathx.Root) []string {
 	}
 	var names []string
 	for _, entry := range entries {
-		if entry.IsDir() || strings.HasSuffix(entry.Name(), SeenSuffix) {
+		if entry.IsDir() || hidden(entry.Name()) ||
+			strings.HasSuffix(entry.Name(), SeenSuffix) {
 			continue
 		}
 		names = append(names, entry.Name())
@@ -126,6 +141,13 @@ func Read(path string) (string, error) {
 // because the write has to be addressed from a directory camp holds
 // open: a report is named by whatever listed the directory, and camp does
 // not write to a place it worked out from a string it was handed.
+//
+// The rename refuses to replace anything, and the name it lands on is
+// decided by that refusal rather than by a look beforehand: a free name
+// found by an Lstat is free until the rename, which is a window in which
+// the .seen file somebody kept gets overwritten. A source that is gone by
+// then is ErrAlreadySeen, because the once-only delivery this supports
+// needs to know it lost rather than to be told it won.
 func MarkSeen(root pathx.Root, path string) error {
 	area := fsx.Reports(root)
 	name := filepath.Base(path)
@@ -134,35 +156,28 @@ func MarkSeen(root pathx.Root, path string) error {
 	// copy could land on a .seen file of the same name -- replacing a
 	// report somebody kept -- and a crash between the two left the report
 	// to be delivered a second time.
-	marked, err := freeName(area, name, SeenSuffix)
-	if err != nil {
-		return err
-	}
-	if err := area.Rename(name, marked); err != nil {
-		return fmt.Errorf("marking %s as read: %w", path, err)
-	}
-	return nil
-}
-
-// freeName finds a name in the directory that nothing holds yet, keeping
-// the suffix at the end -- it is what says the report has been read, and
-// a counter after it would hide the file from the listing that looks for
-// it.
-func freeName(area fsx.Area, base, suffix string) (string, error) {
-	for attempt := 0; attempt < 100; attempt++ {
-		candidate := base + suffix
+	//
+	// The counter goes before the suffix: the suffix is what says the
+	// report has been read, and a counter after it would hide the file
+	// from the listing that looks for it.
+	for attempt := 0; attempt < attempts; attempt++ {
+		marked := name + SeenSuffix
 		if attempt > 0 {
-			candidate = fmt.Sprintf("%s.%d%s", base, attempt, suffix)
+			marked = fmt.Sprintf("%s.%d%s", name, attempt, SeenSuffix)
 		}
-		path, err := area.Path(candidate)
-		if err != nil {
-			return "", err
-		}
-		if _, err := os.Lstat(path); os.IsNotExist(err) {
-			return candidate, nil
+		err := area.RenameNew(name, marked)
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, fsx.ErrExists):
+			continue
+		case errors.Is(err, unix.ENOENT):
+			return fmt.Errorf("marking %s as read: %w", path, ErrAlreadySeen)
+		default:
+			return fmt.Errorf("marking %s as read: %w", path, err)
 		}
 	}
-	return "", fmt.Errorf("no free name for %s%s", base, suffix)
+	return fmt.Errorf("marking %s as read: no free name beside it", path)
 }
 
 // Seen returns the reports that have been shown, for doctor to list.
@@ -173,6 +188,9 @@ func Seen(root pathx.Root) []string {
 	}
 	var paths []string
 	for _, entry := range entries {
+		if hidden(entry.Name()) {
+			continue
+		}
 		if strings.HasSuffix(entry.Name(), SeenSuffix) {
 			paths = append(paths, filepath.Join(Dir(root), entry.Name()))
 		}
@@ -181,13 +199,47 @@ func Seen(root pathx.Root) []string {
 	return paths
 }
 
+// hidden says the name belongs to the machinery rather than to a session.
+// Everything camp puts in this directory that is not a report is named
+// with a leading dot.
+func hidden(name string) bool { return strings.HasPrefix(name, ".") }
+
+// afterRead runs between a report being read and it being printed.
+//
+// It does nothing in a running camp. It is here so a test can start a
+// second camp command in precisely the window where two of them would
+// otherwise both deliver one report -- the way doctorTable in internal/cli
+// exists for a state nobody can arrange on purpose.
+var afterRead = func(path string) {}
+
 // Show prints every unseen report once and marks it.
 //
 // Called at the start of every command that resolves a composition, so a
 // session's findings reach whoever comes back to the environment next --
 // which, for a detached session, is the only moment there is anybody to
 // tell.
+//
+// The whole delivery -- listing, reading, printing, marking -- happens
+// under an exclusive lock on the reports directory itself. Listing and
+// reading before marking is what let two camp commands started at once
+// both print one report, and the mark is not a thing that can be undone
+// afterwards. The lock is on the directory's inode rather than on a file
+// beside it, because that inode is the one thing here no rename moves,
+// and because the kernel drops it when the holder dies: a command killed
+// mid-delivery leaves the report unmarked and the next command delivers
+// it, which is the failure this is allowed to have.
 func Show(root pathx.Root, out func(string)) {
+	// Asked before the lock, and again under it. Most commands run in an
+	// environment where no session has left anything, and opening and
+	// locking a directory to find that out would be work at the start of
+	// every command -- and, before the first report is ever written, a
+	// directory that is not there.
+	if len(Unseen(root)) == 0 {
+		return
+	}
+	release := hold(fsx.Reports(root))
+	defer release()
+
 	for _, path := range Unseen(root) {
 		body, err := Read(path)
 		if err != nil {
@@ -198,12 +250,44 @@ func Show(root pathx.Root, out func(string)) {
 				"read: %v", path, err))
 			continue
 		}
+		afterRead(path)
 		out(fmt.Sprintf("a session that ended left this behind (%s):\n\n%s\n",
 			path, strings.TrimRight(body, "\n")))
-		if err := MarkSeen(root, path); err != nil {
+		switch err := MarkSeen(root, path); {
+		case err == nil:
+		case errors.Is(err, ErrAlreadySeen):
+			// Reachable only where the lock above did not hold, and nothing is
+			// lost when it happens: the report was delivered, and it is
+			// marked. A line about the race would be a complaint about a
+			// duplicate the reader is already looking at.
+		default:
 			out(fmt.Sprintf("that report could not be marked as read (%v), so "+
 				"the next camp command in this environment will print it again",
 				err))
 		}
+	}
+}
+
+// hold takes the reports directory exclusively for one delivery.
+//
+// A failure to lock is not a reason to withhold a report. This file is
+// the whole of what a session that has already ended found, and its
+// terminal is gone; delivering it twice is a nuisance, and never
+// delivering it is the finding lost. So a directory that cannot be opened
+// or locked -- a filesystem without working flock semantics is the only
+// way that happens once the directory exists -- leaves the delivery to
+// the rename in MarkSeen, which still refuses to mark a report twice.
+func hold(area fsx.Area) func() {
+	directory, err := area.OpenDir()
+	if err != nil {
+		return func() {}
+	}
+	if err := unix.Flock(int(directory.Fd()), unix.LOCK_EX); err != nil {
+		directory.Close()
+		return func() {}
+	}
+	return func() {
+		_ = unix.Flock(int(directory.Fd()), unix.LOCK_UN)
+		directory.Close()
 	}
 }

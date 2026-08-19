@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/plan"
@@ -568,5 +569,67 @@ func TestARecordCarriesTheOverlaysOptionsAndWhatCampCreated(t *testing.T) {
 		if strings.Contains(path, "/storage/") {
 			t.Errorf("%s is in storage, which camp never removes", path)
 		}
+	}
+}
+
+// Two commands making a semantic transition on one record do not
+// interleave.
+//
+// Publishing whole bytes is not the same as a transition being safe.
+// down, recovery and forget each read a record, decide from it what has
+// to happen, and write back what happened, and none of them holds the
+// composition's own locks -- those are on the upper and the live
+// directory, taken by the process that mounts, and a teardown runs when
+// that process is gone. So the transition is serialized on the record
+// directory's inode, which is the one thing here that no rename moves,
+// and this is that serialization measured: while somebody else holds it,
+// a record transition waits.
+func TestARecordTransitionWaitsForTheOneBeforeIt(t *testing.T) {
+	scratch(t)
+	record, _ := fixture(t)
+	if err := record.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	directory, err := os.Open(state.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	if err := syscall.Flock(int(directory.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		record.Phase = state.Up
+		done <- record.Save()
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("a record transition went through while another one held the "+
+			"records: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	if err := syscall.Flock(int(directory.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the transition never finished after the records were released")
+	}
+
+	saved, found, err := state.Load(record.Hash)
+	if err != nil || !found {
+		t.Fatalf("the record is not there afterwards: found=%v err=%v", found, err)
+	}
+	if saved.Phase != state.Up {
+		t.Errorf("the record says %q, wanted the phase the transition wrote", saved.Phase)
 	}
 }

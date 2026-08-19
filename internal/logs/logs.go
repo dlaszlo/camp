@@ -23,6 +23,7 @@ package logs
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -219,7 +220,15 @@ func (l *Log) rotateIfFull(incoming int) error {
 		return err
 	}
 	for number := Kept - 1; number >= 1; number-- {
-		if err := l.area.Rename(rotated(number), rotated(number+1)); err != nil {
+		// The older generations are optional, and this is the one place that
+		// knows it: the first rotation of a new log has none of them, and a
+		// name that has never been written is not a rename that failed. The
+		// rename itself no longer suppresses that for everybody, because the
+		// same suppression hid the current file below going missing, which is
+		// not optional at all -- it was reopened and stat'd a few lines ago,
+		// under the lock this rotation holds.
+		if err := l.area.Rename(rotated(number), rotated(number+1)); err != nil &&
+			!errors.Is(err, unix.ENOENT) {
 			return err
 		}
 	}

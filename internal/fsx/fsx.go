@@ -40,6 +40,8 @@
 package fsx
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -71,6 +73,59 @@ type Area struct {
 // programming error, never a user's, and it fails loudly rather than
 // writing somewhere plausible.
 var ErrOutside = errors.New("the path leaves the area camp may write in")
+
+// ErrChangedType is returned when the object at a name stopped being what
+// it was between camp looking at it and camp acting on what it saw.
+//
+// It exists because the alternative was reporting success. A removal that
+// met a file where it had found a directory, or a chown that met the
+// reverse, did not do what it was asked, and a cleanup that says a name
+// is clear while a replacement stands at it is the one answer nothing
+// downstream can recover from.
+var ErrChangedType = errors.New("the object changed type while camp was working on it")
+
+// ErrExists is returned by the calls that publish a name only if nothing
+// holds it, so a caller can try another name rather than read a refusal.
+var ErrExists = errors.New("something already holds that name")
+
+// raceAttempts bounds how often something else's interference may make a
+// step start again -- a type change under a removal, a temporary name
+// already taken.
+//
+// Every pass acts on what is at the name now, so an ordinary race --
+// something finishing a rename while camp walks past it -- settles on the
+// first or second pass. A name somebody flips on purpose never settles,
+// and an unbounded loop would hand that person this process for as long
+// as they cared to keep flipping. Past the bound camp says what it met,
+// which is an answer a retry could not have reached.
+const raceAttempts = 8
+
+// afterTypeCheck runs between deciding what an object is and acting on
+// that decision.
+//
+// It does nothing in a running camp. It is here so a test can replace a
+// directory with a file, and a file with a directory, in exactly the
+// window where the swap would otherwise be unreachable from a test -- the
+// way doctorTable in internal/cli exists for a mount table nobody can
+// arrange on purpose. It can only add work, never skip a step.
+var afterTypeCheck = func(name string) {}
+
+// afterTemporaryOpen runs between creating the temporary an atomic write
+// builds in and writing anything into it.
+//
+// The same seam, for the same reason: the two-writer schedule this
+// package is written against -- both writers holding an open temporary at
+// once -- has no other way to be arranged from a test.
+var afterTemporaryOpen = func() {}
+
+// failStep can make one step of an atomic write fail, so that the callers
+// which have to survive a half-finished publication can be measured
+// against every place it can stop.
+//
+// It returns nil in a running camp, and it can only add a failure: no
+// step is skipped because of it, so the worst a mistake here can do is
+// refuse a write that would have succeeded.
+var failStep = func(step string) error { return nil }
 
 // In builds an area from a root camp holds open and the components below
 // it.
@@ -174,6 +229,24 @@ func removeTree(root string) error {
 // Only 'camp init' writes here, and only the files a person asked camp to
 // create.
 func Camp(root pathx.Root) Area { return In("camp", root, config.Dir) }
+
+// OpenDir opens the area's own directory, resolved from the root the way
+// everything else here is.
+//
+// For the callers that need the directory itself rather than something in
+// it: a flock is on an inode, and a descriptor is the only thing that
+// holds one. Nothing is written through it -- an area is still the only
+// way camp writes -- and the caller closes it.
+func (a Area) OpenDir() (*os.File, error) {
+	if !a.root.Valid() {
+		return nil, fmt.Errorf("an empty %s area was used", a.Kind)
+	}
+	fd, err := a.root.Open(a.parts, unix.O_RDONLY|unix.O_DIRECTORY)
+	if err != nil {
+		return nil, fmt.Errorf("opening the %s area: %w", a.Kind, err)
+	}
+	return os.NewFile(uintptr(fd), a.Root()), nil
+}
 
 // Root returns the area's own directory, as a path.
 //
@@ -321,7 +394,31 @@ func (a Area) Append(name string, mode os.FileMode) (*os.File, error) {
 // Rename moves one name to another inside the area, which is how a log is
 // rotated: both ends are resolved beneath the area, so nothing can be
 // renamed out of it or over something outside it.
+//
+// A source that is not there is an error like any other. It used to be
+// folded into success, which cost two things: the loser of a race to
+// perform a once-only transition was told it had performed it, and log
+// rotation could not tell an old generation that has never existed from
+// the current file disappearing under it. A caller that expects a
+// particular absence says so at its own call site, where it knows which
+// absence it means.
 func (a Area) Rename(from, to string) error {
+	return a.renameWith(from, to, 0)
+}
+
+// RenameNew is Rename that refuses to replace anything: the destination
+// is claimed only if nothing holds it, in the same step that moves the
+// source onto it.
+//
+// RENAME_NOREPLACE is what makes it one step. Looking first and renaming
+// afterwards is two resolutions of the destination with a gap between
+// them, and the gap is where the file somebody kept gets overwritten by
+// the rename that was told the name was free.
+func (a Area) RenameNew(from, to string) error {
+	return a.renameWith(from, to, unix.RENAME_NOREPLACE)
+}
+
+func (a Area) renameWith(from, to string, flags uint) error {
 	if err := a.usable([]string{from, to}); err != nil {
 		return err
 	}
@@ -336,9 +433,9 @@ func (a Area) Rename(from, to string) error {
 	}
 	defer unix.Close(toDir)
 
-	if err := unix.Renameat(fromDir, fromName, toDir, toName); err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return nil
+	if err := unix.Renameat2(fromDir, fromName, toDir, toName, flags); err != nil {
+		if errors.Is(err, unix.EEXIST) {
+			return fmt.Errorf("renaming %s to %s in %s: %w", from, to, a.Kind, ErrExists)
 		}
 		return fmt.Errorf("renaming %s to %s in %s: %w", from, to, a.Kind, err)
 	}
@@ -351,6 +448,28 @@ func (a Area) Rename(from, to string) error {
 // both file and directory synced, because a record that is half written
 // still parses and describes half a composition.
 func (a Area) Write(name string, data []byte, mode os.FileMode) error {
+	return a.write(name, data, mode, 0)
+}
+
+// WriteNew publishes a file that must not already be there: the name
+// appears, complete, or it does not appear at all.
+//
+// For the callers whose file is the whole of what it says -- a report a
+// session left behind is read once and then marked, so a name that exists
+// while the body is still being written is a delivery of nothing. A name
+// something else already holds comes back as ErrExists, for a caller that
+// has another name to try.
+//
+// The claim and the publication are one syscall, RENAME_NOREPLACE, which
+// the kernel has had for far longer than the openat2 this package is
+// built on. A filesystem that does not implement the flag refuses the
+// rename rather than replacing anything, so the failure is a report that
+// was not written and never a report that was overwritten.
+func (a Area) WriteNew(name string, data []byte, mode os.FileMode) error {
+	return a.write(name, data, mode, unix.RENAME_NOREPLACE)
+}
+
+func (a Area) write(name string, data []byte, mode os.FileMode, flags uint) error {
 	if err := a.usable([]string{name}); err != nil {
 		return err
 	}
@@ -359,36 +478,108 @@ func (a Area) Write(name string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	defer unix.Close(dir)
-	return writeAt(dir, last, data, mode, a.Kind)
+	return writeAt(dir, last, data, mode, a.Kind, flags)
 }
 
 // writeAt is the atomic replacement, performed entirely through a
 // directory descriptor so that no part of it re-resolves a path.
-func writeAt(dir int, name string, data []byte, mode os.FileMode, kind string) error {
-	temporary := "." + name + ".camp"
-	fd, err := openAt(dir, temporary, unix.O_CREAT|unix.O_TRUNC|unix.O_WRONLY, mode)
+//
+// The temporary is unique to this call and created with O_EXCL. One fixed
+// name per destination meant two processes replacing the same file opened
+// the same inode: the first wrote, synced and renamed it into place, and
+// the second then wrote through its own descriptor -- which by then
+// referred to the published file -- so a successful atomic write changed
+// after it had returned, and the bytes at the destination were half of
+// each payload. Nothing here shares a name with another writer any more,
+// and the cleanup unlinks only the temporary this call made.
+func writeAt(dir int, name string, data []byte, mode os.FileMode, kind string, flags uint) error {
+	temporary, fd, err := createTemporary(dir, name, mode)
 	if err != nil {
 		return fmt.Errorf("writing %s in %s: %w", name, kind, err)
 	}
 	file := os.NewFile(uintptr(fd), temporary)
+	published := false
 	defer func() {
 		file.Close()
-		unix.Unlinkat(dir, temporary, 0)
+		// Only until it is published. After the rename this name holds
+		// nothing, and unlinking it would be a guess about what does.
+		if !published {
+			unix.Unlinkat(dir, temporary, 0)
+		}
 	}()
 
+	afterTemporaryOpen()
+
+	if err := failStep("write"); err != nil {
+		return fmt.Errorf("writing %s in %s: %w", name, kind, err)
+	}
 	if _, err := file.Write(data); err != nil {
 		return fmt.Errorf("writing %s in %s: %w", name, kind, err)
+	}
+	if err := failStep("chmod"); err != nil {
+		return fmt.Errorf("setting the mode of %s in %s: %w", name, kind, err)
 	}
 	if err := file.Chmod(mode); err != nil {
 		return fmt.Errorf("setting the mode of %s in %s: %w", name, kind, err)
 	}
+	if err := failStep("sync"); err != nil {
+		return fmt.Errorf("syncing %s in %s: %w", name, kind, err)
+	}
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("syncing %s in %s: %w", name, kind, err)
 	}
-	if err := unix.Renameat(dir, temporary, dir, name); err != nil {
+	if err := failStep("rename"); err != nil {
 		return fmt.Errorf("replacing %s in %s: %w", name, kind, err)
 	}
+	if err := unix.Renameat2(dir, temporary, dir, name, flags); err != nil {
+		if errors.Is(err, unix.EEXIST) {
+			return fmt.Errorf("writing %s in %s: %w", name, kind, ErrExists)
+		}
+		return fmt.Errorf("replacing %s in %s: %w", name, kind, err)
+	}
+	published = true
 	return syncFd(dir)
+}
+
+// nameMax is the longest name a directory entry may have. Every
+// filesystem camp writes to enforces it, and the temporary has to fit
+// beside the destination's own name.
+const nameMax = 255
+
+// createTemporary makes the file an atomic write is built in, under a
+// name nothing else can be using.
+//
+// Unpredictable rather than merely unique: the random part means another
+// process cannot arrange to hold this name before camp asks for it, and
+// O_EXCL means camp finds out rather than adopting whatever is there. The
+// same bound as a type race, for the same reason -- sixty-four random
+// bits do not collide by chance, so a name that keeps coming back taken
+// is somebody putting it there, and camp says so instead of trying for
+// ever.
+func createTemporary(dir int, name string, mode os.FileMode) (string, int, error) {
+	var last error
+	for attempt := 0; attempt < raceAttempts; attempt++ {
+		var raw [8]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			return "", -1, fmt.Errorf("naming a temporary file: %w", err)
+		}
+		suffix := "." + hex.EncodeToString(raw[:]) + ".camp"
+		stem := name
+		if room := nameMax - 1 - len(suffix); len(stem) > room {
+			stem = stem[:room]
+		}
+		temporary := "." + stem + suffix
+
+		fd, err := openAt(dir, temporary, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY, mode)
+		if err == nil {
+			return temporary, fd, nil
+		}
+		if !errors.Is(err, unix.EEXIST) {
+			return "", -1, err
+		}
+		last = err
+	}
+	return "", -1, last
 }
 
 func syncFd(dir int) error {
@@ -406,6 +597,12 @@ func syncFd(dir int) error {
 }
 
 // Remove deletes one thing inside the area.
+//
+// Two calls, because one name can be either kind of object and the kernel
+// takes a different flag for each. A name that has become the other kind
+// between them comes back as the kernel's own type error rather than as
+// success: this used to end in a suppressed ENOTDIR, which is a removal
+// reported over a file that is still there.
 func (a Area) Remove(parts ...string) error {
 	if err := a.usable(parts); err != nil {
 		return err
@@ -441,7 +638,30 @@ func (a Area) RemoveTree(parts ...string) error {
 	return removeTreeAt(dir, name)
 }
 
+// removeTreeAt makes one name absent, starting again when the object at
+// it changes type under the walk.
+//
+// A retry rather than a refusal, because what this is asked for is that
+// the name be gone, and that is a conclusion a second pass can reach: it
+// looks again and removes whatever is there now. The chown below decides
+// the other way, for the reason given there. The bound is what stops a
+// name being flipped on purpose from holding this here for ever, and past
+// it camp says what it met rather than reporting a removal it did not
+// make.
 func removeTreeAt(dir int, name string) error {
+	for attempt := 0; attempt < raceAttempts; attempt++ {
+		err := removeTreeOnce(dir, name)
+		if !errors.Is(err, ErrChangedType) {
+			return err
+		}
+	}
+	return fmt.Errorf("removing %s: %w", name, ErrChangedType)
+}
+
+// removeTreeOnce empties and removes one name as the kind of object it
+// found there. Meeting the other kind is ErrChangedType and never
+// success: the name is still held, by something else than a moment ago.
+func removeTreeOnce(dir int, name string) error {
 	// Opened before anything is decided about it, following no symlink at
 	// the final name, so the type check and the mode change below act on
 	// this one inode and never on the name -- which the owner can point
@@ -460,7 +680,16 @@ func removeTreeAt(dir int, name string) error {
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		unix.Close(fd)
-		if err := unix.Unlinkat(dir, name, 0); err != nil && !isAbsent(err) {
+		afterTypeCheck(name)
+		if err := unix.Unlinkat(dir, name, 0); err != nil {
+			switch {
+			case isAbsent(err):
+				return nil
+			case errors.Is(err, unix.EISDIR):
+				// A directory stands where the file was. Nothing was removed,
+				// so this must not answer that the name is clear.
+				return fmt.Errorf("%s: %w", name, ErrChangedType)
+			}
 			return fmt.Errorf("removing %s: %w", name, err)
 		}
 		return nil
@@ -477,10 +706,16 @@ func removeTreeAt(dir int, name string) error {
 		}
 	}
 	unix.Close(fd)
+	afterTypeCheck(name)
 	child, err := openAt(dir, name, unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
-		if isAbsent(err) {
+		switch {
+		case isAbsent(err):
 			return nil
+		case errors.Is(err, unix.ENOTDIR):
+			// A file stands where the directory was. The old code read this
+			// as absence and returned success over the replacement.
+			return fmt.Errorf("%s: %w", name, ErrChangedType)
 		}
 		return fmt.Errorf("opening %s: %w", name, err)
 	}
@@ -496,7 +731,13 @@ func removeTreeAt(dir int, name string) error {
 		}
 	}
 	unix.Close(child)
-	if err := unix.Unlinkat(dir, name, unix.AT_REMOVEDIR); err != nil && !isAbsent(err) {
+	if err := unix.Unlinkat(dir, name, unix.AT_REMOVEDIR); err != nil {
+		switch {
+		case isAbsent(err):
+			return nil
+		case errors.Is(err, unix.ENOTDIR):
+			return fmt.Errorf("%s: %w", name, ErrChangedType)
+		}
 		return fmt.Errorf("removing %s: %w", name, err)
 	}
 	return nil
@@ -521,6 +762,19 @@ func (a Area) Chown(uid, gid int, parts ...string) error {
 	return chownTreeAt(dir, name, uid, gid)
 }
 
+// chownTreeAt gives one name and everything under it to a user, and
+// refuses rather than retrying when the name stops being the directory it
+// was walking.
+//
+// The other way from the removal above, and for a reason rather than for
+// symmetry. A removal is asked to make a name absent, so a second pass on
+// whatever is there now still reaches what it was asked for. This is
+// asked to give a known subtree to a user: if the directory it had
+// identified is gone, a second pass would be giving away whatever
+// replaced it, which is a different act with the same name. The caller is
+// the privileged helper, running as root over the one directory the
+// kernel made, and handing a stranger's object to somebody is not the
+// operation it went there to perform.
 func chownTreeAt(dir int, name string, uid, gid int) error {
 	if err := unix.Fchownat(dir, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		if isAbsent(err) {
@@ -538,10 +792,17 @@ func chownTreeAt(dir int, name string, uid, gid int) error {
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return nil
 	}
+	afterTypeCheck(name)
 	child, err := openAt(dir, name, unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
-		if isAbsent(err) {
+		switch {
+		case isAbsent(err):
 			return nil
+		case errors.Is(err, unix.ENOTDIR):
+			// A file stands where the directory was, so nothing below it was
+			// reached. The old code read this as absence and reported the whole
+			// subtree given away.
+			return fmt.Errorf("giving %s to uid %d: %w", name, uid, ErrChangedType)
 		}
 		return err
 	}
@@ -715,6 +976,14 @@ func readNames(dir int) ([]string, error) {
 	return file.Readdirnames(-1)
 }
 
+// isAbsent is the one error that means the name is simply not there.
+//
+// ENOTDIR is not in it, and neither is EISDIR. Both say the name is held
+// -- by something other than what camp had just looked at -- and folding
+// them into absence is how a removal or a chown came to report success
+// over a replacement it never touched. Absence here means ENOENT, the
+// same as in pathx, and every other type conflict is answered where it
+// arises.
 func isAbsent(err error) bool {
-	return errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR)
+	return errors.Is(err, unix.ENOENT)
 }

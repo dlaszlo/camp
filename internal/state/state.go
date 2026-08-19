@@ -371,12 +371,73 @@ func contains(paths []string, want string) bool {
 	return false
 }
 
+// hold takes camp's own record directory exclusively, for the whole of
+// one record's transition.
+//
+// The atomic write underneath publishes whole bytes, and that is not the
+// same thing as a transition being safe. Two commands that each read a
+// record, decide from it what has to happen, and write back what
+// happened, interleave: the later write is a complete record decided from
+// a state that had already stopped holding. down and forget do exactly
+// that, and neither holds the composition's own locks -- those are on the
+// upper and the live directory, taken by the process that mounts, and a
+// teardown runs when that process is gone. So the serialization is here,
+// where the transition is.
+//
+// On the directory's inode and not on the record file, for the reason the
+// log gives about its own: the file is what the atomic write renames, so
+// two holders of a lock on that name would be holding two different
+// inodes a moment later. One lock for every record is coarser than it has
+// to be and costs nothing -- a transition is a read, a decision and a
+// write, with no helper and no password prompt inside it -- and the
+// kernel drops it when the holder dies, so there is no stale lock to
+// clear.
+//
+// A lock that cannot be taken is not a reason to lose a record. The
+// record is the only list of what a composition put where; a filesystem
+// without working flock semantics leaves these transitions exactly as
+// unserialized as they were before this existed, which is worse than this
+// and better than no record at all.
+func hold() func() {
+	records, err := area()
+	if err != nil {
+		return func() {}
+	}
+	// Created here as well as in the write below, because the very first
+	// record of a machine is a transition like any other and there is
+	// nothing to lock until camp's own directory exists. Every failure
+	// here leaves the lock untaken and says nothing: the write that
+	// follows meets the same failure and is the one that reports it.
+	if err := records.Ensure(0o700); err != nil {
+		return func() {}
+	}
+	directory, err := records.OpenDir()
+	if err != nil {
+		return func() {}
+	}
+	if err := unix.Flock(int(directory.Fd()), unix.LOCK_EX); err != nil {
+		directory.Close()
+		return func() {}
+	}
+	return func() {
+		_ = unix.Flock(int(directory.Fd()), unix.LOCK_UN)
+		directory.Close()
+	}
+}
+
 // Save writes the record.
 //
 // Temp file, rename, both file and directory synced. The directory is
 // 0700 and the file 0600: it names every path of a composition, and it is
 // nobody else's business.
 func (r Record) Save() error {
+	defer hold()()
+	return r.save()
+}
+
+// save is Save with the lock already held, for Release, which decides and
+// writes as one transition.
+func (r Record) save() error {
 	r.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	area, err := area()
 	if err != nil {
@@ -603,6 +664,12 @@ func All() []Listing {
 // Whether a record may go at all is Release's question, and every command
 // asks it there.
 func Forget(hash string) error {
+	defer hold()()
+	return forget(hash)
+}
+
+// forget is Forget with the lock already held.
+func forget(hash string) error {
 	area, err := area()
 	if err != nil {
 		return err
@@ -799,16 +866,24 @@ func Held(record Record, table []mountinfo.Entry) []string {
 // than into the message alone: a mount in one of camp's areas that no
 // plan names would otherwise be a thing camp could describe once and
 // never address again.
+//
+// The decision and what follows from it are one transition, held against
+// every other command that writes this record: deciding that nothing of a
+// composition is standing and then discarding the record is exactly the
+// pair that another command writing a stranded mount into it must not
+// land between.
 func Release(record Record, table []mountinfo.Entry) error {
+	defer hold()()
+
 	held := Held(record, table)
 	if len(held) == 0 {
-		return Forget(record.Hash)
+		return forget(record.Hash)
 	}
 
 	record.Strand(held...)
 	record.Phase = Partial
 	kept := ""
-	if err := record.Save(); err != nil {
+	if err := record.save(); err != nil {
 		kept = fmt.Sprintf("\nThe record could not be written either (%v), so "+
 			"it still says what it said before this run.", err)
 	}
