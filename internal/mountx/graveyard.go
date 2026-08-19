@@ -60,23 +60,28 @@ import (
 // kernel rule. It is the only mount camp makes outside an environment, it
 // lives for one helper invocation, and Close takes it off.
 //
-// # What still comes down by name
+// # The mounts that cannot come here
 //
 // A mount whose parent is shared cannot be moved at all -- the kernel
 // answers EINVAL -- and camp's two self-binds are exactly that: their
 // parent is the mount the environment root sits on, which is / , which is
 // shared on a systemd machine. Detach exists because of that rule and
-// cannot escape it for itself. So the self-binds, and only they, are still
-// removed by a name the kernel resolves again. Two things bound that: they
-// carry no recorded identity for a swap to steer away from, and they stand
-// at names inside camp's own work directory.
+// cannot escape it for itself. So they have no graveyard route and never
+// will.
 //
-// Closing that last piece needs a primitive nobody here has measured:
-// umount2 on "/proc/self/fd/<the parent directory>/<name>", which resolves
-// the parent from a descriptor and then walks one component -- and C34
-// says a mount point cannot be renamed while it is mounted, so that one
-// component cannot be swapped underneath it. It is the next thing to
-// measure. Until it is measured it is not what camp is written on.
+// They come down through UnmountIn instead, which hands umount2 the
+// parent directory's own /proc/self/fd name with the one component
+// appended. The parent is then the directory a descriptor holds rather
+// than whatever its name reaches, and C34 says the component below it
+// cannot be renamed while something is mounted on it.
+//
+// This is not theory and the shape of it is worth keeping. Removing them
+// by the recorded name was the residual this file was first written
+// around, described as bounded because those names sit inside camp's own
+// work directory. The rename race showed within one run what that missed:
+// the whole environment root can be swapped for a link, so a name inside
+// it reaches wherever the link points, and root unmounted a mount in a
+// root-owned tree that was nothing to do with camp.
 type Graveyard struct {
 	// area is the pid directory, and the one thing here that writes.
 	area fsx.Area
@@ -279,9 +284,12 @@ func (g *Graveyard) Close() error {
 // All three fields come out of one walk beneath the root the helper
 // pinned, which is what makes them one mount rather than three chances to
 // name a different one. FD is what the identity was checked on and what
-// the handle is taken from; Dir and Name are where it goes back if it was
-// moved out and then could not be removed; Path is for a person reading a
-// message.
+// the handle is taken from. Dir and Name are the two the removal itself
+// needs: where the mount goes back if it was moved out and then could not
+// be removed, and -- for a mount that cannot be moved at all -- the only
+// way to name it to umount2 without letting the kernel walk a path
+// somebody else can change. Path is for a person reading a message, and
+// is never what the kernel is given.
 type Mounted struct {
 	FD   int
 	Dir  int
@@ -322,9 +330,10 @@ func (m *Mounted) release() {
 // Two ways out of that route, and each has one honest answer:
 //
 //   - The mount cannot be moved. Its parent is shared, which is camp's two
-//     self-binds on any systemd machine, and no descriptor route exists for
-//     them at all. They come down by name, which is what camp did
-//     everywhere before this.
+//     self-binds on any systemd machine, and no move exists for them at
+//     all. They come down through UnmountIn, on the directory descriptor
+//     this walk already produced -- the file comment says why that is the
+//     answer and what happened when it was a plain name.
 //   - The move worked and the unmount did not, because something is still
 //     inside. The mount goes back where it came from, addressed by the
 //     directory descriptor and the one name, and the caller is told it is
@@ -344,7 +353,7 @@ func (g *Graveyard) Remove(m *Mounted) (Outcome, error) {
 	table, err := mountinfo.Read(mountinfo.Self)
 	if err != nil || !movable(table, m.Path) {
 		m.release()
-		return Unmount(m.Path)
+		return UnmountIn(m.Dir, m.Name, m.Path)
 	}
 
 	// The mount itself, by descriptor. open_tree without OPEN_TREE_CLONE is
@@ -355,7 +364,7 @@ func (g *Graveyard) Remove(m *Mounted) (Outcome, error) {
 		unix.AT_EMPTY_PATH|unix.OPEN_TREE_CLOEXEC)
 	if err != nil {
 		m.release()
-		return Unmount(m.Path)
+		return UnmountIn(m.Dir, m.Name, m.Path)
 	}
 	// Everything the caller's descriptor was for has been asked of it: it
 	// decided which mount this is, and the handle that carries that
@@ -367,7 +376,7 @@ func (g *Graveyard) Remove(m *Mounted) (Outcome, error) {
 	slot, slotFD, err := g.grave(directory)
 	if err != nil {
 		unix.Close(tree)
-		return Unmount(m.Path)
+		return UnmountIn(m.Dir, m.Name, m.Path)
 	}
 
 	err = unix.MoveMount(tree, "", slotFD, "",
@@ -377,7 +386,7 @@ func (g *Graveyard) Remove(m *Mounted) (Outcome, error) {
 	unix.Close(tree)
 	unix.Close(slotFD)
 	if err != nil {
-		return Unmount(m.Path)
+		return UnmountIn(m.Dir, m.Name, m.Path)
 	}
 
 	outcome, failed := Unmount(slot)

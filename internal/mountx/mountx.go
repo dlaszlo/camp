@@ -839,8 +839,48 @@ func Escape(path string) string {
 }
 
 // Unmount removes one mount point, and never lazily.
+//
+// The path is resolved by the kernel, so this is only for a name nobody
+// but root can change any part of -- inside the graveyard, or the
+// namespace mode's own private table. Anything under an environment goes
+// through UnmountIn, and the comment there says what happened when it did
+// not.
 func Unmount(target string) (Outcome, error) {
-	err := unix.Unmount(target, 0)
+	return outcome(unix.Unmount(target, 0), target)
+}
+
+// UnmountIn removes whatever is mounted at one name inside a directory
+// the caller holds open.
+//
+// umount2 takes a path and nothing else, so a descriptor cannot be handed
+// to it directly. What can be handed to it is the descriptor's own
+// /proc/self/fd name with the one component appended: the kernel resolves
+// the magic link to the directory that descriptor holds -- not by walking
+// the name it was opened by -- and then walks exactly one component from
+// there. So no rename anywhere above it can point this somewhere else,
+// and C34 says the one component below it cannot be renamed either while
+// something is mounted on it.
+//
+// This is not a refinement. Measured by the rename race, at base-owned:
+// with the environment's name swapped for a link to a root-owned tree,
+// root unmounted a mount in *that* tree, because the rollback removed
+// camp's self-bind by the name it had written down. A mount that cannot
+// be moved has no graveyard route, and the name route reached wherever
+// the link pointed.
+//
+// named is what a person reads in a message, and never what the kernel is
+// given. A caller with no directory descriptor gets the plain name and the
+// window that comes with it.
+func UnmountIn(dir int, name, named string) (Outcome, error) {
+	if dir < 0 || name == "" {
+		return Unmount(named)
+	}
+	return outcome(unix.Unmount(fmt.Sprintf("/proc/self/fd/%d/%s", dir, name), 0), named)
+}
+
+// outcome reads what umount2 answered, and names the mount the way a
+// person would.
+func outcome(err error, named string) (Outcome, error) {
 	switch {
 	case err == nil:
 		return Unmounted, nil
@@ -849,9 +889,9 @@ func Unmount(target string) (Outcome, error) {
 		// already done however it came about.
 		return Absent, nil
 	case errors.Is(err, unix.EBUSY):
-		return Busy, fmt.Errorf("%s is still in use", target)
+		return Busy, fmt.Errorf("%s is still in use", named)
 	default:
-		return Busy, fmt.Errorf("unmounting %s: %w", target, err)
+		return Busy, fmt.Errorf("unmounting %s: %w", named, err)
 	}
 }
 

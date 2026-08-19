@@ -1,6 +1,7 @@
 package mountx
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,4 +163,68 @@ func TestRemoveClosesTheDescriptorItDecidedOn(t *testing.T) {
 	// else this process opened -- which is the whole reason Remove closes
 	// it and reports that it did, instead of leaving the caller to close a
 	// number twice.
+}
+
+// The rule UnmountIn rests on, held against the swap it exists to survive.
+//
+// umount2 takes a path and nothing else, so the only way to name a mount
+// to it by descriptor is the descriptor's own /proc/self/fd name with one
+// component appended. What that has to mean, and what this measures: the
+// kernel resolves the magic link to the directory the descriptor holds --
+// not by walking the name it was opened by -- and then walks the one
+// component from there. So renaming that directory away and leaving a
+// link to somewhere else at its name changes nothing about where this
+// arrives.
+//
+// No mount and no privilege: the addressing is the half that decides, and
+// stat answers the same question umount2 would ask. That the call then
+// acts on the mount standing at what it reached is the other half, and the
+// rename race measures it end to end.
+func TestADescriptorsOwnNameIsNotRedirectedByRenamingIt(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	decoy := filepath.Join(base, "decoy")
+	for _, directory := range []string{real, decoy} {
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "child"),
+			[]byte(filepath.Base(directory)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dir, err := unix.Open(real, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(dir)
+
+	// The swap the invoking user can make at any instant: the directory
+	// goes somewhere else and a link to another tree takes its name.
+	if err := os.Rename(real, filepath.Join(base, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(decoy, real); err != nil {
+		t.Fatal(err)
+	}
+
+	through := fmt.Sprintf("/proc/self/fd/%d/child", dir)
+	reached, err := os.ReadFile(through)
+	if err != nil {
+		t.Fatalf("reading %s: %v", through, err)
+	}
+	if string(reached) != "real" {
+		t.Errorf("%s reached the %s tree. A rename above the descriptor "+
+			"redirected it, and the unmount camp performs this way would be "+
+			"root acting wherever the link pointed", through, reached)
+	}
+
+	// And by the name it was opened under, which is what camp used to hand
+	// the kernel: straight into the decoy.
+	if byName, err := os.ReadFile(filepath.Join(real, "child")); err != nil {
+		t.Fatal(err)
+	} else if string(byName) != "decoy" {
+		t.Fatalf("the swap did not take: %s reads %q", real, byName)
+	}
 }
