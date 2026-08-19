@@ -136,11 +136,11 @@ narrow helper that executes the already-validated plan. Running
 
 ## Requirements and install
 
-Linux with OverlayFS, and Go 1.25+ to build. `git` as well when the
-composition is git-based, because camp reads it to work out what each
-repository contributes; two plain directories need none of it. Nothing
-else — camp makes its mounts by syscall and asks `/proc` for state, so
-there is no `mount(8)`, `fuser` or similar to install.
+Linux with OverlayFS, and `git` when the composition is git-based —
+camp reads git to work out what each repository contributes; two plain
+directories need none of it. Nothing else at run time: camp makes its
+mounts by syscall and asks `/proc` for state, so there is no `mount(8)`,
+`fuser` or similar to install. Go 1.25+ only if you build it yourself.
 
 On Debian and Ubuntu, a package does all of it at once — the binary, the
 AppArmor profile with the path already pointing at it, and the overlay
@@ -153,10 +153,12 @@ camp doctor                     # says whether both modes are available
 ```
 
 Or from [the releases page](https://github.com/dlaszlo/camp/releases), if
-you would rather not have `gh`. The same package is built from a checkout
-with `sudo dpkg -i "$(packaging/deb/build)"`, which is what the tests do.
+you would rather not have `gh`. Every release is built from a tagged
+commit after the whole suite has passed on the machine that built it. The
+same package is built from a checkout with `sudo dpkg -i
+"$(packaging/deb/build)"`, which is what the tests do.
 
-By hand, anywhere:
+By hand, anywhere — this is the route that needs a Go toolchain:
 
 ```
 go build -o camp ./cmd/camp
