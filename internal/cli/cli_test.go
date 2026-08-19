@@ -9,6 +9,7 @@ import (
 
 	"github.com/dlaszlo/camp/internal/cli"
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/testenv"
 )
 
@@ -21,6 +22,23 @@ import (
 // Without this, one of them read the record of the machine's own
 // composition and got as far as calling sudo on it.
 func TestMain(m *testing.M) {
+	// The capability probe, answered before anything else, exactly as
+	// cmd/camp answers it and for the same reason: it has one job and
+	// nothing may run before it.
+	//
+	// preflight starts that probe as os.Executable(), which from here is
+	// this test binary. Without this line the child does not recognise
+	// the argument, runs the whole package again inside the new user
+	// namespace it was given, and every copy starts another. On this host
+	// the clone fails and it never showed; inside a composition, where
+	// the namespace is permitted, the run does not end. Measured:
+	// 'camp run -- go test ./internal/... -timeout 90s' stopped in
+	// TestDoctorSaysWhenTheMountTableCannotBeRead with two pipe readers
+	// waiting on a child that was running the suite.
+	if len(os.Args) > 1 && os.Args[1] == preflight.ProbeArg {
+		os.Exit(preflight.Probe())
+	}
+
 	directory, err := os.MkdirTemp("", "camp-cli-state-")
 	if err != nil {
 		panic(err)
