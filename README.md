@@ -144,12 +144,17 @@ there is no `mount(8)`, `fuser` or similar to install.
 
 On Debian and Ubuntu, a package does all of it at once — the binary, the
 AppArmor profile with the path already pointing at it, and the overlay
-module at boot:
+module at boot. Take the one from the latest release:
 
 ```
-sudo dpkg -i "$(packaging/deb/build)"
+gh release download --repo dlaszlo/camp --pattern '*.deb'
+sudo dpkg -i camp_*.deb
 camp doctor                     # says whether both modes are available
 ```
+
+Or from [the releases page](https://github.com/dlaszlo/camp/releases), if
+you would rather not have `gh`. The same package is built from a checkout
+with `sudo dpkg -i "$(packaging/deb/build)"`, which is what the tests do.
 
 By hand, anywhere:
 

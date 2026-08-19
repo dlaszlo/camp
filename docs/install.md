@@ -304,6 +304,31 @@ run `camp up`.
 Run it with no configuration anywhere and it reports only the machine;
 run it inside an environment and it also reports that environment.
 
+## Moving from a hand install to the package
+
+They install to different places on purpose — `/usr/local/bin` is where
+what a person put there belongs, `/usr/bin` is the package's — so both can
+be present at once, and `/usr/local/bin` wins the PATH. Take the hand
+install off first:
+
+```
+sudo apparmor_parser -R /etc/apparmor.d/camp    # unload the old profile
+sudo rm -f /usr/local/bin/camp /etc/apparmor.d/camp
+sudo dpkg -i camp_*.deb
+command -v camp                                 # /usr/bin/camp
+camp doctor
+```
+
+The order matters only for the profile: it names the path the binary is
+at, so the old one is unloaded before the package loads its own. Nothing
+else of camp's is on the machine — no configuration outside an
+environment's own `.camp`, and the records under `~/.local/state/camp`
+belong to your compositions rather than to the installation.
+
+Take any composition down first (`camp down`). Nothing breaks if you do
+not — the mounts are the kernel's and outlive the binary — but the
+teardown wants the same camp that built them.
+
 ## Uninstall
 
 ```
