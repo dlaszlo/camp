@@ -240,7 +240,18 @@ steps:
   - mount_islands:
       - { source: "workspace/.claude", target: ".claude" }
   - git_exclude
+
+session:                          # optional, and only 'camp run' reads it
+  environment:
+    GIT_SSH_COMMAND: "ssh -F ${HOME}/.ssh/config"
 ```
+
+Those seven keys are the whole file. `session:` is the one that describes
+processes rather than the tree — the environment a session's workload
+receives, and how you are mapped inside it — and the section above on ssh
+is what it is usually for. `camp up` creates no namespace, applies none of
+it, and says so when it meets one. `examples/config.yml` is the same file
+with every key written out and commented.
 
 **`steps:` is one ordered sequence, and its order is the mount order.** An
 earlier mount's target may not lie inside a later one's, because the later
