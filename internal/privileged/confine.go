@@ -108,6 +108,7 @@ func (j Job) confine() (pathx.Root, error) {
 		root.Close()
 		return pathx.Root{}, err
 	}
+	barrier(j, "base-owned")
 	return root, nil
 }
 

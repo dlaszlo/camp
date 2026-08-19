@@ -175,6 +175,7 @@ func Up(in UpInput) (Left, refusal.List) {
 
 	in.Say.Helper()
 	reply, err := run(in.Sudo, MountArg, job, in.Stderr)
+	barrier(job, "reply-received")
 	switch {
 	case err != nil:
 		refused.Add("helper", "%v", err)

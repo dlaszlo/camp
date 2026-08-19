@@ -110,6 +110,7 @@ func Helper(action Action, in io.Reader, out io.Writer) int {
 	if reply.Error != "" || len(reply.Stranded) > 0 {
 		code = 1
 	}
+	barrier(job, "reply-encoded")
 	return finish(out, reply, code)
 }
 
@@ -201,6 +202,7 @@ func mount(job Job, root pathx.Root) Reply {
 		// and left a partial record for a composition that was never built.
 		return unwind(job, root, nil, reply)
 	}
+	barrier(job, "prechecked")
 
 	// The staging tree gets a private parent before anything is built in
 	// it, or the move at the end cannot happen: MS_MOVE refuses a mount
@@ -213,6 +215,7 @@ func mount(job Job, root pathx.Root) Reply {
 		reply.Error = err.Error()
 		return unwind(job, root, made, reply)
 	}
+	barrier(job, "staging-bound")
 
 	for _, operation := range job.Mounts {
 		target, sourceFD, targetFD, ends, err := resolve(root, operation)
@@ -267,6 +270,7 @@ func mount(job Job, root pathx.Root) Reply {
 			Device:  found.Device,
 			Inode:   found.Inode,
 		})
+		barrier(job, "mount-made")
 	}
 
 	// The first verification pass, here rather than in the front end,
@@ -276,6 +280,7 @@ func mount(job Job, root pathx.Root) Reply {
 		reply.Error = problems
 		return unwind(job, root, made, reply)
 	}
+	barrier(job, "staging-verified")
 
 	// And the destination needs one too, for the other half of the same
 	// kernel rule. Attaching a mount tree under a shared parent does not
@@ -291,12 +296,14 @@ func mount(job Job, root pathx.Root) Reply {
 		reply.Error = err.Error()
 		return unwind(job, root, made, reply)
 	}
+	barrier(job, "live-bound")
 
 	// Both ends of the move are opened from the root the helper pinned,
 	// following nothing, and the move is made through those descriptors: this is the
 	// step that makes the tree visible to the machine, and a live directory
 	// swapped between the verification and here would otherwise be root
 	// attaching a verified composition wherever the swap pointed.
+	barrier(job, "before-move-open")
 	stagingFD, err := root.Open(job.StagingParts, unix.O_PATH|unix.O_DIRECTORY)
 	if err != nil {
 		reply.Error = fmt.Sprintf("opening the staging tree %s again: %v", staging, err)
@@ -315,6 +322,7 @@ func mount(job Job, root pathx.Root) Reply {
 		return unwind(job, root, made, reply)
 	}
 	reply.Moved = true
+	barrier(job, "moved")
 
 	// The tree is at the live path now; what is left at the staging point
 	// is the self-bind that made the move possible, over an empty
@@ -325,6 +333,7 @@ func mount(job Job, root pathx.Root) Reply {
 		reply.Error = fmt.Sprintf("the composition is at %s, and the staging "+
 			"mount point %s could not be removed: %v", live, staging, err)
 	}
+	barrier(job, "staging-unbound")
 	return reply
 }
 
@@ -761,6 +770,7 @@ func unmount(job Job, root pathx.Root) Reply {
 		// measured first, in a namespace or a disposable machine; until then
 		// the check is on the descriptor and the act is on the name, and
 		// there is a window between them.
+		barrier(job, "stands-there")
 		outcome, err := mountx.Unmount(target.Path)
 		result := Result{Target: target.Path, Outcome: string(outcome)}
 		if err != nil && outcome == mountx.Busy {
