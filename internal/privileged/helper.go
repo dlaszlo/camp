@@ -207,20 +207,12 @@ func mount(job Job, root pathx.Root) Reply {
 	// whose parent is shared, and on a systemd machine everything on / is.
 	// It is the first thing made and the last thing removed, so it is at
 	// the bottom of the rollback list.
-	//
-	// Still open: the self-bind is made by name, so between this line and
-	// the descriptor work below it the kernel resolves the staging path
-	// itself. The name is built from the root's own, which nothing
-	// resolves again, but every component below the root is walked here by
-	// the mount syscall rather than by the strict walk. Closing it means
-	// open_tree and move_mount in place of the bind, which is the mount
-	// primitives' own repair and not this one.
 	staging := filepath.Join(append([]string{root.Name()}, job.StagingParts...)...)
-	if err := mountx.Detach(staging); err != nil {
+	made, err := detach(root, job.StagingParts, staging, made)
+	if err != nil {
 		reply.Error = err.Error()
-		return unwind(job, root, nil, reply)
+		return unwind(job, root, made, reply)
 	}
-	made = append(made, staging)
 
 	for _, operation := range job.Mounts {
 		target, sourceFD, targetFD, ends, err := resolve(root, operation)
@@ -230,13 +222,11 @@ func mount(job Job, root pathx.Root) Reply {
 		}
 
 		mountable := operation.AsMount(target)
-		// The reopen: once the bind is made, the descriptor that made it
-		// names what is underneath it, so the read-only remount and the
-		// propagation change need the target opened again -- beneath the
-		// same root, following nothing, as it was opened the first time.
-		parts := operation.TargetParts
-		placed, err := mountx.MountByDescriptor(mountable, sourceFD, targetFD, ends,
-			func() (int, error) { return root.Open(parts, unix.O_PATH) })
+		// Both ends by descriptor, and no name resolved after them either:
+		// the mount this makes is held by its own descriptor from the moment
+		// it exists, so the read-only remount and the propagation change are
+		// about it and not about a second resolution of the target's name.
+		placed, err := mountx.MountByDescriptor(mountable, sourceFD, targetFD, ends)
 		closeAll(sourceFD, targetFD)
 		ends.Close()
 		// Recorded the moment the mount exists, not when the whole
@@ -275,11 +265,11 @@ func mount(job Job, root pathx.Root) Reply {
 	// made and are not camp's to remove. A private parent means no
 	// propagation happens at all.
 	live := filepath.Join(append([]string{root.Name()}, job.LiveParts...)...)
-	if err := mountx.Detach(live); err != nil {
+	made, err = detach(root, job.LiveParts, live, made)
+	if err != nil {
 		reply.Error = err.Error()
 		return unwind(job, root, made, reply)
 	}
-	made = append(made, live)
 
 	// Both ends of the move are opened from the root the helper pinned,
 	// following nothing, and the move is made through those descriptors: this is the
@@ -315,6 +305,36 @@ func mount(job Job, root pathx.Root) Reply {
 			"mount point %s could not be removed: %v", live, staging, err)
 	}
 	return reply
+}
+
+// detach makes one directory its own private mount, addressed through the
+// root the helper holds, and records it for rollback the moment a mount
+// exists.
+//
+// The staging tree needs it before anything is built inside it and the
+// live directory needs it before the tree is moved onto it, and both need
+// the recording to happen on what mountx.Detach reports rather than on
+// the whole call having succeeded: the self-bind and the propagation
+// change are two syscalls, and a failure in the second leaves the first
+// standing. Recorded only on success, that is a rollback reporting a
+// clean machine over a mount camp made -- which is the one thing camp's
+// failure handling may never do.
+//
+// The directory is opened from the pinned root, by component, following
+// no symlink, and the descriptor is what is handed to the mount: nothing
+// here resolves the staging or live name for the kernel to walk again.
+func detach(root pathx.Root, parts []string, named string, made []string) ([]string, error) {
+	fd, err := root.Open(parts, unix.O_PATH|unix.O_DIRECTORY)
+	if err != nil {
+		return made, fmt.Errorf("opening %s to bind it onto itself: %w", named, err)
+	}
+	defer unix.Close(fd)
+
+	standing, err := mountx.Detach(fd, named)
+	if standing {
+		made = append(made, named)
+	}
+	return made, err
 }
 
 // precheck compares what the job says about its operands with what is on

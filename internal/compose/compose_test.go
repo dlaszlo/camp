@@ -385,10 +385,12 @@ func held(out outcome, setup compose.Setup, built plan.Plan) int {
 // the mount and dentry it was opened on, so once a bind is stacked on
 // that dentry the descriptor still names what is underneath -- and the
 // read-only remount and the propagation change, made through it, are
-// about the wrong mount. This measures the whole operation through the
-// same entry point the helper uses, and then proves the mechanism
-// directly: the same MS_PRIVATE call through the pre-bind descriptor is
-// the one that fails.
+// about the wrong mount. The helper's answer is open_tree and move_mount:
+// the bind is a detached clone, attached to the target descriptor, and
+// the clone's own descriptor names the mount from then on. This measures
+// the whole operation through the same entry point the helper uses, and
+// then proves the mechanism directly: the same MS_PRIVATE call through
+// the descriptor opened before the mount is the one that fails.
 func descriptor(out outcome, built plan.Plan) int {
 	source := built.Config.LowerPath()
 	target := filepath.Join(built.Config.Env, "descriptor-target")
@@ -396,8 +398,6 @@ func descriptor(out outcome, built plan.Plan) int {
 		out.Problems = append(out.Problems, err.Error())
 		return report(out)
 	}
-	parts := []string{"descriptor-target"}
-
 	open := func(path string) (int, error) {
 		return pathx.OpenBeneath(built.Config.Env, strings.Split(
 			strings.TrimPrefix(path, built.Config.Env+"/"), "/"), unix.O_PATH)
@@ -415,9 +415,7 @@ func descriptor(out outcome, built plan.Plan) int {
 
 	mount := plan.Mount{Kind: plan.BindRO, Source: source, Target: target}
 	placed, err := mountx.MountByDescriptor(mount, sourceFD, targetFD,
-		mountx.NoOperands(), func() (int, error) {
-			return pathx.OpenBeneath(built.Config.Env, parts, unix.O_PATH)
-		})
+		mountx.NoOperands())
 	unix.Close(sourceFD)
 	if err != nil {
 		out.DescriptorErr = err.Error()
@@ -438,7 +436,7 @@ func descriptor(out outcome, built plan.Plan) int {
 		}
 
 		// The mechanism, shown rather than argued: the same call through the
-		// descriptor opened before the bind is the one that cannot work.
+		// descriptor opened before the mount is the one that cannot work.
 		if err := unix.Mount("", fmt.Sprintf("/proc/self/fd/%d", targetFD),
 			"", unix.MS_PRIVATE, ""); err != nil {
 			out.DescriptorStale = err.Error()
@@ -752,6 +750,11 @@ func TestANonEmptyLiveDirectoryStopsTheCompositionBeforeAnythingMounts(t *testin
 // was stacked on. Every privileged composition failed on its first mount
 // and then reported a clean machine, because a mount was recorded for
 // rollback only after the whole operation finished.
+//
+// The bind is a clone attached with move_mount now, and the two calls
+// after it go through the clone's own descriptor. That is the part of
+// camp no machine has run: this is the test that runs it, on the first
+// kernel that gets the chance.
 func TestTheHelpersDescriptorMountCompletes(t *testing.T) {
 	env := testenv.NewEnv(t)
 	got := run(t, env, "descriptor")
@@ -766,17 +769,17 @@ func TestTheHelpersDescriptorMountCompletes(t *testing.T) {
 		t.Error("the target does not show the source after the bind")
 	}
 	if !got.DescriptorReadOnly {
-		t.Error("the bind is not read-only: the remount through the reopened " +
-			"descriptor did not take")
+		t.Error("the bind is not read-only: the remount through the clone's " +
+			"own descriptor did not take")
 	}
 	if !got.DescriptorPrivate {
 		t.Error("the mount still propagates: the MS_PRIVATE call through the " +
-			"reopened descriptor did not take")
+			"clone's own descriptor did not take")
 	}
 	if got.DescriptorStale == "" {
-		t.Error("the same call through the descriptor opened before the bind " +
+		t.Error("the same call through the descriptor opened before the mount " +
 			"succeeded. That descriptor names the object underneath the mount, " +
-			"so if it works here the reopen this test exists for is not what " +
+			"so if it works here the clone this test exists for is not what " +
 			"made the difference")
 	}
 }

@@ -31,6 +31,36 @@
 // still being written through -- measured -- and in the privileged mode
 // the table is the only guard against a second composition on the same
 // upper. It was --force wearing another name.
+//
+// One part of this package has never been run. The privileged helper's
+// binds are made with open_tree and move_mount, and the attribute changes
+// that follow them are addressed through the created mount's own
+// /proc/self/fd name. That sequence is written against the documented
+// contract of those calls; nothing in this repository may mount, so
+// nothing in this repository has executed it. The first real 'camp up' on
+// a kernel is what proves it, and it proves the whole of it at once: that
+// OPEN_TREE_CLONE copies exactly the one mount MS_BIND would have made,
+// that move_mount attaches it where the target descriptor points, and
+// that a read-only remount and a propagation change made through the
+// clone's descriptor reach the attached mount rather than whatever it was
+// stacked on.
+//
+// One narrow thing about it is measured, and it is the cheap half:
+// open_tree(fd, "", OPEN_TREE_CLONE|AT_EMPTY_PATH) on an O_PATH
+// descriptor of a directory answers EPERM to a process without
+// CAP_SYS_ADMIN, and not ENOSYS or EINVAL (measured, kernel 7.0.0-29).
+// The kernel validates the flags and resolves the empty path against the
+// descriptor before it asks about the capability, so what that refusal
+// proves is that the call exists here and that this is a shape it
+// accepts. What it cannot prove is anything about the mount, because no
+// mount was made.
+//
+// It is safe to land the rest unmeasured because camp does not believe
+// the call. Verification runs after the mounts and inspects the mount
+// table and the tree itself, in staging and again at the live path, so a
+// flag that did not take or a mount that landed somewhere else comes back
+// as a refusal and a rollback -- the same way the read-only bind that
+// MS_BIND silently ignores has always been caught.
 package mountx
 
 import (
@@ -153,9 +183,32 @@ func OpenOperands(m plan.Mount) (Operands, error) {
 // move_mount puts that mount where it belongs. Nothing between those
 // steps resolves a path.
 func Overlay(m plan.Mount, ends Operands, target int) error {
+	mounted, err := overlayMount(m, ends)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(mounted)
+
+	if err := unix.MoveMount(mounted, "", target, "",
+		unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
+		return fmt.Errorf("attaching the overlay to %s: %w", m.Target, err)
+	}
+	return nil
+}
+
+// overlayMount is the first four of those steps on their own: the
+// composed tree as a mount attached to nothing, held by the descriptor
+// fsmount returned.
+//
+// It is split out only because MountByDescriptor has to keep that
+// descriptor. A mount's own handle is the one name for it that no later
+// resolution can redirect, and the privileged path addresses the attached
+// mount through it -- so there the attach cannot be the last thing that
+// happens, the way it is above.
+func overlayMount(m plan.Mount, ends Operands) (int, error) {
 	context, err := unix.Fsopen("overlay", unix.FSOPEN_CLOEXEC)
 	if err != nil {
-		return fmt.Errorf("asking this kernel for an overlay filesystem: %w.\n"+
+		return -1, fmt.Errorf("asking this kernel for an overlay filesystem: %w.\n"+
 			"camp mounts the composed tree through the kernel's mount API "+
 			"(fsopen, fsconfig, fsmount, move_mount) so that every layer is a "+
 			"descriptor rather than a name something else could redirect. A "+
@@ -167,37 +220,31 @@ func Overlay(m plan.Mount, ends Operands, target int) error {
 		// "lowerdir+" appends one layer, so the order of these calls is the
 		// order of the layers, leftmost first.
 		if err := unix.FsconfigSetFd(context, "lowerdir+", fd); err != nil {
-			return fmt.Errorf("giving the overlay its lower layer %s: %w", m.Lower[index], err)
+			return -1, fmt.Errorf("giving the overlay its lower layer %s: %w", m.Lower[index], err)
 		}
 	}
 	if ends.Upper >= 0 {
 		if err := unix.FsconfigSetFd(context, "upperdir", ends.Upper); err != nil {
-			return fmt.Errorf("giving the overlay its upper layer %s: %w", m.Upper, err)
+			return -1, fmt.Errorf("giving the overlay its upper layer %s: %w", m.Upper, err)
 		}
 		if err := unix.FsconfigSetFd(context, "workdir", ends.Work); err != nil {
-			return fmt.Errorf("giving the overlay its work directory %s: %w", m.Work, err)
+			return -1, fmt.Errorf("giving the overlay its work directory %s: %w", m.Work, err)
 		}
 	}
 	if m.Xattr != "" {
 		if err := unix.FsconfigSetFlag(context, m.Xattr); err != nil {
-			return fmt.Errorf("asking the overlay for %s: %w", m.Xattr, err)
+			return -1, fmt.Errorf("asking the overlay for %s: %w", m.Xattr, err)
 		}
 	}
 	if err := unix.FsconfigCreate(context); err != nil {
-		return fmt.Errorf("creating the overlay for %s: %w", m.Target, err)
+		return -1, fmt.Errorf("creating the overlay for %s: %w", m.Target, err)
 	}
 
 	mounted, err := unix.Fsmount(context, unix.FSMOUNT_CLOEXEC, 0)
 	if err != nil {
-		return fmt.Errorf("turning the overlay into a mount: %w", err)
+		return -1, fmt.Errorf("turning the overlay into a mount: %w", err)
 	}
-	defer unix.Close(mounted)
-
-	if err := unix.MoveMount(mounted, "", target, "",
-		unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
-		return fmt.Errorf("attaching the overlay to %s: %w", m.Target, err)
-	}
-	return nil
+	return mounted, nil
 }
 
 // Mount performs one operation and leaves it private.
@@ -256,47 +303,84 @@ func Mount(m plan.Mount) (bool, error) {
 // Used by the privileged helper. Between the front end validating a path
 // and the helper mounting it, a component the user owns can be replaced
 // with a symlink -- the front end's check would then be about a different
-// object than the mount. Referring to the endpoints through
-// /proc/self/fd/N closes that: a descriptor names the object it was
-// opened on, whatever happens to the name afterwards.
-// Reopen names the target again, after something has been mounted on it.
+// object than the mount. Referring to the endpoints through descriptors
+// closes that: a descriptor names the object it was opened on, whatever
+// happens to the name afterwards.
 //
-// It exists because of what a descriptor is. An O_PATH descriptor holds
-// the mount and dentry it was opened on, and stacking a mount on that
-// dentry does not change it -- so once the bind is made, the descriptor
-// that was used to make it still refers to the object *underneath*.
-// Every further call about the new mount has to be made through a handle
-// opened after it existed. The caller supplies that, because only the
-// caller knows the components to resolve and the root to resolve them
-// beneath.
-type Reopen func() (int, error)
+// A bind here is a detached copy that is then attached, and not a
+// mount(2) between two /proc/self/fd names, because of what each leaves
+// behind. mount(2) leaves nothing that names the mount it just made: an
+// O_PATH descriptor holds the mount and dentry it was opened on, and
+// stacking a mount on that dentry does not change it, so the descriptor
+// that placed the bind still refers to the object underneath it. The
+// read-only remount and the propagation change therefore had to be made
+// through the target opened a second time, by name -- and a fresh
+// resolution of a name cannot prove it found the mount just made. That
+// was the hole. open_tree with OPEN_TREE_CLONE returns a descriptor on a
+// new mount, move_mount attaches that mount to the target descriptor, and
+// the descriptor goes on naming the mount and not the name it landed on.
+// Everything after the attach is addressed through it.
+//
+// The clone is not recursive. OPEN_TREE_CLONE on its own copies one
+// mount, which is what MS_BIND makes; AT_RECURSIVE is what --rbind does,
+// and camp does not do that.
+//
+// Deliberately not mount_setattr, which is where somebody reading this
+// will reach next. It would set the read-only attribute on the clone
+// while it is still detached, so there would be no moment at which the
+// bind is attached and writable -- strictly better than remounting it
+// afterwards. But mount_setattr is Linux 5.12 and open_tree, move_mount
+// and fsopen are 5.2, and camp already hard-requires fsopen for the
+// composed tree. Raising the kernel floor is a decision that needs a
+// measurement behind it and there is none here. Making the remount camp
+// already makes through the clone's descriptor keeps the syscall set
+// where it is and still closes the reopen, which is what this is about.
+//
+// It reports whether a mount now exists at the target, for the reason
+// Mount gives: the value becomes true the moment move_mount succeeds,
+// because a failure in the remount or the propagation change after that
+// leaves a mount standing that the caller has to unwind.
+func MountByDescriptor(m plan.Mount, sourceFD, targetFD int, ends Operands) (bool, error) {
+	var mounted int
+	var err error
+	// What the message says when the attach itself fails, which is the one
+	// step whose failure means nothing was mounted.
+	var attaching string
 
-func MountByDescriptor(m plan.Mount, sourceFD, targetFD int, ends Operands, reopen Reopen) (bool, error) {
-	target := fmt.Sprintf("/proc/self/fd/%d", targetFD)
 	switch m.Kind {
 	case plan.Overlay:
-		if err := Overlay(m, ends, targetFD); err != nil {
-			return false, err
-		}
+		mounted, err = overlayMount(m, ends)
+		attaching = fmt.Sprintf("attaching the overlay to %s", m.Target)
 	case plan.BindRO, plan.BindRW:
-		source := fmt.Sprintf("/proc/self/fd/%d", sourceFD)
-		if err := unix.Mount(source, target, "", unix.MS_BIND, ""); err != nil {
-			return false, fmt.Errorf("binding %s onto %s: %w", m.Source, m.Target, err)
+		// A detached copy of the mount the source descriptor is on, taken
+		// through that descriptor and not through any name.
+		mounted, err = unix.OpenTree(sourceFD, "",
+			unix.OPEN_TREE_CLONE|unix.AT_EMPTY_PATH|unix.OPEN_TREE_CLOEXEC)
+		if err != nil {
+			err = fmt.Errorf("taking a detached copy of %s to bind onto %s: %w",
+				m.Source, m.Target, err)
 		}
+		attaching = fmt.Sprintf("binding %s onto %s", m.Source, m.Target)
 	default:
 		return false, fmt.Errorf("unknown mount kind %q for %s", m.Kind, m.Target)
 	}
-
-	// The mount exists now, and the descriptor above no longer names it.
-	placed, err := reopen()
 	if err != nil {
-		return true, fmt.Errorf("opening %s again after mounting it: %w", m.Target, err)
+		return false, err
 	}
-	defer unix.Close(placed)
-	handle := fmt.Sprintf("/proc/self/fd/%d", placed)
+	defer unix.Close(mounted)
+
+	if err := unix.MoveMount(mounted, "", targetFD, "",
+		unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
+		return false, fmt.Errorf("%s: %w", attaching, err)
+	}
+
+	// The mount exists now, and this descriptor is what names it. Before
+	// the move its /proc/self/fd entry named a mount attached to nothing;
+	// after the move it names the mount at the target.
+	handle := fmt.Sprintf("/proc/self/fd/%d", mounted)
 
 	if m.Kind == plan.BindRO {
-		locked, err := lockedFlagsOf(placed)
+		locked, err := lockedFlagsOf(mounted)
 		if err != nil {
 			return true, fmt.Errorf("reading the flags the kernel locked on %s: %w",
 				m.Target, err)
@@ -530,7 +614,7 @@ func Move(fromFD, toFD int, from, to string) error {
 	return nil
 }
 
-// Detach makes one mount point its own private mount.
+// Detach makes one mount point its own private mount, by descriptor.
 //
 // It is what the staging tree needs before anything is built in it. The
 // kernel refuses MS_MOVE with EINVAL when the mount being moved has a
@@ -545,15 +629,52 @@ func Move(fromFD, toFD int, from, to string) error {
 //
 // The namespace mode never needed this because it makes its whole
 // namespace private on entry, which is also why nothing caught it.
-func Detach(point string) error {
-	if err := unix.Mount(point, point, "", unix.MS_BIND, ""); err != nil {
-		return fmt.Errorf("binding %s onto itself so that what is built in it "+
-			"can be moved: %w", point, err)
+//
+// Both halves are addressed by descriptor, which is the whole difference
+// from what this used to be. The self-bind is a detached clone taken
+// through fd and moved back onto fd, and the propagation change goes
+// through the clone's own descriptor -- so neither call resolves the
+// directory's name, and neither can be pointed at something else by
+// renaming it. named is only what a person reads in a message.
+// MountByDescriptor's comment carries the argument for the primitives and
+// for why mount_setattr is not among them.
+//
+// It reports whether the self-bind now exists, the way Mount and
+// MountByDescriptor do, and for the same reason: the bind and the
+// propagation change are two calls, and a caller that recorded this only
+// when the whole thing succeeded would unwind a machine it believes is
+// clean while camp's own mount is still standing.
+func Detach(fd int, named string) (bool, error) {
+	clone, err := unix.OpenTree(fd, "",
+		unix.OPEN_TREE_CLONE|unix.AT_EMPTY_PATH|unix.OPEN_TREE_CLOEXEC)
+	if err != nil {
+		return false, fmt.Errorf("taking a detached copy of %s to bind onto "+
+			"itself so that what is built in it can be moved: %w", named, err)
 	}
-	if err := unix.Mount("", point, "", unix.MS_PRIVATE, ""); err != nil {
-		_ = unix.Unmount(point, 0)
-		return fmt.Errorf("making %s private so that what is built in it can be "+
-			"moved: %w", point, err)
+	defer unix.Close(clone)
+
+	if err := unix.MoveMount(clone, "", fd, "",
+		unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
+		return false, fmt.Errorf("binding %s onto itself so that what is built "+
+			"in it can be moved: %w", named, err)
 	}
-	return nil
+
+	if err := unix.Mount("", fmt.Sprintf("/proc/self/fd/%d", clone), "",
+		unix.MS_PRIVATE, ""); err != nil {
+		failed := fmt.Errorf("making %s private so that what is built in it "+
+			"can be moved: %w", named, err)
+		// The self-bind has to come off, and whether it did is part of the
+		// answer. This unmount is by name because umount2 takes one and the
+		// descriptor-safe form of it is the primitive nothing here has
+		// measured -- the same one the teardown is waiting on. When it fails
+		// the caller is told so and told that a mount is standing; a
+		// discarded error here was a rollback reporting a clean machine over
+		// a self-bind that is still there.
+		if outcome, cleanup := Unmount(named); outcome == Busy {
+			return true, fmt.Errorf("%w.\nThe self-bind it made could not be "+
+				"removed either: %v", failed, cleanup)
+		}
+		return false, failed
+	}
+	return true, nil
 }

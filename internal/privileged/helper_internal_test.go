@@ -13,6 +13,7 @@ import (
 	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
+	"github.com/dlaszlo/camp/internal/testenv"
 )
 
 // The one check that stands between root and a stranger's mount, tested
@@ -203,6 +204,107 @@ func TestARefusalBeforeTheFirstMountReportsACleanMachine(t *testing.T) {
 		t.Errorf("nothing was mounted and this is stranded: %v", reply.Stranded)
 	}
 	if len(reply.Results) != 0 || reply.Moved {
+		t.Errorf("the reply claims work that never happened: %+v", reply)
+	}
+}
+
+// The self-bind's recording contract, at the one end of it an
+// unprivileged test can reach.
+//
+// Both self-binds the helper makes -- the staging tree's and the live
+// directory's -- go on the rollback list on the flag mountx.Detach
+// returns and not on the call having succeeded, because the bind and the
+// propagation change are two syscalls and the second can fail over a bind
+// that took. Here the first syscall is the one that fails: open_tree with
+// OPEN_TREE_CLONE needs CAP_SYS_ADMIN. Nothing is attached, so nothing
+// may be recorded, and a list that grew here would be a rollback
+// unmounting whatever really stands at that path.
+//
+// The other end -- a bind that exists and a propagation change that
+// failed, which is the case the flag exists for -- cannot be reached
+// without making a mount, and nothing in this repository may make one.
+func TestASelfBindThatWasNotMadeIsNotRecordedForRollback(t *testing.T) {
+	testenv.SkipIfItCouldMount(t)
+
+	base := t.TempDir()
+	staging := filepath.Join(base, "staging")
+	if err := os.Mkdir(staging, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := pathx.OpenRootExactly(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	already := []string{filepath.Join(base, "something-earlier")}
+	made, err := detach(root, []string{"staging"}, staging, already)
+	if err == nil {
+		t.Fatalf("a process without CAP_SYS_ADMIN made a mount. There may now "+
+			"be one at %s, and this test is not written to remove it", staging)
+	}
+	if len(made) != len(already) {
+		t.Errorf("a self-bind that was never made was recorded for rollback: %v", made)
+	}
+	if !strings.Contains(err.Error(), staging) {
+		t.Errorf("the refusal does not name the directory: %v", err)
+	}
+
+	// And a directory that is not there at all fails before the mount, with
+	// the list equally untouched.
+	made, err = detach(root, []string{"absent"}, filepath.Join(base, "absent"), already)
+	if err == nil {
+		t.Fatal("a self-bind onto a directory that does not exist was accepted")
+	}
+	if len(made) != len(already) {
+		t.Errorf("nothing was opened and something was recorded: %v", made)
+	}
+}
+
+// And the same thing through the helper's own entry point: a staging
+// self-bind that could not be made is a refusal that reports a clean
+// machine, because the machine is clean.
+//
+// What the front end does with this reply is choose between "nothing is
+// mounted" and "what camp built is still standing: run camp down". A
+// rolled-back flag that is wrong in either direction walls somebody in or
+// hides a mount from them.
+func TestAStagingSelfBindThatFailedLeavesNothingBehind(t *testing.T) {
+	testenv.SkipIfItCouldMount(t)
+
+	base := t.TempDir()
+	staging := filepath.Join(base, "staging")
+	if err := os.Mkdir(staging, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := pathx.OpenRootExactly(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	reply := mount(Job{
+		Version:      JobVersion,
+		Action:       ActionMount,
+		Base:         base,
+		StagingParts: []string{"staging"},
+	}, root)
+
+	if reply.Error == "" {
+		t.Fatalf("a process without CAP_SYS_ADMIN made a mount. There may now "+
+			"be one at %s, and this test is not written to remove it", staging)
+	}
+	if !strings.Contains(reply.Error, staging) {
+		t.Errorf("the refusal does not name the staging tree: %s", reply.Error)
+	}
+	if !reply.RolledBack {
+		t.Error("nothing was mounted and the reply says the machine still " +
+			"carries a composition")
+	}
+	if len(reply.Stranded) != 0 {
+		t.Errorf("nothing was mounted and this is stranded: %v", reply.Stranded)
+	}
+	if reply.Moved || len(reply.Results) != 0 {
 		t.Errorf("the reply claims work that never happened: %+v", reply)
 	}
 }
