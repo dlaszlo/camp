@@ -17,7 +17,29 @@ has it. To check:
 grep overlay /proc/filesystems        # should print: nodev  overlay
 ```
 
-If it is missing, `sudo modprobe overlay` usually loads it.
+If it is missing, `sudo modprobe overlay` loads it. On a machine that has
+never used an overlay — a fresh cloud image is the usual case — the module
+is present but not loaded, and `/proc/filesystems` does not list it until
+something asks for one. camp reads that file and refuses, which is right:
+a user namespace cannot load a module, so waiting for first use would
+refuse every session. Make it load at boot:
+
+```
+echo overlay | sudo tee /etc/modules-load.d/overlay.conf
+```
+
+**A kernel with the mount API.** camp composes the tree through
+`fsopen`, `fsconfig`, `fsmount` and `move_mount` rather than through
+`mount(2)`, so that every layer reaches the kernel as a descriptor rather
+than as a name something else could replace between the check and the
+mount. `fsopen`, `open_tree` and `move_mount` are Linux 5.2; giving
+OverlayFS its lower layers as descriptors — the `lowerdir+` form — is 6.7.
+A kernel older than that cannot be given the guarantee, and camp says so
+rather than falling back to names.
+
+`camp doctor` answers all of this for the machine you are on, and its
+answer is a real overlay mounted in a real namespace rather than a version
+comparison.
 
 **git**, for a git-based composition. camp reads git — `rev-parse`,
 `ls-files`, `worktree list` — to work out what each repository
@@ -269,5 +291,12 @@ sudo systemctl reload apparmor
 
 Nothing else is left behind: camp writes only inside its own `.camp`
 directory in an environment, and inside your user's state directory
-(`~/.local/state/camp`) when the system-wide mode is used. Removing those
-two removes every trace. It never wrote anything into a repository.
+(`~/.local/state/camp`) when the system-wide mode is used — which it
+creates, 0700, if your account has never had one. Removing those two
+removes every trace. It never wrote anything into a repository.
+
+The one thing camp makes outside both is `/run/camp`, where the system-wide
+teardown takes a mount before unmounting it, so that the path the kernel
+finally resolves is one nobody but root can rename. It exists for the
+length of one `camp down` and is on a filesystem that does not survive a
+restart.

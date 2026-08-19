@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/capsx"
+	"github.com/dlaszlo/camp/internal/mountx"
 	"github.com/dlaszlo/camp/internal/nsx"
 	"github.com/dlaszlo/camp/internal/testenv"
 )
@@ -111,11 +112,14 @@ func inside() int {
 	}
 
 	// One read-only bind standing in the composed tree: the shape of an
-	// island, and of every derived root protection.
+	// island, and of every derived root protection. Read-only in two calls,
+	// because MS_BIND|MS_RDONLY in one is silently ignored -- and with the
+	// source's locked flags replicated, because a user namespace will not
+	// let a remount drop them.
 	island := filepath.Join(live, "CLAUDE.md")
 	if err := unix.Mount(filepath.Join(workspace, "CLAUDE.md"), island, "", unix.MS_BIND, ""); err != nil {
 		fail("binding the island: %v", err)
-	} else if err := unix.Mount("", island, "", unix.MS_REMOUNT|unix.MS_BIND|unix.MS_RDONLY, ""); err != nil {
+	} else if err := readOnly(island); err != nil {
 		fail("making the island read-only: %v", err)
 	}
 
@@ -337,4 +341,27 @@ func isNamespaceDenied(err error, stderr string) bool {
 	}
 	return strings.Contains(stderr, "operation not permitted") ||
 		strings.Contains(err.Error(), "operation not permitted")
+}
+
+// readOnly makes one bind read-only the way camp does.
+//
+// The two calls are camp's rule and not this spike's: MS_BIND|MS_RDONLY
+// together are silently ignored, and a remount inside a user namespace
+// that drops the source mount's locked flags is refused outright.
+//
+// It asks mountx for those flags rather than working them out again.
+// Measured, on a machine that exists for one run: with the flags written
+// out by hand here and the test tree on /tmp -- nosuid,nodev, like the
+// /tmp of the machine this was written on -- the remount failed with
+// EPERM, the island stayed writable, and the test reported camp as letting
+// a write reach the workspace. The spike is about which identity the
+// process has inside the namespace; every rule it does not exist to
+// measure has to come from the code that owns it.
+func readOnly(target string) error {
+	locked, err := mountx.LockedFlagsAt(target)
+	if err != nil {
+		return err
+	}
+	return unix.Mount("", target, "",
+		uintptr(unix.MS_REMOUNT|unix.MS_BIND|unix.MS_RDONLY)|locked, "")
 }

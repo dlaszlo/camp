@@ -429,6 +429,41 @@ leaves the kernel's table while it is still alive and still being written
 through — and in the system-wide mode that table is the only guard
 against a second composition on the same repository.
 
+### How a mount is removed
+
+`umount2` takes a path, and the kernel resolves it. That is a problem the
+helper cannot ignore: it decides *what* to remove by looking at a
+descriptor it resolved beneath the environment root it pinned, and the
+owner of every directory above that path is the person the helper is
+acting for. Between the decision and the call, a name can be made to
+reach something else.
+
+So the mount is not named to the kernel by the path it was recorded as.
+It is named by descriptor: `open_tree` takes a handle on the mount the
+descriptor holds, `move_mount` takes that same mount into a directory
+under `/run` that root makes for the purpose, and the unmount happens
+there — at a path no part of which anybody else can rename. A mount that
+will not come down is moved back where it was and reported busy, so the
+record, `camp status` and the next `camp down` all go on meaning what
+they meant.
+
+Two of camp's mounts cannot go that way. The staging and live points are
+bound onto themselves so that what is built on them cannot propagate, and
+the kernel refuses to move a mount whose parent is shared — which theirs
+is, on any machine where `/` is. Those are unmounted through the parent
+directory's own descriptor instead: `umount2` is given
+`/proc/self/fd/<the directory>/<one name>`, which the kernel resolves to
+the directory that descriptor holds rather than by walking the name it was
+opened by, and a mount point cannot be renamed while it is mounted.
+
+And a teardown whose environment root has moved since the record was
+written stops with nothing unmounted. The mount table reports a mount at
+the path it is at *now*, so after a rename every recorded path would
+answer "nothing is mounted there" — a true answer about a name and a
+false one about the machine. The base is a descriptor and knows where it
+is; when that is not where the record says, camp keeps the record and asks
+for the directory back.
+
 ## What a session reports when it ends
 
 Four read-only scans, at `camp down` and at the end of a namespace

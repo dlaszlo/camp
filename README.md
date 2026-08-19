@@ -272,8 +272,15 @@ camp accept        record the two repositories' root entries as they are now
 camp explain       describe the composed tree to whoever is standing in it
 camp status        what is mounted and what is not
 camp list          every recorded composition, with its phase
+camp forget        drop a composition's record; deletes nothing else
 camp init          write a configuration skeleton
 ```
+
+`camp forget` is the way out of a composition camp can no longer take
+apart — a record left by a machine that was restarted with mounts up, say.
+It refuses while anything of that composition is still mounted, because
+the record is the only list of what has to come down, and discarding it
+while something stands would leave somebody with mounts nothing names.
 
 `camp accept` is the only thing that writes the inventory. camp compares
 against it at every start, because a new name at the workspace root
