@@ -45,6 +45,10 @@ steps:
   - mount_rw:
       - { source: "code/.git", target: ".git" }
   - git_exclude
+
+session:
+  environment:
+    PROMPT_COMMAND: 'PS1="(camp) \$\${PS1#(camp) }"'
 YAML
 
 cd "$env"

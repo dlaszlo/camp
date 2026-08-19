@@ -119,6 +119,12 @@ type Options struct {
 // sends back over the pipe. That is what makes a foreground command
 // behave like a foreground command and a daemonising one return at once.
 func Launch(options Options) (int, error) {
+	// The terminal says a session is running for as long as one is, and
+	// says nothing afterwards. Restored when this returns, which is the
+	// right moment in both shapes: a foreground workload has exited, and a
+	// daemonising one has given the terminal back.
+	defer nameTerminal(options.Stderr, options.Config.Env)()
+
 	read, write, err := os.Pipe()
 	if err != nil {
 		return 1, fmt.Errorf("opening the handshake pipe: %w", err)

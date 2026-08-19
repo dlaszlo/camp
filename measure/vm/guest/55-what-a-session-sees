@@ -1,0 +1,46 @@
+#!/bin/bash
+# What a session hands to what it starts, and what it does not.
+#
+# Two things a person notices and one they must never notice. The
+# composition declares a prompt marker, so a terminal standing in the
+# composed tree looks like one; camp names the terminal for as long as the
+# session runs, so a window says which composition it belongs to. And
+# neither may reach anything that is not a terminal -- an escape sequence
+# in a pipe or a log is not a marker, it is corruption of somebody's
+# output, and everything here reads camp through a pipe.
+set -eu
+src=${CAMP_SRC:-$HOME/camp}
+measure=${CAMP_MEASURE:-$src/measure}
+env=${CAMP_ENV:-$HOME/campcheck}
+
+cd "$env"
+
+echo "-- what the workload is given"
+declared=$(camp run -- sh -c 'printf %s "$PROMPT_COMMAND"')
+printf '   PROMPT_COMMAND=%s\n' "$declared"
+case "$declared" in
+    'PS1="(camp) ${PS1#(camp) }"') ;;
+    *)
+        echo "the declared prompt did not arrive, or arrived expanded by camp" >&2
+        exit 1
+        ;;
+esac
+
+echo
+echo "-- and the composed tree's own path, which camp owns"
+live=$(camp run -- sh -c 'printf %s "$CAMP_LIVE"')
+[ "$live" = "$env/live" ] ||
+    { echo "CAMP_LIVE is $live, wanted $env/live" >&2; exit 1; }
+printf '   CAMP_LIVE=%s\n' "$live"
+
+echo
+echo "-- nothing that interprets bytes reaches a pipe"
+noise=$(camp run -- true 2>&1 | tr -d '\n')
+case "$noise" in
+    *$'\033'*|*$'\007'*)
+        echo "camp wrote an escape sequence into a pipe:" >&2
+        printf '%s\n' "$noise" | cat -v >&2
+        exit 1
+        ;;
+esac
+echo "   clean: what camp said through a pipe is text"

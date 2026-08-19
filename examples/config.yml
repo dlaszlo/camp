@@ -133,3 +133,26 @@ steps:
 #     # The launchers read it to find the real programs, so that none of
 #     # them has to name a distribution's directory.
 #     OUTER_PATH: "$PATH"
+#
+#     # A mark in the shell's prompt, so that a terminal standing in the
+#     # composition looks like one. It goes here rather than in your
+#     # shell's own startup file for the reason the whole file exists:
+#     # camp changes nothing outside a session, and a line on your machine
+#     # that switches on whether camp is running is your machine behaving
+#     # differently because of camp.
+#     #
+#     # Why PROMPT_COMMAND and not PS1: an interactive bash reads its rc
+#     # and assigns PS1 there, so a PS1 arriving in the environment is
+#     # overwritten before the first prompt. PROMPT_COMMAND is a variable
+#     # bash imports and runs before each prompt, and a stock bashrc does
+#     # not set it. Measured on Debian's own default rc.
+#     #
+#     # $$ is one literal dollar: camp must not expand ${PS1}, bash must.
+#     # The pattern removal is what keeps it from prefixing a prompt it
+#     # already prefixed, once per prompt, for the life of the session.
+#     #
+#     # zsh has no PROMPT_COMMAND. A zsh composition declares its own
+#     # equivalent, or leaves the prompt alone -- 'camp run' names the
+#     # terminal for as long as the session runs, which needs nothing
+#     # declared at all.
+#     PROMPT_COMMAND: 'PS1="(camp) $${PS1#(camp) }"'
