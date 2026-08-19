@@ -2,8 +2,11 @@ package mountx
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/mountinfo"
 )
@@ -117,4 +120,46 @@ func TestOnlyRootCanMakeTheGraveyard(t *testing.T) {
 	if second := grave.Open(); second.Error() != err.Error() {
 		t.Errorf("the second answer differs from the first:\n%v\n%v", err, second)
 	}
+}
+
+// The descriptor the caller decided on is closed before anything is
+// unmounted, and Remove says so.
+//
+// This is the rule the whole route turns on and the one it is easiest to
+// lose. A descriptor on a mount is a reference to it and umount2 answers
+// EBUSY while any is held -- C35 measured that as the reason the obvious
+// repair cannot work, and it is the same reference whoever holds it. Remove
+// closes its own handles before the call; the caller's descriptor is the
+// one it cannot close by agreement, because the caller would then close a
+// number the kernel had since given to something else. So it closes it and
+// leaves -1 behind.
+//
+// Written after the mistake: the first version of this left the caller's
+// descriptor open across the unmount, and every mount the helper tried to
+// remove came back busy -- the composition it had just built, at its own
+// path, held by camp.
+func TestRemoveClosesTheDescriptorItDecidedOn(t *testing.T) {
+	// A plain directory, not a mount point. What the removal answers is not
+	// what this measures: it is that whichever way out Remove takes, the
+	// descriptor is gone by the end of it.
+	base := t.TempDir()
+	fd, err := unix.Open(base, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := Mounted{FD: fd, Dir: -1, Name: filepath.Base(base), Path: base}
+	defer held.Close()
+
+	if _, err := NewGraveyard().Remove(&held); err != nil && held.FD >= 0 {
+		t.Fatalf("Remove failed with the descriptor still open: %v", err)
+	}
+	if held.FD != -1 {
+		t.Fatalf("the descriptor is still %d, and holding it across an "+
+			"unmount is what makes the unmount fail", held.FD)
+	}
+	// And the number itself is deliberately not looked at again. A closed
+	// descriptor's number is free, so by now it may belong to something
+	// else this process opened -- which is the whole reason Remove closes
+	// it and reports that it did, instead of leaving the caller to close a
+	// number twice.
 }

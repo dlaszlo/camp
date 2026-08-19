@@ -289,19 +289,26 @@ type Mounted struct {
 	Path string
 }
 
-// Close releases both descriptors.
+// Close releases whatever descriptors are left.
 //
 // A Mounted is a capability on one mount and on the directory it stands
 // in, held only while the caller is deciding about that mount and taking
-// it down. It has to be released before the unmount in any case -- a
-// descriptor on a mount is a reference to it, and umount2 answers EBUSY
-// while one is held -- which Remove does for its own handles; this
-// releases the caller's.
+// it down. Remove closes the one on the mount itself and leaves -1 in its
+// place, because holding that one across an unmount is what makes the
+// unmount fail; the directory is the caller's until here.
 func (m Mounted) Close() {
 	for _, fd := range []int{m.FD, m.Dir} {
 		if fd >= 0 {
 			unix.Close(fd)
 		}
+	}
+}
+
+// release closes the descriptor on the mount and records that it is gone.
+func (m *Mounted) release() {
+	if m.FD >= 0 {
+		unix.Close(m.FD)
+		m.FD = -1
 	}
 }
 
@@ -325,9 +332,18 @@ func (m Mounted) Close() {
 //     search and 'camp down' all keep meaning what they meant. A grave is
 //     not a place a mount is left: the composition's own path is where its
 //     user can see it, and where the next teardown looks.
-func (g *Graveyard) Remove(m Mounted) (Outcome, error) {
+//
+// It takes the Mounted by pointer because it closes the descriptor on the
+// mount and says so by setting it to -1. That is not tidiness: a
+// descriptor on a mount is a reference to it, and umount2 answers EBUSY
+// while any is held -- C35, and it is the same reference whoever holds it.
+// The caller's descriptor is the one thing Remove cannot close by
+// agreement, because the caller would then close a number the kernel had
+// given to something else.
+func (g *Graveyard) Remove(m *Mounted) (Outcome, error) {
 	table, err := mountinfo.Read(mountinfo.Self)
 	if err != nil || !movable(table, m.Path) {
+		m.release()
 		return Unmount(m.Path)
 	}
 
@@ -338,10 +354,17 @@ func (g *Graveyard) Remove(m Mounted) (Outcome, error) {
 	tree, err := unix.OpenTree(m.FD, "",
 		unix.AT_EMPTY_PATH|unix.OPEN_TREE_CLOEXEC)
 	if err != nil {
+		m.release()
 		return Unmount(m.Path)
 	}
+	// Everything the caller's descriptor was for has been asked of it: it
+	// decided which mount this is, and the handle that carries that
+	// decision is taken. From here it is only a reference holding the
+	// mount, so it goes -- before any unmount on either route.
+	directory := directoryAt(m.FD)
+	m.release()
 
-	slot, slotFD, err := g.grave(directoryAt(m.FD))
+	slot, slotFD, err := g.grave(directory)
 	if err != nil {
 		unix.Close(tree)
 		return Unmount(m.Path)
@@ -349,10 +372,8 @@ func (g *Graveyard) Remove(m Mounted) (Outcome, error) {
 
 	err = unix.MoveMount(tree, "", slotFD, "",
 		unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH)
-	// Both descriptors before the unmount, and not after: a descriptor on a
-	// mount is a reference to it, and umount2 answers EBUSY while one is
-	// held. C35 measured that as the reason the obvious repair cannot work,
-	// and it is the same reference here.
+	// The handle and the grave, for the same reason and before the same
+	// call.
 	unix.Close(tree)
 	unix.Close(slotFD)
 	if err != nil {
@@ -363,7 +384,7 @@ func (g *Graveyard) Remove(m Mounted) (Outcome, error) {
 	if outcome == Unmounted {
 		return Unmounted, nil
 	}
-	if back := g.back(slot, m); back != nil {
+	if back := g.back(slot, *m); back != nil {
 		return Busy, fmt.Errorf("%v.\n%v", failed, back)
 	}
 	return Busy, failed

@@ -366,7 +366,7 @@ func mount(job Job, root pathx.Root, grave *mountx.Graveyard) Reply {
 		reply.Error = fmt.Sprintf("the composition is at %s, and the staging "+
 			"mount point %s could not be opened to be removed: %v", live, staging, err)
 	} else {
-		outcome, failed := grave.Remove(standing)
+		outcome, failed := grave.Remove(&standing)
 		standing.Close()
 		if outcome == mountx.Busy {
 			reply.Stranded = append(reply.Stranded, staging)
@@ -765,7 +765,7 @@ func rollback(root pathx.Root, made []place, grave *mountx.Graveyard) []string {
 			stranded = append(stranded, made[index].path)
 			continue
 		}
-		outcome, _ := grave.Remove(standing)
+		outcome, _ := grave.Remove(&standing)
 		standing.Close()
 		if outcome == mountx.Busy {
 			stranded = append(stranded, made[index].path)
@@ -903,7 +903,7 @@ func unmount(job Job, root pathx.Root, grave *mountx.Graveyard) Reply {
 		}
 
 		barrier(job, "stands-there")
-		outcome, err := grave.Remove(standing)
+		outcome, err := grave.Remove(&standing)
 		standing.Close()
 		result := Result{Target: target.Path, Outcome: string(outcome)}
 		if err != nil && outcome == mountx.Busy {
