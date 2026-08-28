@@ -576,6 +576,133 @@ func TestADaemonisedWorkloadReturnsWhileTheInitHoldsTheLocks(t *testing.T) {
 
 }
 
+// A session outlives its workload by design -- that is what makes
+// 'camp run -- tmux new-session -d' work -- so the only way to end one
+// from outside is a signal to the init. It means "end this session", and
+// it reaches every process in the namespace; the composition comes down
+// with the last of them.
+//
+// This is the case the old narrow forward was silent about. The workload
+// has already exited, so the process group a forward would have named is
+// gone, and the request arrived nowhere while the daemon held the
+// composition open for its whole life.
+func TestASignalToTheInitEndsASessionItsWorkloadHasLeft(t *testing.T) {
+	composition := prepare(t)
+	quiet := devnull(t)
+	live := composition.Config.Live()
+
+	// setsid detaches it from the workload's process group, exactly as a
+	// tmux server does, and the workload exits at once leaving it behind.
+	daemon := []string{"/bin/sh", "-c",
+		"setsid /bin/sh -c 'sleep 300 >/dev/null 2>&1 </dev/null' &"}
+
+	status, err := composition.start(daemon, quiet, quiet, os.Stderr)
+	skipUnlessNamespaced(t, err)
+	if err != nil {
+		t.Fatalf("the session failed: %v", err)
+	}
+	if status != 0 {
+		t.Fatalf("the launching command exited %d", status)
+	}
+
+	// The init is found the way camp's own refusal finds it -- as the
+	// process holding the live lock -- and told apart from anything that
+	// inherited a descriptor by the argument only the init is invoked
+	// with. This process lets go of its copies first, or it would be in
+	// the answer itself.
+	composition.Locks.Release()
+	found := locks.Holders(live)
+	pid := 0
+	for _, holder := range found {
+		if strings.Contains(holder.Command, session.InitArg) {
+			pid = holder.PID
+		}
+	}
+	if pid == 0 {
+		t.Fatalf("no init holds the live lock after the launcher returned, so "+
+			"there is no session left to signal. Holding %s: %v", live, found)
+	}
+
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("signalling the init (pid %d): %v", pid, err)
+	}
+
+	// The session is over when its locks can be taken again: the last
+	// process left the namespace and the kernel discarded it with every
+	// mount in it.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		pair, err := takeLocks(composition.Config)
+		if err == nil {
+			pair.Release()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("20s after the init was sent SIGTERM the session still "+
+				"holds %s.\nA signal to the init means end this session, and it "+
+				"has to reach what is still inside: by this point the workload "+
+				"has exited, so a forward aimed at its process group reaches "+
+				"nothing at all", live)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// A stopped process keeps a SIGTERM pending and stays stopped: it never
+// gets to decide anything, and the session it holds open would never end.
+// So the fan-out is followed by SIGCONT -- which is what makes the
+// request a request, rather than something that happens to reach only the
+// processes that were running when it arrived.
+func TestASignalToTheInitReachesAStoppedProcessToo(t *testing.T) {
+	composition := prepare(t)
+	quiet := devnull(t)
+	live := composition.Config.Live()
+
+	daemon := []string{"/bin/sh", "-c",
+		"setsid /bin/sh -c 'kill -STOP $$; sleep 300' >/dev/null 2>&1 </dev/null &"}
+
+	status, err := composition.start(daemon, quiet, quiet, os.Stderr)
+	skipUnlessNamespaced(t, err)
+	if err != nil {
+		t.Fatalf("the session failed: %v", err)
+	}
+	if status != 0 {
+		t.Fatalf("the launching command exited %d", status)
+	}
+
+	composition.Locks.Release()
+	found := locks.Holders(live)
+	pid := 0
+	for _, holder := range found {
+		if strings.Contains(holder.Command, session.InitArg) {
+			pid = holder.PID
+		}
+	}
+	if pid == 0 {
+		t.Fatalf("no init holds the live lock after the launcher returned. "+
+			"Holding %s: %v", live, found)
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("signalling the init (pid %d): %v", pid, err)
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		pair, err := takeLocks(composition.Config)
+		if err == nil {
+			pair.Release()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("20s after the init was sent SIGTERM the session still "+
+				"holds %s, and what is inside it is stopped.\nA stopped process "+
+				"cannot act on a signal it is holding pending: without a SIGCONT "+
+				"after the fan-out it stays stopped, and the session stays up", live)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // The configuration is read twice: once by the launcher, which takes the
 // locks from it, and once by the init, which mounts from it. A file
 // edited in between would have the init compose one tree while camp holds

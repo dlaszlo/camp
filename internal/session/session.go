@@ -292,6 +292,20 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 		os.Exit(1)
 	}
 
+	// This process is pid 1 of its own pid namespace, or it is not the
+	// init and nothing below it is true. Asked rather than assumed because
+	// the end of a session rests on it: supervise ends a session with
+	// kill(-1), which is every process in the namespace here and every
+	// process the user owns anywhere else. The clone carries CLONE_NEWPID
+	// (internal/nsx), so this cannot fire; what it buys is that the
+	// fan-out is safe to read on its own.
+	if pid := os.Getpid(); pid != 1 {
+		refuse("the session init is pid %d, and the init is pid 1 of its own "+
+			"pid namespace.\nNothing has been mounted. Either this process was "+
+			"cloned without CLONE_NEWPID, or something other than camp invoked "+
+			"'camp %s'.", pid, InitArg)
+	}
+
 	// The locks arrived as descriptors. Adopting them is only about having
 	// a handle: the lock is on the open file description, which this
 	// process already holds by having inherited it.
@@ -390,20 +404,31 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	if err != nil {
 		refuse("%v", err)
 	}
-	started, err := startWorkload(workload)
-	if err != nil {
-		refuse("%v", err)
-	}
-	send(message{Kind: kindUp})
-
+	// The workload is started by the supervisor rather than before it, and
+	// the ordering is the point. Subscribing to the signals afterwards
+	// left a window with a workload already running, the session already
+	// announced as up, and SIGTERM still on the runtime's default path --
+	// so the one moment the session was most alive was the one moment its
+	// termination contract did not hold.
+	//
 	// The workload's status goes back the moment the workload exits, not
 	// when the session ends. Those are different moments whenever
 	// something daemonised: the launching command is finished and its
 	// caller should get its shell back, while the server that reparented
 	// to this process keeps the composition open.
-	supervise(started, func(status int) {
-		send(message{Kind: kindExit, Code: status})
-	})
+	err = supervise(
+		func() (*exec.Cmd, error) {
+			started, err := startWorkload(workload)
+			if err != nil {
+				return nil, err
+			}
+			send(message{Kind: kindUp})
+			return started, nil
+		},
+		func(status int) { send(message{Kind: kindExit, Code: status}) })
+	if err != nil {
+		refuse("%v", err)
+	}
 
 	// The last thing this process does before the kernel takes the
 	// namespace apart: look, while the composition still exists, and leave
@@ -636,15 +661,46 @@ func shell(configured string) string {
 // supervise is the init's remaining life.
 //
 // It reaps everything that reparents to it, which as pid 1 of the
-// namespace is everything the session ever starts. It forwards SIGTERM
-// and SIGHUP to the workload's process group, and it deliberately ignores
-// SIGINT, SIGQUIT, SIGTTIN and SIGTTOU: a Ctrl-C is for the workload, and
-// it must never kill the supervisor that is holding the locks in the
-// middle of a session.
+// namespace is everything the session ever starts. It deliberately
+// ignores SIGINT, SIGQUIT, SIGTTIN and SIGTTOU: a Ctrl-C is for the
+// workload, and it must never kill the supervisor that is holding the
+// locks in the middle of a session.
+//
+// A SIGTERM or SIGHUP delivered to this process means "end this
+// session", and it reaches every process in the namespace: as pid 1,
+// kill(-1) signals all of them and nothing outside, and the kernel leaves
+// pid 1 itself out of that fan-out. It used to go to the workload's
+// process group alone, which was silent in the one case that actually
+// happens -- a workload that has already exited leaves no group to
+// signal, while a server that reparented here holds the composition open,
+// so the request reached nothing at all.
+//
+// SIGCONT follows it, and it is not a courtesy. A stopped process keeps a
+// SIGTERM pending and stays stopped: it never gets to decide anything,
+// and the session it holds open would never end. Continuing it is what
+// makes the request a request rather than something that happens to reach
+// only the processes that were running.
+//
+// Nothing is escalated to SIGKILL. camp asks once for each signal it is
+// sent, and a process that ignores the request is holding the session
+// open on purpose or on a bug; both are the person's to look at, and the
+// next start in this environment names the holder by pid and command
+// rather than camp taking the decision away.
+//
+// This is the contract of a session that is running, and it holds from
+// the moment there is anything to run: the subscription is taken before
+// the workload is started, which is why starting it belongs to this
+// function. Earlier than that -- during the mount sequence, with no
+// workload in existence -- a signal ends the init under the runtime's own
+// disposition and the kernel discards the namespace with every mount in
+// it. That is the right answer to "stop" at that point, there being
+// nothing to ask and nothing that survives, and it is a different answer,
+// which is why it is written down rather than folded into the sentence
+// above.
 //
 // It calls back the moment the workload itself exits, and returns when
 // the last other process in the namespace is gone.
-func supervise(workload *exec.Cmd, workloadExited func(int)) {
+func supervise(start func() (*exec.Cmd, error), workloadExited func(int)) error {
 	ignored := make(chan os.Signal, 1)
 	signal.Notify(ignored, unix.SIGINT, unix.SIGQUIT, unix.SIGTTIN, unix.SIGTTOU)
 	go func() {
@@ -652,12 +708,24 @@ func supervise(workload *exec.Cmd, workloadExited func(int)) {
 		}
 	}()
 
+	// Subscribed before the workload exists, and buffered, so that a
+	// signal arriving in the moment between the two is held rather than
+	// falling to the default disposition. The forwarding starts once there
+	// is something to forward to: a fan-out into an empty namespace would
+	// reach nothing and be spent.
 	forwarded := make(chan os.Signal, 1)
 	signal.Notify(forwarded, unix.SIGTERM, unix.SIGHUP)
+
+	workload, err := start()
+	if err != nil {
+		return err
+	}
+
 	go func() {
 		for received := range forwarded {
-			if signal, ok := received.(syscall.Signal); ok && workload.Process != nil {
-				_ = unix.Kill(-workload.Process.Pid, signal)
+			if signal, ok := received.(syscall.Signal); ok {
+				_ = unix.Kill(-1, signal)
+				_ = unix.Kill(-1, unix.SIGCONT)
 			}
 		}
 	}()
@@ -670,9 +738,9 @@ func supervise(workload *exec.Cmd, workloadExited func(int)) {
 			continue
 		case errors.Is(err, unix.ECHILD):
 			// Nothing is left in the namespace. The session is over.
-			return
+			return nil
 		case err != nil:
-			return
+			return nil
 		}
 		if workload.Process != nil && pid == workload.Process.Pid {
 			workloadExited(exitStatus(wait))

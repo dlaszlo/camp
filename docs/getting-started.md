@@ -215,6 +215,15 @@ as the first process of the session, and not by tmux — a program that
 daemonises typically closes what it inherited, and nothing here depends
 on it not doing so.
 
+The same fact has a second side: something you started detached keeps the
+session open after you have left the terminal. To end one, send `SIGTERM`
+to that camp process — it passes the request to everything inside, and
+continues anything that was stopped so it can act on it; the composition
+comes down when the last of them goes. If you do not know
+its pid, ask for a second session in the same tree: camp refuses and
+names what is holding it, pid and command. Nothing is killed outright, so
+a program that ignores the request keeps the session alive.
+
 ## Where to go next
 
 - **[how-it-works.md](how-it-works.md)** — what camp actually mounts, in

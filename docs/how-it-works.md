@@ -357,6 +357,23 @@ locks would be trusting the workload's habits. And it is what makes
 `camp run -- tmux new-session -d` return at once while the composition
 stays open.
 
+Which means a session can outlive the terminal it was started from, and
+you may want one gone. **Send `SIGTERM` to that init.** It means "end
+this session", and it reaches every process inside the namespace and
+nothing outside it; a `SIGCONT` follows, because a stopped process holds
+the request pending and would otherwise never act on it. The composition
+comes down when the last of them goes, and the kernel takes the mounts
+with it. Nothing is escalated to `SIGKILL` — camp asks, once, and a
+program that ignores the request keeps the session alive on purpose or on
+a bug, which is yours to look at rather than camp's to overrule. If you
+do not know the pid, ask for a second session in the same tree: camp
+refuses and names what is holding it, by pid and command.
+
+That is the contract of a session that is *running*. A signal arriving
+while camp is still mounting meets no supervisor: it ends the init, and
+the kernel discards the namespace with every mount in it — which is the
+right answer to "stop" at that point, and a different one.
+
 Your uid maps to itself rather than to 0, so `id` inside shows the real
 user and files you create are yours. The cost is that the effective uid
 is not zero, so `execve` drops every capability — which is why the mount
