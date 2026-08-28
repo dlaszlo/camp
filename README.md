@@ -111,10 +111,21 @@ tmux attach -t work                        # from any other terminal
 
 The tmux *client* is only a pipe; every window it opens is a child of the
 server, and therefore inside. `tmux kill-server` ends the session and
-everything comes down with it. camp does not depend on tmux, and it does
-not depend on tmux keeping any descriptor open either: the locks that
-guarantee one composition per repository are held by camp itself,
-resident as the session's first process.
+everything comes down with it.
+
+**A session lives as long as any process is inside it**, so something
+started detached keeps it open after you have left the terminal. Send
+`SIGTERM` to camp's own process, the one resident as the session's first
+process: it means "end this session", it reaches every process in the
+namespace and nothing outside it, and a `SIGCONT` follows so a stopped
+one can act on it. Nothing is escalated to `SIGKILL`. If you do not know
+its pid, ask for a second session in the same tree: camp refuses and
+names what is holding it, by pid and command.
+
+camp does not depend on tmux, and it does not depend on tmux keeping any
+descriptor open either: the locks that guarantee one composition per
+repository are held by camp itself, resident as the session's first
+process.
 
 **`camp up` — the system-wide mode, for when something outside must see
 the tree.** A GUI editor that was already running, most often. Here there
@@ -235,6 +246,10 @@ overlayfs:
 
 allow_overlap: [.gitignore]       # the only names allowed in both roots
 
+prepare:                          # optional: your own programs, run
+  - command: [bin/check-my-trees] # before anything is composed
+    timeout: 120                  # optional, in seconds
+
 steps:
   - mount_rw:
       - { source: "code/.git",         target: ".git" }
@@ -244,18 +259,29 @@ steps:
   - git_exclude
 
 session:                          # optional, and only 'camp run' reads it
+  # identity: uidmap              # optional; the default maps your own uid
   environment:
     GIT_SSH_COMMAND: "ssh -F ${HOME}/.ssh/config"
 ```
 
-Those keys are the whole file, and `prepare:` — the environment's own
-programs, run before anything is composed and able to refuse it — is the
-one not shown above; `docs/how-it-works.md` has it. `session:` is the one that describes
-processes rather than the tree — the environment a session's workload
-receives, and how you are mapped inside it — and the section above on ssh
-is what it is usually for. `camp up` creates no namespace, applies none of
-it, and says so when it meets one. `examples/config.yml` is the same file
-with every key written out and commented.
+Those keys are the whole file. `examples/config.yml` is the same file with
+every one of them written out and commented, and `camp plan` prints what
+any of it would do without doing it.
+
+**`prepare:` is your own code, before the composition.** An ordered list
+of programs camp runs after it has taken its two locks and before it
+derives anything: guards over your checkouts, a fetch of something the
+session must not be a day older than, whatever your environment needs
+established before it exists. Each entry is an argument vector executed
+directly — no shell, so nothing is split on spaces and nothing is
+expanded — with the environment root as its working directory and
+`CAMP_ENV` and `CAMP_LIVE` in its environment. The first one that does
+not succeed refuses the composition with nothing mounted, and the ones
+after it do not run. They always run as you and never as root, in both
+modes; `camp plan` lists them and says it did not run them. Note the one
+boundary this crosses: camp itself never writes into a repository, and
+one of these is your program, running as you, which can. That is what it
+is for.
 
 **`steps:` is one ordered sequence, and its order is the mount order.** An
 earlier mount's target may not lie inside a later one's, because the later
@@ -293,6 +319,27 @@ mount covers the whole directory with camp's storage — the *water* — and
 stands each tracked entry in it read-only — the *islands*. Runtime files
 land in the water and survive the session; editing a tracked entry is
 `EROFS`.
+
+**`session:` describes processes, not the tree.** `environment:` declares
+what a session's workload receives, and through inheritance everything
+descended from it. `$NAME` and `${NAME}` insert what that name held in
+the environment camp was started with, `$$` is one literal dollar, and
+`$CAMP_LIVE` is the composed tree. There is no shell in any of it: no
+command substitution, no `~`, no word splitting, and inserted bytes are
+never scanned again. A name that is not set **refuses** rather than
+becoming empty text, because an empty value looks applied. Names
+beginning `CAMP_` are camp's own, and so is `PWD`. `identity:` selects
+how you are mapped inside the namespace: left out, your own uid maps to
+itself and the mount capability is dropped before anything runs, which is
+the route you want unless you know otherwise; `uidmap` uses `newuidmap`
+and your subuid range instead. `camp up` starts no session, applies none
+of this, and says so when it meets the section.
+
+A `prepare:` command does **not** receive these declarations, and that is
+deliberate: they are the workload's, and they are resolved against a
+composed tree that does not exist yet — `$CAMP_LIVE/records` names
+nothing at prepare time. A prepare command that needs variables for its
+own children exports them itself.
 
 ## Everyday commands
 
