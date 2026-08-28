@@ -95,6 +95,15 @@ record can go stale after `kill -9` and would then need exactly the
 `--force` this tool refuses, while the kernel releases a lock when its
 holder dies.
 
+**1a. Run the `prepare:` commands**, where the configuration has any —
+the environment's own programs, described in their own section below —
+and then look again at what they were able to change: the
+configuration's own bytes, and whether the two locks are still on the
+directories the configuration names. A program running in that window can
+rename a repository and put another directory in its place, and it can
+edit the file camp is working from. Either refuses the composition with
+nothing mounted.
+
 **2. Validate and gate**, statically, while nothing is mounted. That
 moment matters: a repository can still be repaired by hand with an
 ordinary editor, and nothing anyone does can land in the wrong place.
@@ -261,6 +270,69 @@ run accept its own scaffolding while still refusing to hide anything of
 yours: present but unrecorded is refused, recorded but modified is
 refused, and an island that disappears from the source has its still-empty
 scaffold removed.
+
+## `prepare:` — the environment's own code, before the composition
+
+Some environments have work to do before a composition may be built at
+all: check that every checkout is on the branch it should be, fetch the
+rules the session will run under, refuse if a tree is dirty. None of that
+is composition, and camp used to offer no place for it — so it ended up
+in a wrapper script around camp, which is one more thing to write and one
+more thing to get wrong.
+
+`prepare:` is that place. It is a top-level list of programs, in the
+order they run:
+
+```yaml
+prepare:
+  - command: [bin/check-the-checkouts]
+    timeout: 120
+  - command: [bin/fetch-the-rules]
+```
+
+Each is an argv vector executed directly — never through a shell, so
+nothing is split on spaces and nothing is expanded between the file and
+the process. They run with the environment root as their working
+directory, with `CAMP_ENV` and `CAMP_LIVE` in their environment, with
+stdin on `/dev/null` and their output on your terminal. There is no
+default timeout, because camp is driven from a terminal by somebody who
+can interrupt it; `timeout: <seconds>` kills the command's process group
+when it expires.
+
+**They run after camp has taken the locks and before it derives the
+plan.** By then camp has read the configuration, taken both locks and
+made the composed tree's directory, and nothing else. After the locks, so
+that whatever they check or fetch cannot be raced by a second composition
+starting on the same tree — which is the job an environment's own lock
+file used to do. Before the plan, because a command that changes a
+repository has to be seen by the gate, the inventory and the generation
+step, all of which read the repositories and have to read them as they
+will be mounted.
+
+Two things they can reach in that window are the ones camp's own
+guarantees rest on, so camp looks at both afterwards: **the
+configuration's bytes**, because the process that mounts reads the file
+again for itself, and **the two locked directories**, because a rename
+plus a new directory at the same path would leave camp holding a lock on
+an inode nothing mounts. Either one changed refuses the composition, with
+nothing mounted and the reason named.
+
+**The first one that does not succeed refuses the composition**, and the
+ones after it do not run. A non-zero exit, a timeout or a fatal signal
+all count. Nothing has been mounted at that point — but what a command
+changed before it stopped is still changed, and camp says so rather than
+letting "nothing was mounted" read as "nothing happened".
+
+They always run as you, never as root, in both modes. And they are the
+one thing in a real run that `camp plan` will not do for you: it lists
+them and says it did not run them, because a plan that quietly performed
+them would not be a plan.
+
+This is worth being plain about. camp itself never writes to a
+repository — every write it makes goes through one internal door that
+cannot be pointed at one. A `prepare:` command is not camp: it is your
+program, running as you, and it can write anywhere you can. That is the
+point of it.
 
 ## Generation: keeping git out of the core
 

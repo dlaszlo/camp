@@ -312,6 +312,18 @@ func cmdPlan(ctx *context, args []string) error {
 				"these can be fixed by hand right now")
 	}
 	ctx.printf("%s\n", plan.GateSummary(cfg, built.LowerRoot, built.UpperRoot))
+	// The conclusion has to be about what was actually checked. With
+	// prepare commands declared, a real run does something before any of
+	// this is derived -- it may refuse, and it may change a repository
+	// this plan was read from -- so "nothing stops it" would be claiming
+	// more than planning looked at.
+	if len(cfg.Prepare) > 0 {
+		ctx.printf("nothing here stops this composition, as the repositories "+
+			"stand right now.\nThe %d prepare command(s) above have not run: a "+
+			"real start runs them first, and one of them can refuse, or change "+
+			"what the gate above then reads.\n", len(cfg.Prepare))
+		return nil
+	}
 	ctx.printf("nothing stops this composition.\n")
 	return nil
 }

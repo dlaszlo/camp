@@ -127,6 +127,21 @@ func (n *Narrator) Checked(mounts int) {
 	n.say("checked: %d mounts, gate clean, nothing refused", mounts)
 }
 
+// Prepared: the environment's own commands, run as the invoking user
+// while camp already holds the locks and before anything of the
+// composition is derived.
+//
+// Silent when there are none. A configuration without them loses
+// nothing, so there is nothing to tell; the generation line below says
+// something on its empty case because an absent exclude has a
+// consequence for the reader.
+func (n *Narrator) Prepared(count int) {
+	if count == 0 {
+		return
+	}
+	n.say("prepare: %d command(s) the configuration names, all succeeded", count)
+}
+
 // Generated: the artefacts, produced as the invoking user and before
 // anything is mounted.
 func (n *Narrator) Generated(has bool) {

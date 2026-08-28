@@ -2,11 +2,7 @@ package gen
 
 import (
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"syscall"
-	"time"
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/gitwire"
@@ -14,6 +10,7 @@ import (
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
+	"github.com/dlaszlo/camp/internal/runx"
 )
 
 // git runs the shipped generator: reads git, produces the exclude payload
@@ -135,6 +132,10 @@ func toEntries(infos []pathx.Info) []islands.Entry {
 // true by construction rather than by a drop protocol: prepare runs in
 // the unprivileged front end, and no privileged camp process ever
 // executes a configured command.
+//
+// Starting it and waiting for it is runx's -- the same mechanism the
+// prepare commands run on. The wording is here, because a generation step
+// that failed and a guard that refused are two different pieces of news.
 func external(built plan.Plan, step config.Step) refusal.List {
 	var refused refusal.List
 	paths := PathsFor(built)
@@ -149,96 +150,43 @@ func external(built plan.Plan, step config.Step) refusal.List {
 		return refused
 	}
 
-	devnull, err := os.Open(os.DevNull)
-	if err != nil {
-		refused.Add("generate-run", "opening %s: %v", os.DevNull, err)
-		return refused
-	}
-	defer devnull.Close()
+	result := runx.Run(runx.Command{
+		Argv: step.Command,
+		Dir:  paths.Root,
+		Env: append(os.Environ(),
+			"CAMP_GEN_IN="+paths.In,
+			"CAMP_GEN_OUT="+paths.Out,
+			"CAMP_ENV="+built.Config.Env,
+			"CAMP_LIVE="+built.Live),
+		Timeout: step.Timeout,
+		Stdout:  os.Stdout,
+		Stderr:  os.Stderr,
+	})
 
-	command := exec.Command(step.Command[0], step.Command[1:]...)
-	command.Dir = paths.Root
-	command.Stdin = devnull
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	command.Env = append(os.Environ(),
-		"CAMP_GEN_IN="+paths.In,
-		"CAMP_GEN_OUT="+paths.Out,
-		"CAMP_ENV="+built.Config.Env,
-		"CAMP_LIVE="+built.Live,
-	)
-	// Its own process group, so that a timeout can end the whole thing
-	// rather than a parent that has already forked.
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	if err := command.Start(); err != nil {
+	switch result.Outcome {
+	case runx.OK:
+	case runx.NotStarted:
 		refused.Add("generate-run",
 			"the generation step could not be started: %v\n  command: %v",
-			err, step.Command)
-		return refused
+			result.Err, step.Command)
+	case runx.Failed:
+		refused.Add("generate-failed",
+			"the generation step failed: %v\n  command: %v\n"+
+				"Nothing has been mounted: generation happens before any mount, "+
+				"so a step that fails stops the composition with the machine "+
+				"exactly as it was.", result.Err, step.Command)
+	case runx.TimedOut:
+		refused.Add("generate-timeout",
+			"the generation step did not finish within %s and its process group "+
+				"was killed.\n  command: %v", step.Timeout, step.Command)
+	case runx.Interrupted:
+		refused.Add("generate-interrupted",
+			"the generation step was interrupted (%s) and its process group "+
+				"was sent the same signal.\n  command: %v\n"+
+				"Nothing has been mounted: generation happens before any mount.",
+			result.Signal, step.Command)
 	}
-
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
-
-	var timeout <-chan time.Time
-	if step.Timeout > 0 {
-		timer := time.NewTimer(step.Timeout)
-		defer timer.Stop()
-		timeout = timer.C
-	}
-
-	// Ctrl-C reaches camp's foreground process group, and the generator is
-	// deliberately not in it -- it has its own, so that a timeout can end
-	// the whole tree rather than a parent that has already forked. That
-	// leaves the interrupt reaching camp and nothing else: camp would exit
-	// while the generator and its children carried on writing into camp's
-	// scratch, which is the opposite of what putting it in its own group
-	// was for. So the signal is forwarded to that group, and camp waits
-	// for it to end before saying anything.
-	interrupts := make(chan os.Signal, 1)
-	signal.Notify(interrupts, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(interrupts)
-
-	for {
-		select {
-		case err := <-done:
-			if err != nil {
-				refused.Add("generate-failed",
-					"the generation step failed: %v\n  command: %v\n"+
-						"Nothing has been mounted: generation happens before any mount, "+
-						"so a step that fails stops the composition with the machine "+
-						"exactly as it was.", err, step.Command)
-			}
-			return refused
-
-		case <-timeout:
-			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-			<-done
-			refused.Add("generate-timeout",
-				"the generation step did not finish within %s and its process group "+
-					"was killed.\n  command: %v", step.Timeout, step.Command)
-			return refused
-
-		case received := <-interrupts:
-			signalled, ok := received.(syscall.Signal)
-			if !ok {
-				continue
-			}
-			_ = syscall.Kill(-command.Process.Pid, signalled)
-			// And camp goes the same way once the generator has, so that
-			// interrupting camp means what a person at a terminal means by it.
-			// Waiting first is the point: what must not happen is camp exiting
-			// while the tree it started keeps writing.
-			<-done
-			refused.Add("generate-interrupted",
-				"the generation step was interrupted (%s) and its process group "+
-					"was sent the same signal.\n  command: %v\n"+
-					"Nothing has been mounted: generation happens before any mount.",
-				signalled, step.Command)
-			return refused
-		}
-	}
+	return refused
 }
 
 // Expand folds the islands into the plan, each entry's mounts placed

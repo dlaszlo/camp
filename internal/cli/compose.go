@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
+	"github.com/dlaszlo/camp/internal/prepare"
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/report"
 	"github.com/dlaszlo/camp/internal/state"
@@ -48,15 +50,19 @@ type ready struct {
 // hands them to its init, this process's copies are already gone.
 func (r *ready) release() { r.Locks.Release() }
 
-// prepare performs the frame's first four steps: take the locks,
-// validate and gate while nothing is mounted, generate, and check what
-// was generated.
+// getReady performs the frame's first steps: take the locks, run the
+// environment's own prepare commands, validate and gate while nothing is
+// mounted, generate, and check what was generated.
 //
 // The order matters. The locks come first so that two camps racing can
-// only refuse each other. The validation comes second, in the one moment
-// when repairing a repository by hand is safe -- nothing is mounted, and
-// nothing anybody does can land in the wrong place.
-func prepare(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, error) {
+// only refuse each other, and so that the prepare commands run inside
+// what those locks protect. Validation comes after them, because a
+// prepare command may have changed a repository and everything the
+// validation reads has to be read as it will be mounted -- and it is
+// still the one moment when repairing a repository by hand is safe:
+// nothing is mounted, and nothing anybody does can land in the wrong
+// place.
+func getReady(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, error) {
 	upper, upperOK := repositoryParts(cfg, cfg.Upper)
 	if !upperOK {
 		// The configuration does not name a usable upper; let validation
@@ -87,6 +93,23 @@ func prepare(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, e
 		return nil, validationError(cfg, mode)
 	}
 	say.Locks(cfg.UpperPath(), cfg.Live())
+
+	// The environment's own commands, here and nowhere else. After the
+	// locks, so that what they check or fetch cannot be raced by a second
+	// composition; before the plan, because one of them may change a
+	// repository and the gate, the inventory and the generation step all
+	// have to read the repositories as they will be mounted.
+	if len(cfg.Prepare) > 0 {
+		if problems := prepare.Run(cfg); !problems.Empty() {
+			pair.Release()
+			return nil, refusedComposition(problems)
+		}
+		if problems := stillTheComposition(cfg, pair); !problems.Empty() {
+			pair.Release()
+			return nil, refusedComposition(problems)
+		}
+		say.Prepared(len(cfg.Prepare))
+	}
 
 	built, refused := plan.Prepare(cfg, mode)
 	refused.Extend(runtimeChecks(built, mode))
@@ -120,6 +143,93 @@ func prepare(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, e
 		Generated: generated,
 		Locks:     pair,
 	}, nil
+}
+
+// stillTheComposition checks the two things the prepare commands were
+// able to change and must not have.
+//
+// They are the environment's own programs, running as the invoking user,
+// in the window between camp reading the configuration and locking two
+// directories and camp deriving a plan from them. Nothing about them is
+// hostile by assumption; the point is that the window exists at all, and
+// that two of the things in it are the ones camp's guarantees rest on.
+//
+// A command that renames the code repository and puts another directory
+// at the same path leaves camp holding a lock on an inode nothing will
+// mount, while the composition it goes on to build is one no lock
+// protects -- which is the state the locks exist to make impossible, and
+// which the namespace init would catch at its own re-check while the
+// privileged mode would not.
+//
+// A command that edits the configuration leaves the front end planning
+// from one file and the process that mounts reading another. Compared by
+// bytes, and the whole file: a change camp cannot see the meaning of is
+// still a change it must not plan through.
+func stillTheComposition(cfg config.Config, pair *locks.Pair) refusal.List {
+	var refused refusal.List
+
+	current, err := os.ReadFile(cfg.Source)
+	switch {
+	case err != nil:
+		refused.Add("prepare-config-unreadable",
+			"%s could not be read after the prepare commands ran: %v.\n"+
+				"Nothing has been mounted. camp read that file, took the locks "+
+				"from it and ran the commands it declares, and it has to know the "+
+				"file is still the one it planned from. Look at what the commands "+
+				"do to it, and start again.", cfg.Source, err)
+		return refused
+	case !bytes.Equal(cfg.Declared, current):
+		refused.Add("prepare-config-changed",
+			"%s changed while the prepare commands were running, and nothing "+
+				"has been mounted.\ncamp read it, took the locks from it and ran "+
+				"the commands the file declares; a plan derived now would not be "+
+				"a plan of the file camp was asked about, and the process that "+
+				"mounts reads the file again for itself. Look at what changed, "+
+				"and start again -- the second run reads the file as it now is.",
+			cfg.Source)
+		return refused
+	}
+
+	for _, side := range []struct {
+		held *locks.Held
+		what string
+		path string
+	}{
+		{pair.Upper, "code repository", cfg.UpperPath()},
+		{pair.Live, "composed tree's directory", cfg.Live()},
+	} {
+		locked, err := side.held.Identity()
+		if err != nil {
+			refused.Add("prepare-lock-unreadable",
+				"the lock camp holds on the %s could not be looked at after the "+
+					"prepare commands ran: %v.\nNothing has been mounted.",
+				side.what, err)
+			continue
+		}
+		now, err := pathx.StatBeneath(side.path, nil)
+		if err != nil {
+			refused.Add("prepare-directory-unreadable",
+				"the %s %s could not be looked at after the prepare commands "+
+					"ran: %v.\nNothing has been mounted. camp locked that directory "+
+					"before the commands ran and has to know it is still the same "+
+					"one. Look at what the commands do to it, and start again.",
+				side.what, side.path, err)
+			continue
+		}
+		if now.Ident != locked {
+			refused.Add("prepare-directory-replaced",
+				"the %s at %s is a different directory from the one camp locked "+
+					"before the prepare commands ran (%s against %s).\nNothing has "+
+					"been mounted. A prepare command replaced it -- a rename and a "+
+					"new directory at the same path is the usual way -- and camp's "+
+					"lock is on the directory that is no longer there, so a "+
+					"composition built now would be one nothing protects from a "+
+					"second one. Look at what the commands do to %s, and start "+
+					"again.",
+				side.what, side.path, now.Ident, locked, side.path)
+		}
+	}
+	return refused
 }
 
 func repositoryParts(cfg config.Config, name string) ([]string, bool) {

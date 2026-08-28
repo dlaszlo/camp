@@ -10,9 +10,10 @@
 # and camp resolves it once, at startup.
 env: /home/you/work
 
-# Where the composed tree appears. It has to exist, be a real directory
-# rather than a symlink, and be empty: an overlay laid over content hides
-# that content for the whole session.
+# Where the composed tree appears. camp creates it if it is not there --
+# git cannot record an empty directory, so a fresh clone of an environment
+# never brings it. It has to be a real directory rather than a symlink,
+# and empty: an overlay laid over content hides it for the whole session.
 merged: shop-live
 
 # The participants. A source addresses one of these by name.
@@ -36,6 +37,25 @@ overlayfs:
 # governed by the product's ignore rules, and git applies no ignore rules
 # to tracked files anyway.
 allow_overlap: [.gitignore]
+
+# The environment's own programs, run before anything is composed. camp
+# takes nothing from them but whether they succeeded: they check, or they
+# fetch, and the first one that does not succeed refuses the composition
+# with nothing mounted. They run as you -- never as root -- after camp
+# holds the locks and before it derives the plan, standing in the
+# directory env: names, with CAMP_ENV and CAMP_LIVE in their environment.
+# Each is an argv vector executed directly: no shell, so nothing is split
+# on spaces and nothing is expanded. 'camp plan' lists them and does not
+# run them.
+#
+# Leave the key out if you have nothing to run. Uncomment to use:
+#
+# prepare:
+#   - command: [bin/check-the-checkouts]
+#     # No timeout by default -- camp is driven from a terminal by
+#     # somebody who can interrupt it. This one kills the command's
+#     # process group after two minutes.
+#     timeout: 120
 
 # The mount sequence. One ordered list, and its order is the mount order:
 # an earlier mount's target may not lie inside a later one's, because the

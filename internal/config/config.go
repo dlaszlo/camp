@@ -50,6 +50,15 @@ func Path(env string) string { return filepath.Join(env, Dir, FileName) }
 type Config struct {
 	// Source is the absolute path the configuration was read from.
 	Source string
+	// Declared is the exact bytes this configuration was parsed from.
+	//
+	// Kept rather than re-read, because everything that has to ask "is
+	// this still the file camp is working from" must ask it against what
+	// camp actually parsed. Re-reading the path answers a different
+	// question by a hair -- the file may already have changed between the
+	// parse and the second read -- and the two places that ask are the
+	// post-prepare check and the digest the privileged record keeps.
+	Declared []byte
 	// Env is the environment root: absolute, and the one path camp ever
 	// resolves through symlinks.
 	Env string
@@ -78,6 +87,10 @@ type Config struct {
 	// configuration -- a decision that is recorded and diffable rather
 	// than a flag typed once in anger.
 	AllowOverlap []string
+
+	// Prepare is the environment's own code: the programs that run before
+	// the composition is built, in the order they run.
+	Prepare []PrepareCommand
 
 	// Steps is the configuration's own part of the mount sequence, in the
 	// order it will run.
@@ -192,6 +205,28 @@ func (k StepKind) IsMount() bool {
 // one exclude payload, and two steps claiming it cannot both be right.
 func (k StepKind) Generates() bool {
 	return k == GitExclude || k == Generate
+}
+
+// PrepareCommand is one item of the `prepare:` list: a program of the
+// environment's own, run before anything of the composition exists.
+//
+// It is not a Step. A step belongs to the mount sequence, whose order is
+// the mount order; these run before the plan those mounts come from
+// exists, and they produce nothing camp reads. What camp takes from one
+// is whether it succeeded.
+type PrepareCommand struct {
+	// Command is the argv vector. Executed directly -- never through a
+	// shell, so no word splitting and no expansion happen between the file
+	// and the process.
+	Command []string
+	// Timeout kills the command's process group when it expires. Zero
+	// means no timeout, which is the default.
+	Timeout time.Duration
+	// Index is the position in the list, counted from zero, and Line is
+	// where the item sits in the file. Both are for messages that have to
+	// say which command.
+	Index int
+	Line  int
 }
 
 // Step is one item of the sequence.
@@ -360,8 +395,9 @@ type raw struct {
 	// to honour it but to recognise it: a shipped key that moves owes the
 	// reader its forwarding address rather than the generic unknown-key
 	// message.
-	Identity string    `yaml:"identity"`
-	Session  yaml.Node `yaml:"session"`
+	Identity string      `yaml:"identity"`
+	Session  yaml.Node   `yaml:"session"`
+	Prepare  []yaml.Node `yaml:"prepare"`
 }
 
 // sessionKeys is what the section may hold. The section is read by hand
@@ -391,6 +427,11 @@ type rawGenerate struct {
 	Timeout int      `yaml:"timeout"`
 }
 
+type rawPrepare struct {
+	Command []string `yaml:"command"`
+	Timeout int      `yaml:"timeout"`
+}
+
 // Parse reads the configuration bytes.
 //
 // Every problem the file has is reported, not the first one: a
@@ -409,7 +450,7 @@ func Parse(data []byte, source string) (Config, error) {
 				"that quietly is not there.", source, readable(err))
 	}
 
-	cfg := Config{Source: source}
+	cfg := Config{Source: source, Declared: append([]byte(nil), data...)}
 	var refused refusal.List
 
 	cfg.Env, cfg.Root = parseEnv(document.Env, &refused)
@@ -419,6 +460,7 @@ func Parse(data []byte, source string) (Config, error) {
 	cfg.AllowOverlap = parseAllowOverlap(document.AllowOverlap, &refused)
 	checkMovedIdentity(document.Identity, &refused)
 	cfg.Session = parseSession(document.Session, &refused)
+	cfg.Prepare = parsePrepare(document.Prepare, &refused)
 	cfg.Steps = parseSteps(document.Steps, cfg.Repositories, &refused)
 
 	checkGenerationSteps(cfg.Steps, &refused)
@@ -1029,7 +1071,112 @@ func parseSource(raw string, repositories []Repository) (Source, error) {
 	return source, nil
 }
 
+// parsePrepare reads the `prepare:` list.
+//
+// Its own function and its own messages rather than the generate step's,
+// which take the same two fields: the two refuse for the same shape and
+// about different things, and a message that named the wrong one would
+// send somebody to the wrong part of their file.
+// strayKeys returns the keys of a mapping node that are none of the ones
+// named, each with the line it sits on.
+//
+// The document as a whole is decoded with KnownFields, so a key camp does
+// not know is refused anywhere the top-level struct reaches. A yaml.Node
+// decoded by hand does not inherit that -- node.Decode builds a decoder
+// of its own, with its own settings -- so the arguments of a step and of
+// a prepare command were the one place in the file where a typo was
+// quietly ignored. A 'timeot:' camp shrugs at is a timeout the reader
+// believes they set.
+//
+// It only finds them. What to say about one belongs to whoever asked:
+// the two callers refuse about different parts of the file, and one
+// message covering both would name neither.
+func strayKeys(node *yaml.Node, known ...string) []*yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	var stray []*yaml.Node
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		key := node.Content[index]
+		recognised := false
+		for _, name := range known {
+			if key.Value == name {
+				recognised = true
+				break
+			}
+		}
+		if !recognised {
+			stray = append(stray, key)
+		}
+	}
+	return stray
+}
+
+func parsePrepare(nodes []yaml.Node, refused *refusal.List) []PrepareCommand {
+	if len(nodes) == 0 {
+		return nil
+	}
+	commands := make([]PrepareCommand, 0, len(nodes))
+	for index := range nodes {
+		node := &nodes[index]
+		if stray := strayKeys(node, "command", "timeout"); len(stray) > 0 {
+			for _, key := range stray {
+				refused.Add("prepare-command",
+					"the prepare command %d has a key camp does not know at line "+
+						"%d: %s.\nA prepare command takes command: and timeout:, and "+
+						"nothing else. camp refuses a key it does not recognise rather "+
+						"than ignoring it: a mistyped timeout that is quietly skipped "+
+						"is a timeout that looks set and is not.",
+					index+1, key.Line, enc.Encode(key.Value))
+			}
+			continue
+		}
+		var arguments rawPrepare
+		if err := node.Decode(&arguments); err != nil {
+			refused.Add("prepare-command",
+				"the prepare command %d (line %d) could not be read: %v.\n"+
+					"Each item of prepare: takes {command: [\"prog\", \"arg\"], "+
+					"timeout: <seconds>}.", index+1, node.Line, readable(err))
+			continue
+		}
+		if len(arguments.Command) == 0 {
+			refused.Add("prepare-command",
+				"the prepare command %d (line %d) has no command. It takes an "+
+					"argument vector -- {command: [\"prog\", \"arg\"]} -- which camp "+
+					"executes directly. There is no shell in between, so nothing is "+
+					"split on spaces and nothing is expanded.", index+1, node.Line)
+			continue
+		}
+		if arguments.Timeout < 0 {
+			refused.Add("prepare-command",
+				"the prepare command %d (line %d) has a negative timeout. Leave it "+
+					"out for no timeout, which is the default: camp is driven from a "+
+					"terminal by somebody who can interrupt it.", index+1, node.Line)
+			continue
+		}
+		commands = append(commands, PrepareCommand{
+			Command: arguments.Command,
+			Timeout: time.Duration(arguments.Timeout) * time.Second,
+			Index:   index,
+			Line:    node.Line,
+		})
+	}
+	return commands
+}
+
 func parseGenerate(index int, node *yaml.Node, step *Step, refused *refusal.List) bool {
+	if stray := strayKeys(node, "command", "timeout"); len(stray) > 0 {
+		for _, key := range stray {
+			refused.Add("step-generate",
+				"the generate step %d has a key camp does not know at line %d: "+
+					"%s.\nThe step takes command: and timeout:, and nothing else. "+
+					"camp refuses a key it does not recognise rather than ignoring "+
+					"it: a mistyped timeout that is quietly skipped is a timeout "+
+					"that looks set and is not.",
+				index+1, key.Line, enc.Encode(key.Value))
+		}
+		return false
+	}
 	var arguments rawGenerate
 	if err := node.Decode(&arguments); err != nil {
 		refused.Add("step-generate",

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/refusal"
@@ -127,6 +128,93 @@ func TestTwoGenerationStepsAreRefused(t *testing.T) {
 	if !strings.Contains(list.Error(), "at most one") {
 		t.Error("the refusal should say a configuration may have at most one")
 	}
+}
+
+// The prepare list is an ordered list of programs, and the order is the
+// order they run in. Nothing else about the file carries their order.
+func TestPrepareCommandsKeepTheirOrder(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, env.YAML()+`
+prepare:
+  - command: ["bin/first", "--check"]
+    timeout: 120
+  - command: ["bin/second"]
+`)
+
+	if len(cfg.Prepare) != 2 {
+		t.Fatalf("parsed %d prepare commands, wanted 2", len(cfg.Prepare))
+	}
+	if got := cfg.Prepare[0].Command; len(got) != 2 || got[0] != "bin/first" || got[1] != "--check" {
+		t.Errorf("the first command came out as %q", got)
+	}
+	if got := cfg.Prepare[0].Timeout; got != 2*time.Minute {
+		t.Errorf("the first timeout came out as %s, wanted 2m", got)
+	}
+	if got := cfg.Prepare[1].Command; len(got) != 1 || got[0] != "bin/second" {
+		t.Errorf("the second command came out as %q", got)
+	}
+	if cfg.Prepare[1].Timeout != 0 {
+		t.Error("a command with no timeout should have none, which is the default")
+	}
+	if cfg.Prepare[0].Index != 0 || cfg.Prepare[1].Index != 1 {
+		t.Error("each command carries its own position, for the messages that " +
+			"have to say which one")
+	}
+	if cfg.Prepare[1].Line == 0 {
+		t.Error("each command carries the line it sits on")
+	}
+}
+
+// A configuration with no prepare: key declares nothing, and that is not
+// an error: most compositions have nothing to run before them.
+func TestNoPrepareKeyIsNoCommands(t *testing.T) {
+	env := testenv.NewEnv(t)
+	if got := env.Config(t, "").Prepare; len(got) != 0 {
+		t.Errorf("a file with no prepare: parsed %d commands", len(got))
+	}
+}
+
+func TestAPrepareItemWithoutACommandIsRefused(t *testing.T) {
+	env := testenv.NewEnv(t)
+	_, err := env.TryConfig(env.YAML() + "\nprepare:\n  - timeout: 5\n")
+	list := mustRefuse(t, err, "prepare-command")
+	if !strings.Contains(list.Error(), "no shell in between") {
+		t.Error("the refusal should say what an argument vector means: camp " +
+			"executes it directly, so nothing is split on spaces")
+	}
+}
+
+// The document is read with unknown keys refused, and the arguments of a
+// prepare command are decoded by hand -- which does not inherit that. A
+// mistyped timeout that camp shrugs at is a timeout the reader believes
+// they set.
+func TestAnUnknownKeyInAPrepareCommandIsRefused(t *testing.T) {
+	env := testenv.NewEnv(t)
+	_, err := env.TryConfig(env.YAML() +
+		"\nprepare:\n  - command: [\"/bin/true\"]\n    timeot: 5\n")
+	list := mustRefuse(t, err, "prepare-command")
+	if !strings.Contains(list.Error(), "timeot") {
+		t.Errorf("the refusal has to name the key it does not know:\n%v", list.Error())
+	}
+}
+
+// The generation step's arguments are decoded the same way and had the
+// same hole.
+func TestAnUnknownKeyInAGenerateStepIsRefused(t *testing.T) {
+	env := testenv.NewEnv(t)
+	_, err := env.TryConfig(env.YAML() +
+		"  - generate: { command: [\"/bin/true\"], timeot: 5 }\n")
+	list := mustRefuse(t, err, "step-generate")
+	if !strings.Contains(list.Error(), "timeot") {
+		t.Errorf("the refusal has to name the key it does not know:\n%v", list.Error())
+	}
+}
+
+func TestANegativePrepareTimeoutIsRefused(t *testing.T) {
+	env := testenv.NewEnv(t)
+	_, err := env.TryConfig(env.YAML() +
+		"\nprepare:\n  - command: [\"/bin/true\"]\n    timeout: -1\n")
+	mustRefuse(t, err, "prepare-command")
 }
 
 func TestPathLanguageRefusals(t *testing.T) {

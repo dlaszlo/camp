@@ -187,6 +187,153 @@ func TestPlanStillPrintsThePlanBesideTheRefusal(t *testing.T) {
 	}
 }
 
+// A plan says what a run would do. The prepare commands are the one part
+// of a real run that changes something before any mount, so a plan that
+// listed the mounts and said nothing about them would describe a
+// different run -- and a plan that ran them would be executing something,
+// which planning never does.
+func TestPlanNamesThePrepareCommandsAndRunsNone(t *testing.T) {
+	env := testenv.NewEnv(t)
+	marker := filepath.Join(env.Path, "it-ran")
+	env.Config(t, env.YAML()+"\nprepare:\n  - command: [\"/bin/sh\", \"-c\", "+
+		"\": > "+marker+"\"]\n")
+
+	out, _, _ := run(t, "plan", "-f", config.Path(env.Path))
+	if !strings.Contains(out, "prepare, before anything is composed:") {
+		t.Errorf("plan said nothing about the prepare commands:\n%s", out)
+	}
+	if !strings.Contains(out, "has not run them") {
+		t.Errorf("plan has to say it did not run them:\n%s", out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("'camp plan' ran a prepare command. Planning executes nothing")
+	}
+}
+
+// Where the prepare commands sit in the frame, measured through the
+// command that composes: they run after the locks and before the plan is
+// derived, and one that fails stops the composition with nothing mounted.
+//
+// The fixture proves the order rather than asserting it. The gate would
+// refuse this composition anyway -- the same name stands at both
+// repository roots -- so a marker written by a prepare command can only
+// exist if the commands ran before the validation that refuses.
+func TestThePrepareCommandsRunBeforeAnythingIsDerived(t *testing.T) {
+	env := testenv.NewEnv(t)
+	testenv.Write(t, filepath.Join(env.Code, "AGENTS.md"), "the code's own\n")
+	marker := filepath.Join(env.Path, "the-first-one-ran")
+	env.Config(t, env.YAML()+"\nprepare:\n"+
+		"  - command: [\"/bin/sh\", \"-c\", \": > "+marker+"\"]\n"+
+		"  - command: [\"/bin/sh\", \"-c\", \"exit 3\"]\n")
+
+	_, errOut, code := run(t, "run", "-f", config.Path(env.Path), "--", "/bin/true")
+	if strings.Contains(errOut, "cannot run camp in namespace mode") {
+		t.Skipf("this machine refuses the namespace mode, so no command "+
+			"that composes gets as far as the prepare commands:\n%s", errOut)
+	}
+	if code == 0 {
+		t.Fatalf("a failing prepare command let the session start:\n%s", errOut)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Error("the first prepare command did not run before the validation " +
+			"that refuses this composition. They have to run first: one of them " +
+			"may change a repository, and the gate has to read the repositories " +
+			"as they will be mounted")
+	}
+	if !strings.Contains(flat(errOut), "prepare command 2") {
+		t.Errorf("the refusal does not name the command that failed:\n%s", errOut)
+	}
+	// The gate's own refusal is not what stopped this: the prepare command
+	// did, and the composition never got as far as being validated.
+	if strings.Contains(errOut, "AGENTS.md") {
+		t.Errorf("the run went on to validate after a prepare command "+
+			"failed:\n%s", errOut)
+	}
+}
+
+// The reason the prepare commands run before the plan is derived, stated
+// as the thing that would break if they did not: what one of them changes
+// has to be what camp then validates.
+//
+// Here a prepare command creates a name in the code repository that the
+// workspace also has at its root. The gate refuses that overlap -- and it
+// can only refuse it if it read the repository after the command ran.
+func TestARepositoryChangeMadeByPrepareIsSeenByTheGate(t *testing.T) {
+	env := testenv.NewEnv(t)
+	env.Config(t, env.YAML()+"\nprepare:\n  - command: [\"/bin/sh\", \"-c\", "+
+		"\"echo the-code-repositorys-own > "+filepath.Join(env.Code, "AGENTS.md")+"\"]\n")
+
+	_, errOut, code := run(t, "run", "-f", config.Path(env.Path), "--", "/bin/true")
+	if skipUnlessComposable(t, errOut) {
+		return
+	}
+	if code == 0 {
+		t.Fatalf("the composition started with both roots holding AGENTS.md:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "AGENTS.md") {
+		t.Errorf("the gate did not see what the prepare command wrote, so it "+
+			"read the repositories before the command ran:\n%s", errOut)
+	}
+}
+
+// A prepare command runs between camp locking two directories and camp
+// deriving a plan from them, so it is able to rename one and put another
+// directory at the same path. camp would then hold a lock on an inode
+// nothing mounts, and build a composition no lock protects.
+func TestPrepareCannotReplaceTheDirectoryCampLocked(t *testing.T) {
+	env := testenv.NewEnv(t)
+	env.Config(t, env.YAML()+"\nprepare:\n  - command: [\"/bin/sh\", \"-c\", "+
+		"\"mv "+env.Code+" "+env.Code+".moved && mkdir "+env.Code+"\"]\n")
+
+	_, errOut, code := run(t, "run", "-f", config.Path(env.Path), "--", "/bin/true")
+	if skipUnlessComposable(t, errOut) {
+		return
+	}
+	if code == 0 {
+		t.Fatalf("camp composed a code repository it had not locked:\n%s", errOut)
+	}
+	if !strings.Contains(flat(errOut), "different directory from the one camp locked") {
+		t.Errorf("the refusal does not say what happened to the lock:\n%s", errOut)
+	}
+}
+
+// The same window reaches the configuration itself: camp has read it,
+// taken the locks from it and run the commands it declares, and the
+// process that mounts reads it again for itself.
+func TestTheConfigurationCannotChangeWhileThePrepareCommandsRun(t *testing.T) {
+	env := testenv.NewEnv(t)
+	path := config.Path(env.Path)
+	env.Config(t, env.YAML()+"\nprepare:\n  - command: [\"/bin/sh\", \"-c\", "+
+		"\"printf '# edited from inside a prepare command\\n' >> "+path+"\"]\n")
+
+	_, errOut, code := run(t, "run", "-f", path, "--", "/bin/true")
+	if skipUnlessComposable(t, errOut) {
+		return
+	}
+	if code == 0 {
+		t.Fatalf("camp planned from a file that had changed under it:\n%s", errOut)
+	}
+	if !strings.Contains(flat(errOut), "changed while the prepare commands were running") {
+		t.Errorf("the refusal does not say the file changed under the run:\n%s", errOut)
+	}
+}
+
+// flat folds a report's terminal wrapping away, so that a test can look
+// for a sentence rather than for the column it happened to break at.
+func flat(text string) string { return strings.Join(strings.Fields(text), " ") }
+
+// skipUnlessComposable skips a test whose subject is only reached by a
+// command that builds a composition, on a machine that refuses the mode.
+func skipUnlessComposable(t *testing.T, errOut string) bool {
+	t.Helper()
+	if strings.Contains(errOut, "cannot run camp in namespace mode") {
+		t.Skipf("this machine refuses the namespace mode, so no command that "+
+			"composes gets this far:\n%s", errOut)
+		return true
+	}
+	return false
+}
+
 // init writes the skeleton into camp's own directory inside the
 // environment, and there was nothing holding it there.
 //

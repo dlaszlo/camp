@@ -53,7 +53,7 @@ func enter(ctx *context, file string, argv []string) error {
 	// the environment -- is narrated by the init, which is where those
 	// things happen and which is one sequential process, so the lines
 	// arrive in the order the steps did.
-	composition, err := prepare(cfg, plan.Namespace, report.Narrate(ctx.err))
+	composition, err := getReady(cfg, plan.Namespace, report.Narrate(ctx.err))
 	if err != nil {
 		return err
 	}

@@ -248,7 +248,9 @@ session:                          # optional, and only 'camp run' reads it
     GIT_SSH_COMMAND: "ssh -F ${HOME}/.ssh/config"
 ```
 
-Those seven keys are the whole file. `session:` is the one that describes
+Those keys are the whole file, and `prepare:` — the environment's own
+programs, run before anything is composed and able to refuse it — is the
+one not shown above; `docs/how-it-works.md` has it. `session:` is the one that describes
 processes rather than the tree — the environment a session's workload
 receives, and how you are mapped inside it — and the section above on ssh
 is what it is usually for. `camp up` creates no namespace, applies none of

@@ -55,18 +55,34 @@ func cmdUp(ctx *context, args []string) error {
 	// scrollback, and in whatever captured the run.
 	say := report.Narrate(ctx.err)
 
-	up, err := prepare(cfg, plan.Privileged, say)
+	up, err := getReady(cfg, plan.Privileged, say)
 	if err != nil {
 		return err
 	}
 	defer up.release()
 
-	configBytes, _ := os.ReadFile(cfg.Source)
+	// Asked again, in the last unprivileged moment before anything is
+	// elevated. The check after the prepare commands is a snapshot, and a
+	// command that left something of its own running behind it can act
+	// after that snapshot was taken -- the plan, the gate and the
+	// generation step all happen in between, and that is the long part of
+	// the window. Asking again here does not close it: what is left is the
+	// same race every camp run has between looking and mounting, and the
+	// helper's own descriptor-relative resolution is what stands in it.
+	if problems := stillTheComposition(cfg, up.Locks); !problems.Empty() {
+		return refusedComposition(problems)
+	}
+
 	left, refused := privileged.Up(privileged.UpInput{
-		Plan:        up.Plan,
-		Exclude:     up.Generated.Exclude,
-		Tool:        Version,
-		ConfigBytes: configBytes,
+		Plan:    up.Plan,
+		Exclude: up.Generated.Exclude,
+		Tool:    Version,
+		// The bytes this run was planned from, not a fresh read of the
+		// path. The record's digest is what 'down' compares against later,
+		// and it has to be a digest of what camp acted on -- a second read
+		// answers a slightly different question, and with prepare commands
+		// in the frame the difference is something a program can cause.
+		ConfigBytes: cfg.Declared,
 		Sudo:        []string{"sudo"},
 		// The helper's own stream, and the terminal's rather than camp's
 		// sink: sudo writes its password prompt here without a newline

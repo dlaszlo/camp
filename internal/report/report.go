@@ -72,6 +72,8 @@ func Plan(p plan.Plan) string {
 	fmt.Fprintf(&b, "  work (disposable):  %s\n", p.Work)
 	fmt.Fprintf(&b, "  storage (kept):     %s\n\n", p.Storage)
 
+	b.WriteString(prepareCommands(p.Config))
+
 	b.WriteString("mount sequence, in order:\n\n")
 	for index, mount := range p.Mounts {
 		fmt.Fprintf(&b, "%2d. %s\n", index+1, mount.Describe())
@@ -101,6 +103,37 @@ func Plan(p plan.Plan) string {
 			"  git-based.\n\n")
 	}
 
+	return b.String()
+}
+
+// prepareCommands renders the `prepare:` list, and says plainly that
+// planning did not run it.
+//
+// It is here because it is the one part of a real run that changes
+// something before any mount: these are the environment's own programs,
+// and a plan that listed the mounts and said nothing about them would
+// describe a different run from the one that follows. Argv vectors are
+// printed quoted, one element at a time, because a vector joined by
+// spaces cannot be told apart from a vector whose elements contain them.
+func prepareCommands(cfg config.Config) string {
+	if len(cfg.Prepare) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("prepare, before anything is composed:\n\n")
+	for _, command := range cfg.Prepare {
+		fmt.Fprintf(&b, "%2d. %q", command.Index+1, command.Command)
+		if command.Timeout > 0 {
+			fmt.Fprintf(&b, "   timeout %s", command.Timeout)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\n    These are the environment's own programs. camp runs them as you,\n" +
+		"    after the locks are taken and before this plan is derived, and the\n" +
+		"    first one that does not succeed refuses the composition. They can\n" +
+		"    write wherever you can, a repository included.\n" +
+		"    'camp plan' has not run them.\n\n")
 	return b.String()
 }
 
@@ -283,8 +316,10 @@ func ConfigTemplate(env string) string {
 # The one absolute path in the file. Everything else is relative to it.
 env: %s
 
-# Where the composed tree appears, inside env:. It has to exist already,
-# and it has to be empty.
+# Where the composed tree appears, inside env:. camp creates it if it is
+# not there -- git cannot record an empty directory, so a fresh clone of
+# an environment never brings it -- and it has to be empty: an overlay
+# laid over content hides that content for the whole session.
 merged: CHANGE-ME-live
 
 # The participants. A source addresses one of these by name.
@@ -304,6 +339,15 @@ overlayfs:
 # refusal says which side would win. Each repository needs its own
 # .gitignore, so that one is expected.
 allow_overlap: [.gitignore]
+
+# The environment's own programs, run before anything is composed and
+# able to refuse the composition. camp runs them as you, after it holds
+# the locks and before it derives the plan, and it takes nothing from
+# them but whether they succeeded. Leave the key out if you have none.
+#
+# prepare:
+#   - command: [bin/check-the-checkouts]
+#     timeout: 120
 
 # The mount sequence. This is an ordered list and its order is the mount
 # order: an earlier mount's target may not sit inside a later one's, or
