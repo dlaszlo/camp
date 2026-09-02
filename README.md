@@ -54,6 +54,7 @@ five minutes.
 │   ├── inventory             the accepted snapshot of both repositories' roots
 │   ├── work/<id>/            disposable: the overlay's workdir, generated files
 │   ├── storage/<id>/         persistent: machine-local files, worktrees
+│   ├── reports/              what a session found when it ended, read once
 │   └── logs/                 every line camp printed here, with timestamps
 ├── shop/                     the code repository       (writes land here)
 ├── shop-env/                 the workspace repository  (read-only inside)
@@ -90,12 +91,16 @@ evidence of a problem and it is reported, never cleaned away.
 
 ## The session
 
-The composition is built inside a user and mount namespace, for the
+The composition is built inside a user, mount and pid namespace, for the
 processes camp starts there and for nothing else. No privilege is needed;
-nothing outside the session can see it; and when the session ends — when
-the shell or command it started exits — the kernel discards the namespace
-and every mount in it. Teardown cannot fail, and there is no command to
-take a composition down.
+nothing outside the session can see it; camp itself stays resident as the
+session's first process, holding the locks and watching what it started;
+and when the session ends — when the shell or command it started exits —
+the kernel discards the namespace and every mount in it. Teardown cannot
+fail, and there is no command to take a composition down. It is a thin
+container with no image and no network or hostname isolation, and it is
+not a sandbox: [docs/how-it-works.md](docs/how-it-works.md) says exactly
+what is and is not isolated.
 
 ```
 camp run -- claude              # or your editor, your shell, your test suite
@@ -123,11 +128,12 @@ camp shell                        # in the pane
 ```
 
 The session lives as long as the pane's shell does, and `tmux attach -t
-work` reaches it from any terminal. `camp run -- tmux new-session -d` no
-longer leaves a server behind: the tmux client exits at once, the server
-is asked to end, and the composition goes with it. A second pane of that
-tmux does not see the composed tree — it is a process outside the
-session, like every other.
+work` reaches it from any terminal. The other way round does not work:
+`camp run -- tmux new-session -d` ends at once, because the tmux client
+was the workload, the server it started is asked to end, and the
+composition goes with it. A second pane of an outside tmux does not see
+the composed tree — it is a process outside the session, like every
+other.
 
 **A second terminal in the same tree** — `camp shell --join`, camp's
 `docker exec`:
@@ -155,11 +161,18 @@ the one thing about camp that surprises people.
 
 ## Requirements and install
 
-Linux with OverlayFS, and `git` when the composition is git-based —
-camp reads git to work out what each repository contributes; two plain
-directories need none of it. Nothing else at run time: camp makes its
-mounts by syscall and asks `/proc` for state, so there is no `mount(8)`,
-`fuser` or similar to install. Go 1.25+ only if you build it yourself.
+Linux with OverlayFS, permission to create a user namespace, and `git`:
+every composition needs it, git-based or not, because planning asks the
+code repository what it tracks under each mount target, and so do `camp
+plan`, `camp status`, `camp explain` and `camp doctor`. Util-linux
+`nsenter` is used by `camp shell --join` and `camp run --join` and by
+nothing else. No privilege of any kind: camp has no root mode. With the
+default identity no other program is involved; `identity: uidmap` in the
+configuration needs `newuidmap` and `newgidmap` and subordinate ranges
+for you, which `camp doctor` does not check. Nothing else at run time:
+camp makes its mounts by syscall and asks `/proc` for state, so there is
+no `mount(8)`, `fuser` or similar to install. Go 1.25+ only if you build
+it yourself.
 
 On Debian and Ubuntu, a package does all of it at once — the binary, the
 AppArmor profile with the path already pointing at it, and the overlay
@@ -172,8 +185,10 @@ camp doctor                     # says whether this machine can run camp
 ```
 
 Or from [the releases page](https://github.com/dlaszlo/camp/releases), if
-you would rather not have `gh`. Every release is built from a tagged
-commit after the whole suite has passed on the machine that built it. The
+you would rather not have `gh`. A release is built by the release
+workflow — from a pushed `v*` tag, or by hand with a version given to
+it — which runs `go build`, `go vet` and `go test ./...` on the runner
+before it builds the package, and publishes nothing that failed them. The
 same package is built from a checkout with `sudo dpkg -i
 "$(packaging/deb/build)"`, which is what the tests do.
 
@@ -206,7 +221,7 @@ refuses one cannot compose.
 
 ### One more step if you use ssh
 
-A `camp run` session maps only your own user id, so every file owned by
+A session maps only your own user id by default, so every file owned by
 anyone else — root included — appears as `nobody` inside it. ssh refuses
 a system-wide configuration file it cannot attribute to root or to you,
 so `ssh` and `git push` over ssh fail in a session until ssh is pointed
@@ -275,7 +290,7 @@ every one of them written out and commented, and `camp plan` prints what
 any of it would do without doing it.
 
 **`prepare:` is your own code, before the composition.** An ordered list
-of programs camp runs after it has taken its two locks and before it
+of programs camp runs after it has taken the two session locks and before it
 derives anything: guards over your checkouts, a fetch of something the
 session must not be a day older than, whatever your environment needs
 established before it exists. Each entry is an argument vector executed
@@ -360,7 +375,14 @@ camp init          write a configuration skeleton
 `camp status` answers for the process that runs it. From outside every
 session it reports nothing mounted, which is true: a session's mounts
 exist only inside its namespace. From inside a session it describes that
-session and checks it against the configuration as it now stands.
+session and checks it against the configuration as it now stands: whether
+every mount still matches what the file derives, whether the file would
+now be refused, and what has moved under the session — a replaced root
+file, a new workspace root entry, a suspected leak, a worktree that will
+need repairing — with the repair for each. A running session is built
+once and does not follow the file; an edit that changes no mount and
+causes no refusal is invisible to `status` and takes effect at the next
+start.
 
 `camp accept` is the only thing that writes the inventory. camp compares
 against it at every start, because a new name at the workspace root
@@ -402,12 +424,20 @@ mounts exist only inside the session's namespace, so an editor, a
 language server or a daemon that was already running sees the composed
 tree's directory empty, and nothing camp offers shows it the tree. Start
 such programs inside — `camp run -- <program>`, or from a `camp shell` —
-and they see it. The tree is never visible machine-wide, and no record of
-a session survives it: when the session ends, the kernel takes
-everything, and there is nothing left to describe. camp once had a second
-way of running that mounted the tree for the whole machine; it was
-removed, because nothing used it and every change to the session would
-have had to be designed twice.
+and they see it. The tree is never visible machine-wide, and there is no
+mode that would show it to the whole machine. Nothing authoritative
+survives a session either: when it ends, the kernel takes the namespace
+and every mount, and no record says a composition was ever up. What does
+survive is output and material — the log, an end-of-session report if
+there was anything to say, the work directory the next start sweeps, and
+the storage that holds your machine-local files and worktrees.
+
+**Do not rename or move the environment directory while a session
+runs.** The running session is invisible to a camp command started
+outside it, and its work directory names the composed tree's old path, so
+a start from another terminal can take that work directory for one a
+finished session left and sweep it out from under the session. Put the
+name back, or end the session first.
 
 **Worktrees made through the tree need one repair.** Git records a
 worktree's git directory as an absolute path and compares it as a string,

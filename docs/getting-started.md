@@ -97,16 +97,21 @@ mounted.
 
 ### One file is yours
 
-`.camp/` will end up holding six things, and `config.yml` is the only one
-you edit. The others are camp's working material: the `inventory` it
-compares against, and four directories of scratch, machine-local state,
-session output and camp's own log.
+`config.yml` is the only thing in `.camp/` you edit. Everything else
+that appears there is camp's working material: the `inventory` it
+compares against, written by `camp accept`, and four directories — the
+overlay's scratch, machine-local storage, end-of-session reports and
+camp's own log — each made when something first has to be written into
+it.
 
-The log is always written. Every line camp prints to a terminal is
-written to `.camp/logs/camp.log` as well, with the time in front of it,
-and the file rotates by size so it cannot grow without bound. Nothing
+The log is always written. Every line camp says about a run on stderr —
+the step lines, warnings, refusals, what a session found when it ended —
+is written to `.camp/logs/camp.log` as well, with the time in front of
+it, and the file rotates by size so it cannot grow without bound. Nothing
 switches it on, because a log you have to remember to switch on is
-missing on exactly the run that surprised you.
+missing on exactly the run that surprised you. What a command prints as
+its product — a plan, a status — goes to stdout and is not copied into
+it.
 
 If you had run `camp init` instead of writing the file by hand, camp
 would have left a `README.md` in there saying exactly that, and a
@@ -150,11 +155,34 @@ mounted while you do, so there is nothing to undo.
 ## 4. Work in it
 
 ```
-camp run -- bash
+camp shell
 ```
 
-You are now in `~/work/shop-live`, and it holds both repositories at
-once:
+camp says what it does as it does it, one line per step on stderr, with
+the outcome in the first column:
+
+```
+[OK]    created: /home/you/work/shop-live, the composed tree's directory
+[OK]    locks: /home/you/work/shop, /home/you/work/shop-live
+[OK]    checked: 7 mounts, gate clean, nothing refused
+[OK]    generated: the exclude and the islands lists
+[OK]    identity: uid 1000 and gid 1000 map to themselves
+[NOTE]  only your own id is mapped, so files owned by anyone else show as nobody
+[OK]    mounted: 7 at /home/you/work/shop-live
+[OK]    verified: 7 mounts at /home/you/work/shop-live
+```
+
+The `created` line appears whenever the composed tree's directory is not
+there yet — the first start, or any start after you removed it. Seven
+mounts, for
+this configuration: the workspace held read-only at its own path, the
+overlay, one read-only bind for each of the two workspace root names the
+tree shows (`INSTRUCTIONS.md` and `notes`), the `.git` bind, the
+generated exclude, and the code repository held read-only at its own
+path. `camp plan` lists the same seven with the reason for each.
+
+Then your shell's prompt, in `~/work/shop-live`, which holds both
+repositories at once:
 
 ```
 $ ls
@@ -198,7 +226,20 @@ the shop repository's own exclude file is untouched.
 
 Type `exit`. The session ends, the kernel discards every mount with it,
 and `~/work/shop-live` is empty again. There is nothing to clean up and
-no command to run.
+no command to run. A shell that exits with nothing left running behind it
+prints nothing new; if something you started in there had drifted — a
+worktree made through the tree, a file staged with `git add -f` — camp
+says so here, once, with the repair.
+
+While a session runs, `camp status` from inside it lists the mounts,
+checks each against what the configuration derives now, says whether the
+file would now be refused, and names what has moved under the session —
+a new name at the workspace root, a root file replaced by an editor
+outside, a file staged that belongs to the workspace — with what to do
+about each. A running session is built once from one reading of the file
+and does not follow it; an edit that changes no mount and causes no
+refusal is one `status` cannot see, and it takes effect at the next
+start.
 
 ## 5. Ending a session, and surviving a disconnected terminal
 
@@ -222,11 +263,12 @@ camp shell                      # inside the pane
 The pane's shell is the session's workload, so the session lives as long
 as the pane does, and `tmux attach -t shop` reaches it from any terminal.
 
-If you used to start tmux *inside* — `camp run -- tmux new-session -d -s
-shop` — that now ends the session the moment the tmux client exits: the
-server is asked to leave and the composition goes. Move tmux outside as
-above. A second pane of that tmux is a process outside the session and
-sees the plain directory, like every other process started outside.
+The other way round does not work: `camp run -- tmux new-session -d -s
+shop` ends the session the moment the tmux client exits, because the
+client was the workload — the server is asked to leave and the
+composition goes. Keep tmux outside, as above. A second pane of that tmux
+is a process outside the session and sees the plain directory, like every
+other process started outside.
 
 To give that second pane the composed tree, join the running session:
 
@@ -236,11 +278,13 @@ camp run --join -- <command>    # one command inside it
 ```
 
 `--join` is camp's `docker exec`: it finds the session running for this
-configuration, enters its namespaces and hands you the tree, building and
-locking nothing. It needs `nsenter`, from the `util-linux` package. A
-joined shell is a visitor — its own exit does not end the session, and
-when the session ends it ends too. Run it from a terminal that is not
-already inside a session.
+configuration — its init, from `/proc`, after proving that the init is
+yours and composes this tree — enters its namespaces through util-linux
+`nsenter`, and hands you the tree, building and locking nothing. A joined
+shell is a visitor: its own exit does not end the session, and when the
+session ends it ends too, with one line saying so. Run it from a terminal
+that is not already inside a session; typed inside one, it tells you that
+you are already there.
 
 To end a session you cannot reach, send `SIGTERM` to camp's own process,
 the one resident as the session's first: it reaches the shell or command
@@ -264,8 +308,14 @@ what is holding it.
 
 `camp doctor` reports the machine and the environment. `camp plan` says
 what would stop a composition. `camp status` says what is mounted right
-now.
+now, as seen from where you run it, and what has changed under a running
+session. `camp explain`, from inside, describes the tree you are standing
+in. Everything camp said about a run on stderr is also in
+`.camp/logs/camp.log`, with the time in front of it.
 
-Every refusal names the path, says what is true on each side, says which
-side matters and gives you the command that repairs it. If one of them
-does not, that is a bug worth reporting.
+Every refusal is written for somebody who has not read the
+documentation: it names the path, says what is true and which side of it
+matters, says what repairs it — the exact command where there is one, a
+program to install or a session to end where that is the repair — and
+says whose move it is. If one of them does not, that is a bug worth
+reporting.

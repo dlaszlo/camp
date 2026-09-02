@@ -1,14 +1,19 @@
 # Installing camp
 
-camp is a single binary with no runtime dependencies of its own. What it
-needs is a Linux kernel with OverlayFS, `git`, and permission to create a
-user namespace, because every session is built inside one.
+camp is a single static binary. It needs a Linux kernel with OverlayFS
+and the mount API, permission to create a user namespace, `git`, and —
+for joining a running session — util-linux `nsenter`. It needs no
+privilege: there is no root mode, and nothing here asks you to run camp
+itself as anything but yourself. With the default identity no other
+program takes part in a session; the optional `uidmap` identity is the
+one case that involves setuid helpers, and it is described below.
 
 ## What the machine has to have
 
-**Linux.** camp is built on OverlayFS and bind mounts. There is no macOS
-or Windows version and there will not be one; the nearest equivalent is
-to run the composition inside a Linux VM or container.
+**Linux.** camp is built on OverlayFS, bind mounts and Linux namespaces.
+There is no macOS or Windows version and there will not be one; the
+nearest equivalent is to run the composition inside a Linux VM or
+container.
 
 **OverlayFS in the kernel.** Every distribution kernel of the last decade
 has it. To check:
@@ -29,62 +34,98 @@ echo overlay | sudo tee /etc/modules-load.d/overlay.conf
 ```
 
 **A kernel with the mount API.** camp composes the tree through
-`fsopen`, `fsconfig`, `fsmount` and `move_mount` rather than through
-`mount(2)`, so that every layer reaches the kernel as a descriptor rather
-than as a name something else could replace between the check and the
-mount. `fsopen`, `open_tree` and `move_mount` are Linux 5.2; giving
-OverlayFS its lower layers as descriptors — the `lowerdir+` form — is 6.7.
-A kernel older than that cannot be given the guarantee, and camp says so
-rather than falling back to names.
+`fsopen`, `fsconfig`, `fsmount` and `move_mount` rather than through an
+option string handed to `mount(2)`: each layer is given to the kernel as
+an open descriptor, one call per layer, and the kernel records the
+layers' real paths in the mount table — which is what lets camp's own
+verification, and anyone reading `/proc/self/mountinfo`, see what was
+actually mounted. `fsopen` and `move_mount` are Linux 5.2; giving
+OverlayFS its layers this way — the `lowerdir+` form — is 6.7. A kernel
+older than that cannot do it, and camp says so rather than falling back
+to the option string, which would give up the readable table silently.
 
 `camp doctor` answers all of this for the machine you are on, and its
 answer is a real overlay mounted in a real namespace rather than a version
 comparison.
 
-**git**, for a git-based composition. camp reads git — `rev-parse`,
-`ls-files`, `worktree list` — to work out what each repository
-contributes and to report what a session changed. It never writes git.
+**git.** Every composition needs it, whatever the configuration says:
+planning asks git whether the code repository is a working tree and what
+it tracks under each mount target — the rule that no mount may cover
+tracked content — and without git that question has no answer, so a
+check that could not run is not a check that passed, and the composition
+is refused, including one whose directories are not repositories at all.
+The same planning runs for `camp plan`, `camp status`, `camp explain`
+and `camp doctor`. A git-based composition also needs it for the shipped
+`git_exclude` step and for the scans a session runs when it ends. `camp
+accept`, `camp init`, the two joins, help and version need no git. camp
+never writes git. `camp doctor` reports a missing git as a failure.
 
 ```
 sudo apt install git                  # Debian/Ubuntu
 sudo dnf install git                  # Fedora
 ```
 
-A composition of two directories that are not repositories needs none of
-that and works without git; `camp doctor` reports its absence as
-something worth knowing rather than as a failure. The one place where it
-really is required — the shipped `git_exclude` step — refuses with the
-reason rather than quietly reading raw directory listings instead.
+**nsenter**, from util-linux, for `camp shell --join` and `camp run
+--join`. A join enters a running session's namespaces with `setns`, which
+the kernel refuses to a multithreaded process — and a Go program is one
+before its own code runs — so camp hands the namespace descriptors to
+`nsenter`, which is single-threaded. Composing needs none of this: a
+machine without `nsenter` runs every camp command except the two joins.
+It is an essential package on every Debian-derived system, so its absence
+is unusual; `camp doctor` reports it as a warning and names the package.
+
+**`newuidmap` and `newgidmap`, only for `identity: uidmap`.** The
+default identity maps your own uid to itself and involves no other
+program. A configuration that declares `identity: uidmap` maps a whole
+range in podman's `keep-id` shape, through those two setuid helpers (the
+`uidmap` package on Debian and Ubuntu) and a subordinate range assigned
+to you in `/etc/subuid` and `/etc/subgid`. camp refuses to start that
+route when the programs are missing; `camp doctor` does not check for
+them or for the ranges.
 
 **Nothing else.** camp does not call `mount(8)`, `umount(8)`, `fuser` or
 any other tool: it makes the mounts by syscall, and asks `/proc` for the
 state. There is nothing to install for those.
 
-To build it you need **Go 1.25 or newer**.
+To build it you need **Go 1.25 or newer**; to build the Debian package,
+`dpkg-deb` as well.
 
 ## Install from a package
 
-On Debian and Ubuntu, one command builds a package and one installs it:
+On Debian and Ubuntu, a package does all of it at once — the binary at
+`/usr/bin/camp`, the AppArmor profile that grants the namespace
+permission with the path already pointing at it, and the overlay module
+at boot — the three steps the sections below describe by hand. Take the
+one from the latest release:
 
 ```
-git clone <this repository> camp
+gh release download --repo dlaszlo/camp --pattern '*.deb'
+sudo dpkg -i camp_*.deb
+camp doctor                           # says whether this machine can run camp
+```
+
+Or from [the releases page](https://github.com/dlaszlo/camp/releases), if
+you would rather not have `gh`. A release is built by the release
+workflow — from a pushed `v*` tag, or by hand with a version given to
+it — which runs `go build`, `go vet` and `go test ./...` on the runner
+before it builds the package, and publishes nothing that failed them.
+
+The same package is built from a checkout, which is what the tests do:
+
+```
+git clone https://github.com/dlaszlo/camp
 cd camp
 sudo dpkg -i "$(packaging/deb/build)"
 ```
 
-That is the whole installation. The package puts the binary at
-`/usr/bin/camp`, installs the AppArmor profile that grants the namespace
-permission with the path already pointing at it, and asks for the overlay
-module at boot — the three steps the sections below describe by hand. It
-needs `dpkg-deb` and a Go toolchain to build, and nothing at run time but
-`git`.
-
-To remove it: `sudo apt remove camp`, which takes the profile with it.
+That needs `dpkg-deb` and a Go toolchain to build, and declares `git` as
+its one dependency. To remove it: `sudo apt remove camp`, which takes the
+profile with it.
 
 ## Build and install by hand
 
 ```
-git clone <this repository> camp
+git clone https://github.com/dlaszlo/camp
 cd camp
 go build -o camp ./cmd/camp
 sudo install -m 755 camp /usr/local/bin/camp
@@ -124,8 +165,8 @@ narrower than turning the restriction off for every program on the
 machine. On a system with no AppArmor at all, none of this applies.
 
 There is no way around the permission itself. camp has no mode that
-mounts with root instead: it once had one, and it was removed because
-nothing used it. A machine that refuses the namespace cannot compose.
+mounts with root instead. A machine that refuses the namespace cannot
+compose.
 
 ### The Ubuntu case
 
@@ -157,11 +198,17 @@ confined, and a profile that pretends to is worse than an honest one.
 If you install camp somewhere else, edit both the attachment path and the
 profile name in the file.
 
+The join needs nothing more from the profile. The restriction mediates
+*creating* a user namespace; joining one that your own session created
+needs only the capabilities your uid already holds in it, and `nsenter`
+started from the profiled binary inherits its label.
+
 ## ssh inside a session
 
-`camp run` maps exactly one user id — yours — into the session. Every
-file on the machine owned by anyone else is then shown with the kernel's
-overflow id, which is to say as `nobody`:
+By default a session maps exactly one user id — yours — into its
+namespace (the `uidmap` identity maps a range, and this section is about
+the default). Every file on the machine owned by anyone else is then
+shown with the kernel's overflow id, which is to say as `nobody`:
 
 ```
 $ stat -c '%U %n' /etc/ssh/ssh_config      # inside a session
@@ -180,9 +227,9 @@ Bad owner or permissions on /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf
 **No mapping fixes this, and none is coming.** A user namespace lets an
 unprivileged process map the ids it owns — its own, and any range
 assigned to it in `/etc/subuid`. Host `root` is not one of them, and that
-is the property the whole rootless mode rests on. Rootless podman shows
-the same thing; it is less visible there only because a container brings
-its own `/etc`.
+is the property the whole approach rests on. Rootless podman shows the
+same thing; it is less visible there only because a container brings its
+own `/etc`.
 
 The repair is to point ssh at your own configuration. `-F` does two
 things: it names the file to read, **and it skips the system-wide one**.
@@ -196,7 +243,8 @@ shell's startup file, not your global git configuration, not
 outside to repair the inside breaks things in places that have nothing to
 do with camp. So the setting lives in the configuration's `session:`
 section, where it is versioned, diffable, and travels with the
-environment it serves.
+environment it serves. A joined shell gets the same declarations,
+resolved against its own terminal's environment.
 
 ### git
 
@@ -273,7 +321,11 @@ carrying ssh knowledge in a tool that has none.
 camp doctor
 ```
 
-The line to look for is:
+It checks seven things about the machine — the platform, `/proc`,
+OverlayFS, the mount API, `git`, `nsenter`, and user namespaces. All but
+`nsenter` are failures when missing, because camp cannot compose without
+them; `nsenter` is a warning, because only the two joins need it. The
+line to look for is:
 
 ```
   ok   user namespaces  permitted, and a real overlay in one mounts, copies up and whiteouts, with userxattr
@@ -286,7 +338,11 @@ fails, it says which restriction stopped it and what to do about it. The
 scratch tree it uses lives inside that namespace and goes with it.
 
 Run it with no configuration anywhere and it reports only the machine;
-run it inside an environment and it also reports that environment.
+run it inside an environment and it also reports that environment: the
+locale, which filesystems its paths sit on and what is locked there,
+storage whose composition no longer exists, work directories a session
+left for the next start to sweep, worktrees git considers prunable, and
+session reports waiting to be read.
 
 ## Moving from a hand install to the package
 
