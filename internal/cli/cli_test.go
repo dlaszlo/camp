@@ -2,16 +2,44 @@ package cli_test
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dlaszlo/camp/internal/cli"
+	"github.com/dlaszlo/camp/internal/compose"
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/enc"
+	"github.com/dlaszlo/camp/internal/gen"
+	"github.com/dlaszlo/camp/internal/locks"
+	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/preflight"
+	"github.com/dlaszlo/camp/internal/refusal"
+	"github.com/dlaszlo/camp/internal/session"
 	"github.com/dlaszlo/camp/internal/testenv"
 )
+
+// insideEnv carries a configuration path into a workload started by
+// TestEnteringFromInsideIsRefusedBeforeAnythingSweeps: the test binary,
+// running inside a session, becomes the 'camp shell' typed there.
+const insideEnv = "CAMP_CLI_SHELL_FROM_INSIDE"
+
+// shellReport is what that workload sends back.
+type shellReport struct {
+	Code   int    `json:"code"`
+	Stderr string `json:"stderr"`
+}
+
+func shellFromInside(source string) int {
+	var out, errOut bytes.Buffer
+	code := cli.Main([]string{"shell", "-f", source}, &out, &errOut)
+	encoded, _ := json.Marshal(shellReport{Code: code, Stderr: errOut.String()})
+	os.Stdout.Write(encoded)
+	return 0
+}
 
 // TestMain points the state directory somewhere of its own, for every
 // test in this package.
@@ -37,6 +65,15 @@ func TestMain(m *testing.M) {
 	// waiting on a child that was running the suite.
 	if len(os.Args) > 1 && os.Args[1] == preflight.ProbeArg {
 		os.Exit(preflight.Probe())
+	}
+	// The same binary is the session's init when a test here starts one,
+	// and the workload inside it.
+	if len(os.Args) > 1 && os.Args[1] == session.InitArg {
+		session.InitMain(os.Args[2:])
+		return
+	}
+	if source := os.Getenv(insideEnv); source != "" {
+		os.Exit(shellFromInside(source))
 	}
 
 	directory, err := os.MkdirTemp("", "camp-cli-state-")
@@ -442,5 +479,115 @@ func TestAConfigurationOutsideTheLayoutIsLoggedWhereItSaysToLog(t *testing.T) {
 	// ... and the log is where env: says the environment is.
 	if _, err := os.Stat(filepath.Join(env.Path, ".camp", "logs", "camp.log")); err != nil {
 		t.Errorf("the run was not logged in the environment env: names: %v", err)
+	}
+}
+
+// The reported data loss, end to end: 'camp shell' typed inside a running
+// session. The refusal has to come before the sweep, and the test can see
+// which came first because a sweep leaves a trace -- a work directory a
+// finished session left behind, planted here, is what a sweep removes.
+// If the refusal is gone or moved below the sweep, that directory goes
+// and stderr says "swept:".
+//
+// The session is a real one, so this needs permission to create a user
+// namespace and skips where the binary has none.
+func TestEnteringFromInsideIsRefusedBeforeAnythingSweeps(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+	built, refused := plan.Prepare(cfg, plan.Namespace)
+	if !refused.Empty() {
+		t.Fatalf("the fixture was refused:\n%v", refused)
+	}
+	if err := compose.Directories(built); err != nil {
+		t.Fatal(err)
+	}
+	if _, problems := gen.Prepare(built); !problems.Empty() {
+		t.Fatalf("generation was refused:\n%v", problems)
+	}
+
+	// What a finished session leaves: an entry whose live directory is gone.
+	stale := filepath.Join(env.Path, config.Dir, "work", "000000000000")
+	testenv.MkDir(t, filepath.Join(stale, "work"))
+	marker := enc.Document([]string{
+		enc.Line("live", filepath.Join(env.Path, "gone")),
+		enc.Line("config", cfg.Source),
+	})
+	if err := os.WriteFile(filepath.Join(stale, compose.MarkerName), marker, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repo, ok := cfg.Repository(cfg.Upper)
+	if !ok {
+		t.Fatal("the fixture names no upper")
+	}
+	pair, err := locks.TakePair(cfg.Env, repo.Path.Components(), cfg.Merged.Components(),
+		cfg.UpperPath(), cfg.Live())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pair.Release)
+
+	stdin, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	stdout, err := os.Create(filepath.Join(testenv.Root(t), "stdout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdout.Close()
+	stderr, err := os.Create(filepath.Join(testenv.Root(t), "stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+
+	t.Setenv(insideEnv, cfg.Source)
+	status, err := session.Launch(session.Options{
+		Config: cfg,
+		Argv:   []string{os.Args[0]},
+		Locks:  pair,
+		Stdin:  stdin,
+		Stdout: stdout,
+		Stderr: stderr,
+	})
+	if err != nil {
+		var single refusal.R
+		if errors.As(err, &single) && single.Rule == "namespace-denied" ||
+			strings.Contains(err.Error(), "unprivileged_userns") ||
+			strings.Contains(err.Error(), "operation not permitted") ||
+			strings.Contains(err.Error(), "permission denied") {
+			t.Skipf("this binary may not create a user namespace, so a session "+
+				"cannot be started from a checkout: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if status != 0 {
+		text, _ := os.ReadFile(stderr.Name())
+		t.Fatalf("the workload exited %d:\n%s", status, text)
+	}
+
+	output, err := os.ReadFile(stdout.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got shellReport
+	if err := json.Unmarshal(output, &got); err != nil {
+		t.Fatalf("the workload's report did not parse: %v\n%s", err, output)
+	}
+
+	if got.Code != cli.ExitBusy || !strings.Contains(got.Stderr, "from inside it") {
+		t.Errorf("'camp shell' inside the session exited %d and said:\n%s", got.Code, got.Stderr)
+	}
+	if strings.Contains(got.Stderr, "swept:") {
+		t.Errorf("the sweep ran before the refusal:\n%s", got.Stderr)
+	}
+	if _, err := os.Stat(filepath.Join(stale, "work")); err != nil {
+		t.Errorf("the planted stale work directory is gone, so something swept " +
+			"before the refusal")
+	}
+	if _, err := os.Stat(filepath.Join(built.Work, "work")); err != nil {
+		t.Errorf("the running session's own work directory is gone: %v", err)
 	}
 }

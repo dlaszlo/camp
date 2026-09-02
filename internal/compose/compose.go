@@ -14,6 +14,7 @@
 package compose
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -401,13 +402,46 @@ func Residue(live string) ([]string, error) {
 // including the mounts, but the work directory is on the real filesystem
 // and outlives it. So the next up sweeps: an entry is stale when the live
 // directory its marker names no longer exists, or when nothing holds that
-// live directory's lock. An entry whose marker is missing or unreadable
-// is reported and left alone, because camp removes only what it can prove
-// is its own.
+// live directory's lock -- ended answers that -- and, before either is
+// believed, when no overlay in the table is standing on it. An entry
+// whose marker is missing or unreadable is reported and left alone,
+// because camp removes only what it can prove is its own; so is one whose
+// use camp cannot rule out.
+//
+// The table is asked first because the lock can be wrong in one
+// direction, and it is the direction that loses data. Measured, from
+// inside a running session: /proc/locks shows no row for the launcher's
+// lock, whose owner is outside the reader's pid namespace; and the live
+// path is the overlay's own root, a different inode from the directory
+// the launcher locked, so a non-blocking flock on it succeeds. Both
+// together report the session camp is standing in as one that has ended.
+// The workdir= option is the fact the lock cannot be: an overlay that
+// names a work directory is using it.
+//
+// The caller holds the work lock (locks.Work) across this call, and a
+// launcher creating a work directory holds the same lock from making the
+// live directory to taking the live lock. Without it the decision and the
+// removal are two moments: a launcher that had read the table and probed
+// the lock, and was then descheduled, would remove what a second launcher
+// created and mounted in between -- in a namespace whose mounts this
+// table does not show. The lock keeps the decision true until the
+// removal is done.
+//
+// One loss this does not close, recorded so it is not mistaken for
+// covered: an environment directory renamed while a session runs. The
+// marker records the live path from before the rename, which no longer
+// exists, so ended reports the session over; and the running session's
+// overlay is in its own mount namespace, invisible here (C20), so the
+// table cannot say otherwise. From inside that session FromInside refuses
+// before this runs, which is the reachable route -- an agent runs camp
+// inside its own session. From a separate outside terminal it stays open,
+// and the mount table is no help there. Closing it would need the marker
+// to name something that survives the rename, which is a larger change
+// than this defect.
 //
 // The current run never sweeps its own entry: it holds that live lock
 // itself.
-func Sweep(root pathx.Root, isLive func(string) bool) (swept []string, kept []string) {
+func Sweep(root pathx.Root, table []mountinfo.Entry, ended func(string) bool) (swept []string, kept []string) {
 	work := filepath.Join(root.Name(), config.Dir, "work")
 	entries, err := os.ReadDir(work)
 	if err != nil {
@@ -424,7 +458,15 @@ func Sweep(root pathx.Root, isLive func(string) bool) (swept []string, kept []st
 				directory, MarkerName, err))
 			continue
 		}
-		if !isLive(live) {
+		used, doubt := inUse(table, root, entry.Name())
+		if used {
+			continue
+		}
+		if doubt != "" {
+			kept = append(kept, fmt.Sprintf("%s (%s)", directory, doubt))
+			continue
+		}
+		if !ended(live) {
 			continue
 		}
 		if err := fsx.Work(root, entry.Name()).RemoveTree("work"); err != nil {
@@ -438,6 +480,76 @@ func Sweep(root pathx.Root, isLive func(string) bool) (swept []string, kept []st
 		swept = append(swept, directory)
 	}
 	return swept, kept
+}
+
+// inUse reports whether an overlay in the table is standing on this
+// entry's work directory -- and, when that cannot be told for certain,
+// why not.
+//
+// By name first: the kernel shows the string it was given, and camp gives
+// it the path it built the directory under. By inode second, resolved
+// from the root of the filesystem with no symlink followed, the way every
+// path camp acts on is resolved. What stays uncertain is kept: a spelling
+// that is not a clean absolute path -- camp writes no other -- or one
+// whose resolution meets a symlink, because the kernel followed it at
+// mount time and camp cannot know to where. A work directory camp cannot
+// look at is not camp's own: camp reads its own from the environment root
+// down. Measured on this machine: eleven of twelve overlays belong to a
+// container runtime, with work directories under a root-only tree, and
+// keeping every camp entry over those would have every sweep here remove
+// nothing and warn eleven times.
+func inUse(table []mountinfo.Entry, root pathx.Root, hash string) (used bool, doubt string) {
+	parts := []string{config.Dir, "work", hash, "work"}
+	own := filepath.Join(append([]string{root.Name()}, parts...)...)
+	mine, err := root.Stat(parts)
+	if err != nil {
+		return false, fmt.Sprintf("its work directory could not be looked at: %v", err)
+	}
+	for _, entry := range mountinfo.AllOverlays(table) {
+		path := mountinfo.WorkOf(entry)
+		switch {
+		case path == "":
+			continue
+		case path == own:
+			return true, ""
+		case mountinfo.SpelledAmbiguously(path):
+			// A backslash the kernel's octal escaping never writes: a foreign
+			// overlay mounted through the legacy option string, whose real
+			// spelling camp cannot recover (mountinfo.SpelledAmbiguously). It
+			// could be this directory under a name camp cannot read, so it is
+			// kept rather than swept out from under whatever holds it.
+			return false, fmt.Sprintf("the overlay at %s names its work directory %q, "+
+				"whose spelling camp cannot decode with certainty, so it cannot "+
+				"compare it with this one", entry.Point, path)
+		case !filepath.IsAbs(path) || path != filepath.Clean(path):
+			return false, fmt.Sprintf("the overlay at %s names its work directory %q, "+
+				"which camp cannot compare with this one for certain", entry.Point, path)
+		}
+		theirs, err := pathx.StatBeneath("/", strings.Split(path[1:], "/"))
+		switch {
+		case errors.Is(err, os.ErrPermission):
+			// A work directory under a tree camp may not read is not camp's:
+			// camp resolves its own from the environment root down, which it
+			// can always read. Treating unreadable as in use would keep every
+			// entry over the container runtime's overlays -- eleven of twelve
+			// here, measured -- and sweep nothing, ever. The one way to reach
+			// this with a directory that is camp's is to bind one's own work
+			// directory elsewhere and strip search permission from its parent,
+			// which is a person hiding their own running session from the tool
+			// meant to protect it -- outside the threat model.
+			continue
+		case err != nil:
+			return false, fmt.Sprintf("the overlay at %s names its work directory %s, "+
+				"and camp cannot tell whether that is this one: %v", entry.Point, path, err)
+		case theirs.Type == pathx.Symlink:
+			return false, fmt.Sprintf("the overlay at %s names its work directory %s, "+
+				"which is a symbolic link, and camp cannot tell where the kernel "+
+				"followed it to", entry.Point, path)
+		case mine.Exists() && theirs.Exists() && theirs.Ident == mine.Ident:
+			return true, ""
+		}
+	}
+	return false, ""
 }
 
 func removeIfEmpty(area fsx.Area, directory string) error {

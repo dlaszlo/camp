@@ -453,3 +453,32 @@ func writeTable(t *testing.T, root, line string) string {
 	}
 	return path
 }
+
+// An overlay whose upperdir carries a backslash the kernel's octal
+// escaping never writes -- kept verbatim by the legacy option parser --
+// cannot be decoded to a real path. The scan must not resolve it to
+// nothing and pass: it says it cannot decide, so a second overlay on this
+// upper is refused rather than silently missed.
+func TestTheUpperScanRefusesAnUndecodableUpperdir(t *testing.T) {
+	root := t.TempDir()
+	upper := filepath.Join(root, "code")
+	if err := os.MkdirAll(upper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := "60 1 0:70 / " + filepath.Join(root, "live") +
+		` rw,relatime - overlay overlay rw,lowerdir=/l,upperdir=` +
+		filepath.Join(root, `co\134\054de`) + `,workdir=/w`
+	table, err := mountinfo.Read(writeTable(t, root, line))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := locks.ScanUpper(table, upper)
+	if !refused.Has("upper-already-composed") {
+		t.Fatalf("an overlay whose upperdir camp cannot decode was passed over "+
+			"instead of refused: %v", refused.Rules())
+	}
+	if !strings.Contains(refused.Error(), "with certainty") {
+		t.Errorf("the refusal does not say the upperdir could not be decoded:\n%v",
+			refused.Error())
+	}
+}

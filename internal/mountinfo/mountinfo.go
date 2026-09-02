@@ -492,22 +492,59 @@ func UpperOf(entry Entry) string {
 	return UnescapeOption(entry.Super["upperdir+"])
 }
 
-// UnescapeOption undoes overlayfs's escaping inside a path option.
-func UnescapeOption(value string) string {
-	var out strings.Builder
-	escaped := false
-	for index := 0; index < len(value); index++ {
-		character := value[index]
-		if escaped {
-			out.WriteByte(character)
-			escaped = false
-			continue
-		}
-		if character == '\\' {
-			escaped = true
-			continue
-		}
-		out.WriteByte(character)
+// WorkOf returns an overlay's work directory, under the same two spellings
+// as UpperOf.
+//
+// It is the one thing in the table that says a work directory is in use.
+// A namespace session's flock is invisible from inside it, so the sweep
+// that clears work directories left by ended sessions asks this before it
+// believes the lock.
+func WorkOf(entry Entry) string {
+	if value, found := entry.Super["workdir"]; found {
+		return UnescapeOption(value)
 	}
-	return out.String()
+	return UnescapeOption(entry.Super["workdir+"])
+}
+
+// optionEscaped is the vocabulary the kernel writes inside an option
+// value: the four of a path field, and the comma, which separates the
+// options and so has to be escaped inside one.
+var optionEscaped = strings.NewReplacer(
+	`\054`, ",", `\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`,
+)
+
+// UnescapeOption undoes the kernel's escaping inside an overlay's path
+// option.
+//
+// Octal, the same way as the path fields, and not the backslash grammar
+// the option *parser* accepts on the way in. Measured (kernel 7.0.0-30):
+// an upper directory called "up per" is shown as up\040per; "up,per",
+// given to the parser as up\,per, is shown as up\134\054per; a name
+// holding a backslash, "wo\rk", as wo\134\134rk. The kernel keeps the
+// string it was given and escapes it on the way out, so a bare backslash
+// never reaches the table. The decoder this replaces stripped the
+// backslash and kept the digits, which turned every path holding a space
+// into three digits -- and the verification, which compares the kernel's
+// spelling of camp's own upper and work directories with the plan's,
+// then refused every composition whose environment path held one.
+func UnescapeOption(value string) string { return optionEscaped.Replace(value) }
+
+// SpelledAmbiguously reports whether a decoded option value cannot be
+// compared with a real path for certain.
+//
+// UnescapeOption undoes the kernel's octal escaping, which never leaves a
+// backslash: a real backslash in a path is written \134 and comes back as
+// one byte. A backslash that survives decoding therefore did not come
+// from the kernel. It is the caller's own escaping, kept verbatim by the
+// legacy option-string parser: mount -o "upperdir=co\,de" on a directory
+// really called co,de is stored and printed as co\134\054de, which decodes
+// to co\,de and not to co,de. A second decoding pass over that -- reading
+// \, as , -- would be guessing at a grammar camp did not define and the
+// kernel did not use on the way out, so the honest answer is that the
+// spelling is unknown. camp mounts through the mount API, whose paths are
+// descriptors, so its own overlays never reach this: a residual backslash
+// is always a foreign overlay, and a caller keeps or refuses rather than
+// acting on a path it cannot read.
+func SpelledAmbiguously(decoded string) bool {
+	return strings.IndexByte(decoded, '\\') >= 0
 }

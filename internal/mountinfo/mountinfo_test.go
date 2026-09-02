@@ -19,7 +19,7 @@ const table = `25 30 0:23 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - pro
 88 30 0:52 / /home/x/live rw,relatime - overlay overlay rw,lowerdir=/home/x/ws,upperdir=/home/x/code,workdir=/home/x/.camp/work/abc/work,redirect_dir=nofollow,uuid=on,userxattr
 89 30 252:1 /home/x/ws /home/x/ws ro,relatime - ext4 /dev/sda1 rw,errors=remount-ro
 90 88 252:1 /home/x/odd /home/x/live/a\040b rw,relatime - ext4 /dev/sda1 rw
-91 30 0:52 / /home/y/live rw,relatime - overlay overlay rw,lowerdir=/l,upperdir=/home/x/co\,de,workdir=/w
+91 30 0:52 / /home/y/live rw,relatime - overlay overlay rw,lowerdir=/l,upperdir=/home/x/co\054de,workdir=/w
 `
 
 func read(t *testing.T) []mountinfo.Entry {
@@ -107,9 +107,10 @@ func TestOverlayOptionsAreSplitPerOption(t *testing.T) {
 	}
 }
 
-// A path containing a comma is escaped inside the option string. Splitting
-// naively would tear it in half and then compare two halves against a
-// whole.
+// A path containing a comma is escaped inside the option string, in
+// octal: the kernel writes \054 and never a bare backslash. Splitting
+// naively on a comma is safe for that reason, and decoding has to undo
+// the octal rather than drop a backslash.
 func TestAnEscapedCommaInAPathSurvives(t *testing.T) {
 	entries := read(t)
 	overlay, ok := mountinfo.Top(entries, "/home/y/live")
@@ -564,4 +565,28 @@ func parsed(t *testing.T, lines ...string) []mountinfo.Entry {
 		t.Fatalf("a legal record was refused: %v", err)
 	}
 	return entries
+}
+
+// The kernel's spelling of an option value, measured rather than
+// supposed: a space is \040, a comma \054, a backslash \134, exactly as in
+// a path field. The decoder that came before this one stripped the
+// backslash and kept the digits, so a work directory under "env with
+// space" came back as "env040with040space" and matched nothing.
+func TestAnOptionValueIsDecodedTheWayTheKernelWroteIt(t *testing.T) {
+	entries, err := readLines(t,
+		`95 30 0:60 / /home/z/live rw,relatime - overlay none rw,lowerdir+=/l,`+
+			`upperdir=/home/z/up\040per,workdir=/home/z/wo\134rk\054x,userxattr`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlay, ok := mountinfo.Top(entries, "/home/z/live")
+	if !ok {
+		t.Fatal("the overlay was not parsed")
+	}
+	if got := mountinfo.UpperOf(overlay); got != "/home/z/up per" {
+		t.Errorf("an upper directory with a space came out as %q", got)
+	}
+	if got := mountinfo.WorkOf(overlay); got != `/home/z/wo\rk,x` {
+		t.Errorf("a work directory with a backslash and a comma came out as %q", got)
+	}
 }

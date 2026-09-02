@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/dlaszlo/camp/internal/compose"
@@ -77,12 +78,22 @@ func getReady(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, 
 	// every fresh checkout met a refusal for the one thing camp can safely
 	// create itself. A path whose parent does not exist is still refused,
 	// by the validation: that is a typo, not a missing directory.
+	// Under the work lock until the live lock is held: between the two,
+	// the composed tree's directory may not exist yet or may exist
+	// unlocked, and a sweep looking at that moment would take this
+	// launcher's work directory for one a finished session left.
+	guard, err := lockWork(cfg)
+	if err != nil {
+		return nil, err
+	}
 	if err := makeLive(cfg, say); err != nil {
+		guard.Release()
 		return nil, err
 	}
 
 	pair, err := locks.TakePair(cfg.Env, upper, cfg.Merged.Components(),
 		cfg.UpperPath(), cfg.Live())
+	guard.Release()
 	if err != nil {
 		var single refusal.R
 		if errors.As(err, &single) && strings.HasSuffix(single.Rule, "-locked") {
@@ -143,6 +154,31 @@ func getReady(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, 
 		Generated: generated,
 		Locks:     pair,
 	}, nil
+}
+
+// lockWork takes the lock on camp's work area, .camp/work, making the
+// directory first when it is not there.
+//
+// The third lock, and the shortest held: never by a session, only by a
+// camp that is sweeping or starting. The sweep holds it while it decides
+// what is stale and removes it; a launcher holds it from making the
+// composed tree's directory to taking the live lock. Once the live lock
+// is held the sweep's evidence stands on its own, so this goes before the
+// prepare commands, which may take as long as they like.
+func lockWork(cfg config.Config) (*locks.Held, error) {
+	if _, err := fsx.In("work", cfg.Root, config.Dir, "work").MkdirAll(); err != nil {
+		return nil, wrap(err, ExitFailure, "")
+	}
+	held, err := locks.Take(locks.Work, cfg.Env, []string{config.Dir, "work"},
+		filepath.Join(cfg.Env, config.Dir, "work"))
+	if err != nil {
+		var single refusal.R
+		if errors.As(err, &single) && single.Rule == "work-locked" {
+			return nil, failure(ExitBusy, "", "%s", single.Message)
+		}
+		return nil, wrap(err, ExitFailure, "")
+	}
+	return held, nil
 }
 
 // stillTheComposition checks the two things the prepare commands were

@@ -14,6 +14,7 @@ import (
 
 	"github.com/dlaszlo/camp/internal/compose"
 	"github.com/dlaszlo/camp/internal/config"
+	"github.com/dlaszlo/camp/internal/enc"
 	"github.com/dlaszlo/camp/internal/gen"
 	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/mountx"
@@ -87,6 +88,12 @@ type outcome struct {
 	DescriptorSame     bool   `json:"descriptor_same"`
 	DescriptorStale    string `json:"descriptor_stale"`
 
+	// The sweep scenario: the lock lying about a running session.
+	SweptWhileUp    []string `json:"swept_while_up"`
+	KeptWhileUp     []string `json:"kept_while_up"`
+	WriteAfterSweep string   `json:"write_after_sweep"`
+	SweptAfterDown  []string `json:"swept_after_down"`
+
 	// The locked-flags scenario.
 	OnTmpfs         bool   `json:"on_tmpfs"`
 	LockedFlags     string `json:"locked_flags"`
@@ -148,6 +155,8 @@ func inside() int {
 		return held(out, setup, built)
 	case "descriptor":
 		return descriptor(out, built)
+	case "sweep":
+		return sweep(out, setup, built, cfg)
 	}
 
 	result := compose.Build(setup)
@@ -374,6 +383,46 @@ func held(out outcome, setup compose.Setup, built plan.Plan) int {
 	_ = holder.Process.Kill()
 	_, _ = holder.Process.Wait()
 	_ = compose.Down(targets)
+	return report(out)
+}
+
+// sweep is the scenario the reported data loss came from: a sweep whose
+// lock says the running session has ended.
+//
+// From inside a session the lock says nothing true about it -- its holder
+// is outside this pid namespace and the live path is the overlay's own
+// root, so /proc/locks is empty and a flock on the live path succeeds.
+// The callback here answers what the lock answered there: every session
+// has ended. The mount table has to overrule it while the overlay stands;
+// and once the overlay is gone the same callback has to be believed
+// again, because a work directory a session really did leave behind is
+// what the sweep is for.
+func sweep(out outcome, setup compose.Setup, built plan.Plan, cfg config.Config) int {
+	result := compose.Build(setup)
+	if !result.OK() {
+		out.Problems = append(out.Problems, result.Refused.Error())
+		return report(out)
+	}
+	out.Mounted = len(result.Mounted)
+	ended := func(string) bool { return true }
+
+	table, err := mountinfo.Read(mountinfo.Self)
+	if err != nil {
+		out.Problems = append(out.Problems, err.Error())
+		return report(out)
+	}
+	out.SweptWhileUp, out.KeptWhileUp = compose.Sweep(cfg.Root, table, ended)
+	// A write through the overlay needs its work directory, so this is the
+	// session finding out whether it still has one.
+	out.WriteAfterSweep = writeResult(filepath.Join(built.Live, "after-sweep.txt"), "x\n")
+
+	teardown(&out, built, result)
+
+	if table, err = mountinfo.Read(mountinfo.Self); err != nil {
+		out.Problems = append(out.Problems, err.Error())
+		return report(out)
+	}
+	out.SweptAfterDown, _ = compose.Sweep(cfg.Root, table, ended)
 	return report(out)
 }
 
@@ -739,6 +788,128 @@ func TestANonEmptyLiveDirectoryStopsTheCompositionBeforeAnythingMounts(t *testin
 	if !refused.Has("live-not-empty") {
 		t.Fatalf("expected the composition to be refused for a non-empty live "+
 			"directory; the rules that fired were %v", refused.Rules())
+	}
+}
+
+// The reported data loss: 'camp shell' typed inside a running session
+// swept that session's overlay work directory away, because from inside
+// the lock said the session had ended. What the lock cannot see, the
+// mount table can: an overlay naming a work directory is using it. And
+// the same sweep, once the overlay is gone, still removes what an ended
+// session left.
+func TestAWorkDirectoryAnOverlayIsUsingIsNotSweptWhateverTheLockSays(t *testing.T) {
+	env := testenv.NewEnv(t)
+	got := run(t, env, "sweep")
+
+	for _, problem := range got.Problems {
+		t.Errorf("inside the namespace: %s", problem)
+	}
+	if len(got.SweptWhileUp) > 0 {
+		t.Errorf("the sweep removed %v while an overlay was standing on it. The "+
+			"lock lied, as it does from inside a session, and the mount table "+
+			"was there to be asked", got.SweptWhileUp)
+	}
+	if len(got.KeptWhileUp) > 0 {
+		t.Errorf("a work directory in use is not stale and has nothing to be "+
+			"said about it, but the sweep reported: %v", got.KeptWhileUp)
+	}
+	if got.WriteAfterSweep != "succeeded" {
+		t.Errorf("a write through the composed tree after the sweep returned "+
+			"%q: the running session lost its work directory", got.WriteAfterSweep)
+	}
+	if len(got.SweptAfterDown) != 1 {
+		t.Errorf("after the teardown the same sweep removed %v; the one work "+
+			"directory the ended session left was what it is for",
+			got.SweptAfterDown)
+	}
+}
+
+// The sweep compares the kernel's spelling of a work directory with its
+// own, and the kernel's spelling is not camp's: a space is written \040,
+// a foreign overlay may have given a relative path or one through a link,
+// and a container runtime's work directories sit under trees camp cannot
+// read. Each of those has one honest answer, and none of them needs a
+// namespace to measure.
+func TestTheSweepReadsTheKernelsSpellingOfAWorkDirectory(t *testing.T) {
+	base := filepath.Join(testenv.Root(t), "env with space")
+	hash := "0123456789ab"
+	entry := filepath.Join(base, config.Dir, "work", hash)
+	own := filepath.Join(entry, "work")
+	testenv.MkDir(t, own)
+	marker := enc.Document([]string{
+		enc.Line("live", filepath.Join(base, "gone")),
+		enc.Line("config", filepath.Join(base, config.Dir, "config.yml")),
+	})
+	if err := os.WriteFile(filepath.Join(entry, compose.MarkerName), marker, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root, err := pathx.OpenRoot(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ended := func(string) bool { return true }
+
+	// Spelled as the kernel spells it: every space as \040.
+	table := func(workdir string) []mountinfo.Entry {
+		escape := func(path string) string { return strings.ReplaceAll(path, " ", `\040`) }
+		line := "60 1 0:70 / " + escape(filepath.Join(base, "live")) +
+			" rw,relatime - overlay none rw,lowerdir+=/l,upperdir=/u,workdir=" +
+			escape(workdir) + ",userxattr"
+		path := filepath.Join(testenv.Root(t), "mountinfo")
+		if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := mountinfo.Read(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return entries
+	}
+	sweepWith := func(what, workdir string) (swept, kept []string) {
+		t.Helper()
+		swept, kept = compose.Sweep(root, table(workdir), ended)
+		if _, err := os.Stat(own); err != nil && len(swept) == 0 {
+			t.Fatalf("%s: the work directory is gone and the sweep did not say so", what)
+		}
+		return swept, kept
+	}
+
+	// The kernel's own spelling of this very directory, space and all.
+	if swept, kept := sweepWith("escaped", own); len(swept)+len(kept) > 0 {
+		t.Errorf("an overlay standing on this work directory, spelled the way the "+
+			"kernel spells it, did not protect it: swept %v, kept %v", swept, kept)
+	}
+	// A spelling that cannot be compared: kept, and said to be.
+	if swept, kept := sweepWith("relative", "work"); len(swept) > 0 || len(kept) != 1 ||
+		!strings.Contains(kept[0], "for certain") {
+		t.Errorf("an overlay with a relative work directory: swept %v, kept %v", swept, kept)
+	}
+	// A spelling the kernel's octal escaping never writes -- a backslash
+	// kept verbatim by the legacy option parser -- cannot be decoded, so
+	// camp cannot rule out that it is this directory: kept.
+	if swept, kept := sweepWith("ambiguous", own+`\134x`); len(swept) > 0 || len(kept) != 1 ||
+		!strings.Contains(kept[0], "with certainty") {
+		t.Errorf("an overlay whose work directory camp cannot decode: swept %v, kept %v", swept, kept)
+	}
+	// A spelling through a symbolic link: the kernel followed it once, camp
+	// does not follow it at all, and so cannot say where it went.
+	link := filepath.Join(base, "alias")
+	if err := os.Symlink(filepath.Join(base, config.Dir), link); err != nil {
+		t.Fatal(err)
+	}
+	if swept, kept := sweepWith("symlink", filepath.Join(link, "work", hash, "work")); len(swept) > 0 || len(kept) != 1 {
+		t.Errorf("an overlay whose work directory is spelled through a link: swept %v, kept %v", swept, kept)
+	}
+	// Somebody else's, under a tree camp cannot read: not camp's own.
+	private := filepath.Join(base, "private")
+	testenv.MkDir(t, private)
+	if err := os.Chmod(private, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(private, 0o755) })
+	if swept, kept := sweepWith("unreadable", filepath.Join(private, "snapshots", "7475", "work")); len(swept) != 1 || len(kept) > 0 {
+		t.Errorf("a container runtime's overlay stopped the sweep: swept %v, kept %v", swept, kept)
 	}
 }
 

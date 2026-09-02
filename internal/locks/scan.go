@@ -56,6 +56,19 @@ func ScanUpper(table []mountinfo.Entry, upper string) refusal.List {
 			points = append(points, entry.Point)
 			continue
 		}
+		if mountinfo.SpelledAmbiguously(path) {
+			// A residual backslash the kernel's escaping never writes: a
+			// foreign overlay mounted through the legacy option string, whose
+			// upperdir camp cannot decode. It cannot be ruled out as this
+			// repository, and a scan that stayed silent would let a second
+			// overlay onto our upper on the strength of a name it could not
+			// read -- the corruption this guard exists to stop. Said, not
+			// missed.
+			points = append(points, fmt.Sprintf("%s (its upperdir %q could not be "+
+				"decoded with certainty, so camp cannot rule out that it is this "+
+				"repository)", entry.Point, path))
+			continue
+		}
 		if info, err := pathx.StatBeneath(path, nil); err == nil && info.Ident == intended.Ident {
 			points = append(points, fmt.Sprintf("%s (through %s, which is the "+
 				"same directory)", entry.Point, path))

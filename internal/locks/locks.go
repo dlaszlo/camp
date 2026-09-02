@@ -60,6 +60,9 @@ const (
 	Upper Role = "upper"
 	// Live is the composed tree's directory.
 	Live Role = "live"
+	// Work is camp's own work area, .camp/work: locked for the moment a
+	// launcher decides what is stale in it, or creates its own entry.
+	Work Role = "work"
 )
 
 // Held is a lock this process is holding.
@@ -184,10 +187,34 @@ func busy(role Role, path string) refusal.R {
 		"enforce that -- a second overlay on the same upper mounts without " +
 		"complaint -- and two compositions writing one upper corrupt each " +
 		"other's data, so camp enforces it."
-	if role == Live {
+	advice := "The way in is to enter the composition that is running, not to " +
+		"build a second one. If it was started with 'camp run -- tmux " +
+		"new-session -d', attach to that tmux session from any terminal: " +
+		"the client is only a pipe, and the windows it opens are children " +
+		"of the server, which is inside. If the session is finished, it " +
+		"releases this lock by itself when its last process exits -- the " +
+		"kernel does that, so there is never a stale lock to clear and no " +
+		"--force to reach for."
+	switch role {
+	case Live:
 		rule = "live-locked"
 		explanation = "Two compositions on one composed tree is not a thing " +
 			"that can mean anything: the second would be laid over the first."
+	case Work:
+		// Held only around a creation or a removal in camp's work area, so
+		// that two commands cannot create or remove the same directory at
+		// once. Never held while a session runs -- so unlike the other two,
+		// this lock is only ever met by another camp mid-operation.
+		rule = "work-locked"
+		explanation = "Another camp command in this environment holds camp's " +
+			"work area. camp takes it only while it is creating a work " +
+			"directory for a new session or removing the ones that finished " +
+			"sessions left, so that two commands cannot create or remove the " +
+			"same directory at once."
+		advice = "Wait for that command to finish, then run this one again. " +
+			"The lock is released the moment the directory being created or " +
+			"removed is done with; camp never holds it while a session runs, " +
+			"so there is nothing stale to clear and no --force to reach for."
 	}
 
 	holders := Holders(path)
@@ -208,17 +235,8 @@ func busy(role Role, path string) refusal.R {
 		who = "It is held by: " + strings.Join(lines, "; ") + "."
 	}
 
-	return refusal.New(rule,
-		"a composition is already using %s.\n%s\n%s\n"+
-			"The way in is to enter the composition that is running, not to "+
-			"build a second one. If it was started with 'camp run -- tmux "+
-			"new-session -d', attach to that tmux session from any terminal: "+
-			"the client is only a pipe, and the windows it opens are children "+
-			"of the server, which is inside. If the session is finished, it "+
-			"releases this lock by itself when its last process exits -- the "+
-			"kernel does that, so there is never a stale lock to clear and no "+
-			"--force to reach for.",
-		path, explanation, who)
+	return refusal.New(rule, "a composition is already using %s.\n%s\n%s\n%s",
+		path, explanation, who, advice)
 }
 
 // Holder is a process holding a flock.
