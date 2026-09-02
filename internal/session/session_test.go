@@ -839,26 +839,35 @@ func TestTheEndingReachesAStoppedProcessToo(t *testing.T) {
 
 // -- the code repository's own path, inside a real session --------------------
 
-// No descriptor of the code repository, the composed tree's directory or
-// the handshake pipe reaches the workload. The lock descriptors were
-// opened through the raw path before the freeze existed, and a path
-// resolved through a descriptor uses the mount the descriptor was opened
-// on -- so a workload holding one wrote the code repository at
-// /proc/self/fd/4/... behind the frozen path, measured, while the
-// polarity check passed. The lock lives on the open file description the
-// init keeps; the child gets no copy.
+// No descriptor of camp's reaches the workload: not the handshake pipe,
+// not either lock. The lock descriptors were opened through the raw path
+// before the freeze existed, and a path resolved through a descriptor
+// uses the mount the descriptor was opened on -- so a workload holding one
+// wrote the code repository at /proc/self/fd/4/... behind the frozen
+// path, measured, while the polarity check passed. The lock lives on the
+// open file description the init keeps; the child gets no copy.
+//
+// Named objects, not a class. A workload inherits whatever its caller
+// handed camp without close-on-exec -- a CI harness holds pipes at high
+// descriptors, and a plain shell started from the same place holds them
+// too (measured: the same two pipes through 'camp run' and through 'sh').
+// Those are the caller's, and camp does not close a caller's descriptors
+// on the caller's program. So the pipes this process holds before the
+// session starts are excluded by inode, and any other pipe in the workload
+// is one camp made.
 func TestTheWorkloadInheritsNoLockOrPipeDescriptor(t *testing.T) {
 	composition := prepare(t)
 	upper := composition.Config.UpperPath()
 	live := composition.Config.Live()
+	inherited := ownPipes(t)
 
-	// Every descriptor above the three standard ones, with its target, then
-	// the write the leak allowed. The write goes through the descriptor
-	// number the init holds the upper lock on; with no descriptor there it
-	// cannot resolve at all. The standard three are the test's own -- under
-	// go test, stderr is a pipe -- and say nothing about the init.
+	// Every descriptor above the standard three with its target, then a
+	// write attempted through each of them: through a directory descriptor
+	// of the repository it would land, through anything else it cannot.
 	script := `for fd in /proc/self/fd/*; do
-  n=${fd##*/}; [ "$n" -gt 2 ] && echo "fd $n -> $(readlink "$fd")"
+  n=${fd##*/}; [ "$n" -gt 2 ] || continue
+  echo "fd $n -> $(readlink "$fd")"
+  echo x > "$fd/via-descriptor" 2>/dev/null
 done
 echo x > /proc/self/fd/4/via-descriptor 2>/dev/null; echo via=$?`
 	text, status, err := composition.output(t, []string{"/bin/sh", "-c", script})
@@ -867,22 +876,46 @@ echo x > /proc/self/fd/4/via-descriptor 2>/dev/null; echo via=$?`
 		t.Fatalf("the session failed: status=%d err=%v\n%s", status, err, text)
 	}
 	for _, line := range strings.Split(text, "\n") {
-		if strings.HasSuffix(line, "-> "+upper) || strings.HasSuffix(line, "-> "+live) {
+		_, target, found := strings.Cut(line, " -> ")
+		if !found {
+			continue
+		}
+		if target == upper || target == live {
 			t.Errorf("the workload holds a descriptor for the locked directory (%s). "+
 				"The lock descriptors stay with the init: through one of them the "+
 				"code repository is reachable writable behind the frozen path", line)
 		}
-		if strings.Contains(line, "-> pipe:") {
-			t.Errorf("the workload holds a pipe descriptor (%s); the handshake pipe "+
-				"is the init's", line)
+		if strings.HasPrefix(target, "pipe:") && !inherited[target] {
+			t.Errorf("the workload holds a pipe this process did not hand the "+
+				"session (%s): a pipe camp made, which is the handshake pipe and "+
+				"belongs to the init", line)
 		}
 	}
 	if !strings.Contains(text, "via=") || strings.Contains(text, "via=0") {
 		t.Errorf("a write through /proc/self/fd/4 succeeded inside the session:\n%s", text)
 	}
 	if _, err := os.Stat(filepath.Join(upper, "via-descriptor")); err == nil {
-		t.Error("the write through the inherited descriptor landed in the code repository")
+		t.Error("a write through an inherited descriptor landed in the code repository")
 	}
+}
+
+// ownPipes is every pipe this process holds, by the kernel's name for it,
+// so the test can tell a pipe the environment handed it from one the
+// session made.
+func ownPipes(t *testing.T) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipes := map[string]bool{}
+	for _, entry := range entries {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
+		if err == nil && strings.HasPrefix(target, "pipe:") {
+			pipes[target] = true
+		}
+	}
+	return pipes
 }
 
 // Inside a session the code repository's raw path refuses writes, and the
