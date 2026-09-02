@@ -221,11 +221,8 @@ func Expand(built plan.Plan, out Output) plan.Plan {
 				Target: rel.Join(built.Live),
 				SourceParts: append(append([]string{}, islandsMount.SourceParts...),
 					entry.Name),
-				TargetParts: append(append([]string{}, built.Config.Merged.Components()...),
-					rel.Components()...),
 				Rel:    rel,
 				InLive: true,
-				Type:   entry.Type,
 				Step:   islandsMount.Step,
 				Why: "an island: " + entry.Name + " is contributed by " +
 					islandsMount.Source + " and stands read-only in the writable " +

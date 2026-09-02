@@ -84,8 +84,6 @@ func (b *builder) freezeLower() {
 		Source:      b.lowerPath,
 		Target:      b.lowerPath,
 		SourceParts: b.lowerParts,
-		TargetParts: b.lowerParts,
-		Type:        pathx.Dir,
 		Step:        -1,
 		Why: fmt.Sprintf("hold %s read-only while the composition is up, so a "+
 			"process inside cannot write the workspace even by its absolute path",
@@ -97,17 +95,15 @@ func (b *builder) freezeLower() {
 // repository on top and writable.
 func (b *builder) composedTree() {
 	b.add(Mount{
-		Kind:        Overlay,
-		Role:        Composed,
-		Target:      b.live,
-		TargetParts: b.liveParts,
-		InLive:      true,
-		Type:        pathx.Dir,
-		Step:        -1,
-		Lower:       []string{b.lowerPath},
-		Upper:       b.upperPath,
-		Work:        b.plan.OverlayWork,
-		Xattr:       UserXattr,
+		Kind:   Overlay,
+		Role:   Composed,
+		Target: b.live,
+		InLive: true,
+		Step:   -1,
+		Lower:  []string{b.lowerPath},
+		Upper:  b.upperPath,
+		Work:   b.plan.OverlayWork,
+		Xattr:  UserXattr,
 		Why: "the composed tree: the workspace read-only underneath, the code " +
 			"repository on top, where every ordinary write lands",
 	})
@@ -136,10 +132,8 @@ func (b *builder) rootGuards() {
 			Source:      filepath.Join(b.lowerPath, entry.Name),
 			Target:      filepath.Join(b.live, entry.Name),
 			SourceParts: join(b.lowerParts, entry.Name),
-			TargetParts: join(b.liveParts, entry.Name),
 			Rel:         pathx.Rel{}.Append(entry.Name),
 			InLive:      true,
-			Type:        entry.Type,
 			Step:        -1,
 			Why: fmt.Sprintf("%q comes from the workspace; bound back read-only so "+
 				"that writing it through the composed tree fails loudly instead of "+
@@ -188,7 +182,6 @@ func (b *builder) declared(index int, step config.Step, entry config.Entry) Moun
 		Source:      sourcePath(b.cfg, entry.Source),
 		Target:      entry.Target.Join(b.live),
 		SourceParts: sourceParts(b.cfg, entry.Source),
-		TargetParts: join(b.liveParts, entry.Target.Components()...),
 		Rel:         entry.Target,
 		InLive:      true,
 		Step:        index,
@@ -229,10 +222,8 @@ func (b *builder) store(index int, target pathx.Rel, why string) Mount {
 		Source:      storePath(b.plan.Storage, target),
 		Target:      target.Join(b.live),
 		SourceParts: join(b.storeParts, target.Components()...),
-		TargetParts: join(b.liveParts, target.Components()...),
 		Rel:         target,
 		InLive:      true,
-		Type:        pathx.Dir,
 		Step:        index,
 		Why:         why,
 	}
@@ -250,10 +241,8 @@ func (b *builder) artefact(index int) {
 		Source:      b.plan.ExcludeFile(),
 		Target:      rel.Join(b.live),
 		SourceParts: []string{config.Dir, "work", b.hash, "exclude"},
-		TargetParts: join(b.liveParts, rel.Components()...),
 		Rel:         rel,
 		InLive:      true,
-		Type:        pathx.File,
 		Step:        index,
 		Why: "the generated exclude, mounted over the composed tree's copy " +
 			"so that git run from here ignores the workspace's names -- the " +

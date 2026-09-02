@@ -99,27 +99,19 @@ type Mount struct {
 	// Target is absolute.
 	Target string
 
-	// SourceParts and TargetParts are the same two paths written as
-	// components beneath the environment root.
-	//
-	// They are what every resolution actually uses: opened one component
-	// at a time, descriptor-relative, following no symlink and never
-	// leaving the root. The absolute strings above are for messages. A
-	// check made on a string and a mount made on a path are two different
-	// objects whenever any component of the path is a link, and that gap
-	// is exactly where a swapped component would slip through.
+	// SourceParts is the source written as components beneath the
+	// environment root, which is how every *check* of it resolves: one
+	// component at a time, descriptor-relative, following no symlink and
+	// never leaving the root. The mount itself is made from the absolute
+	// strings above, by name -- mountx.OpenOperands says why that is
+	// honest, and spec §6 says what would make it stop being so.
 	SourceParts []string
-	TargetParts []string
 	// Rel is the target relative to the merged root. It is the zero value
 	// for the one mount that lives outside the tree -- the workspace's
 	// self-bind.
 	Rel pathx.Rel
 	// InLive is false only for that same mount.
 	InLive bool
-
-	// Type is what both ends have to be: a directory bind onto a
-	// directory, a file bind onto a file.
-	Type pathx.Type
 
 	// Step is the index of the configuration step this came from, or -1
 	// for the frame.

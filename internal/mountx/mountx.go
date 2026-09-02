@@ -253,12 +253,24 @@ func (o Operands) Close() {
 	}
 }
 
-// OpenOperands opens an overlay's operands by path.
+// OpenOperands opens an overlay's operands by path -- and this is where the
+// reason lives for every mount in this package being made by name while
+// every check is made descriptor-relative (owner decision, 2026-09-02;
+// spec §6).
 //
-// By path, because the caller resolved them itself and is mounting in its
-// own namespace: there is no privilege boundary between the check and the
-// mount, and the paths came out of a plan that refuses a repository which
-// is a symlink.
+// The plan's checks open each operand one component at a time with
+// openat2(RESOLVE_NO_SYMLINKS|RESOLVE_BENEATH), and refuse a symlink
+// anywhere in it. The mount then passes the name, which the kernel
+// resolves. That split is honest for one reason: there is no privilege
+// boundary between the check and the mount. The process mounting is the
+// caller, in a mount namespace only the caller's own processes can enter,
+// so a component swapped in between gains nobody anything the caller could
+// not do by hand -- and the verification measures the outcome by path
+// afterwards, however the name resolved. Mounting by descriptor as well
+// would be machinery with no caller. If a mode that mounts with more
+// privilege than its caller ever returns, the descriptor mount returns
+// with it: that was the privileged helper's open_tree/move_mount shape,
+// and the boundary it crossed was its reason.
 func OpenOperands(m plan.Mount) (Operands, error) {
 	ends := NoOperands()
 	// Opened from the description the mount is performed from, so the set
