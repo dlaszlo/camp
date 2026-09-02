@@ -16,8 +16,8 @@ import (
 // the final component that can change underneath, and the two changes
 // that matter are a directory becoming a file and a file becoming a
 // directory. Absence was folded together with both of them, so a removal
-// that met the replacement, and a chown that met it, reported success
-// over an object neither of them had touched.
+// that met the replacement reported success over an object it had not
+// touched.
 //
 // The swap is made in afterTypeCheck, the seam that exists for this: a
 // test cannot otherwise be inside that window, and a race arranged with
@@ -149,36 +149,6 @@ func TestRemoveTreeRefusesANameThatKeepsChangingType(t *testing.T) {
 	err := area.RemoveTree("victim")
 	if !errors.Is(err, ErrChangedType) {
 		t.Fatalf("RemoveTree returned %v, wanted a refusal naming the race", err)
-	}
-}
-
-// Chown refuses instead of retrying, because it is asked to give a known
-// subtree to a user and a replacement is not that subtree. It used to
-// report the whole tree given away without descending into any of it.
-func TestChownRefusesADirectoryReplacedByAFile(t *testing.T) {
-	area, path := hostile(t)
-	tree := filepath.Join(path, "tree")
-	if _, err := area.MkdirAll("tree"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tree, "inside"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	swapOnce(t, "tree", func() {
-		if err := os.RemoveAll(tree); err != nil {
-			t.Error(err)
-		}
-		if err := os.WriteFile(tree, []byte("a replacement"), 0o644); err != nil {
-			t.Error(err)
-		}
-	})
-
-	// The invoking user's own ids: an unprivileged process may give a file
-	// to the user who already owns it, which is enough to reach the walk.
-	err := area.Chown(os.Getuid(), os.Getgid(), "tree")
-	if !errors.Is(err, ErrChangedType) {
-		t.Fatalf("Chown returned %v, wanted a refusal naming the race", err)
 	}
 }
 

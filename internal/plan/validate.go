@@ -30,14 +30,13 @@ import (
 // really meet, so a target that an earlier mount supplies counts as
 // present, and a later mount that would silently cover an earlier one is
 // refused here rather than discovered as a missing file at midnight.
-func Prepare(cfg config.Config, mode Mode) (Plan, refusal.List) {
-	c := &checker{cfg: cfg, mode: mode}
+func Prepare(cfg config.Config) (Plan, refusal.List) {
+	c := &checker{cfg: cfg}
 	return c.run()
 }
 
 type checker struct {
 	cfg     config.Config
-	mode    Mode
 	refused refusal.List
 	// warnings are what this pass found that stops nothing. They join the
 	// ones the inventory finds, and the composing commands say them.
@@ -96,7 +95,7 @@ func (c *checker) run() (Plan, refusal.List) {
 				"git is installed and can read it.", c.upper, err)
 	}
 
-	built := Build(c.cfg, c.mode, c.live, Hash(c.live), lowerRoot, upperRoot)
+	built := Build(c.cfg, c.live, Hash(c.live), lowerRoot, upperRoot)
 	built.Environment = c.checkSessionEnvironment()
 	c.checkSequence(built)
 	c.checkSourcePolicy()
@@ -146,13 +145,8 @@ func usable(repositories map[string]pathx.Info, names ...string) bool {
 // one process, the one that starts the workload, and it resolves them
 // again from its own inherited snapshot. What survives this function is
 // what a report may print: the expression, rebuilt safely.
-//
-// The privileged mode resolves nothing: it starts no workload, so the
-// section is announced there rather than applied, and refusing a
-// reference nothing would read would be refusing a composition for a
-// reason that does not apply to it.
 func (c *checker) checkSessionEnvironment() []Variable {
-	if c.mode != Namespace || !c.cfg.Session.Declares() {
+	if !c.cfg.Session.Declares() {
 		return nil
 	}
 	base := envx.NewBase(os.Environ(), c.live)
@@ -360,8 +354,9 @@ func (c *checker) checkRepositoryNesting(found map[string]pathx.Info) {
 // It has to exist, because a lock needs an inode to sit on and a bind
 // cannot create its own mount point. It has to be empty, because an
 // overlay laid over user content hides that content for the whole session
-// and only down would ever name it -- by which time a day's work has been
-// done on top of a tree that was quietly missing something.
+// and nothing would name it until the session ended -- by which time a
+// day's work has been done on top of a tree that was quietly missing
+// something.
 func (c *checker) checkLive(found map[string]pathx.Info) (string, bool) {
 	absolute := c.cfg.Live()
 	info, err := pathx.StatBeneath(c.cfg.Env, c.cfg.Merged.Components())
@@ -424,11 +419,12 @@ func (c *checker) checkLive(found map[string]pathx.Info) (string, bool) {
 		c.refused.Add("live-not-empty",
 			"the composed tree's directory %s is not empty. It holds: %s.\n"+
 				"The overlay would be laid straight over that content and hide it "+
-				"for the whole session -- you would notice at 'camp down', after a "+
-				"day of work on a tree that was quietly missing something. Move that "+
-				"content somewhere else, or point merged: at an empty directory.\n"+
-				"If it is the residue of a composition that did not come down "+
-				"cleanly, run 'camp status' first.",
+				"for the whole session -- you would notice when the session ended, "+
+				"after a day of work on a tree that was quietly missing something. "+
+				"Move that content somewhere else, or point merged: at an empty "+
+				"directory.\nIf it is not something written there but something "+
+				"mounted there, 'camp status' lists it: camp did not make it, and "+
+				"it is unmounted the way it was mounted.",
 			absolute, strings.Join(names, ", "))
 		// Refused, and the derivation carries on. This one is a precondition
 		// for mounting, not a fault in the path: the directory is a real
@@ -508,7 +504,7 @@ func (c *checker) checkAllowedDirectories(lowerRoot, upperRoot []pathx.Info) {
 			"the two merge there: what the workspace provides inside it is "+
 			"writable through the composed tree, and a write copies it into the "+
 			"code repository. camp names each of those paths in the exclude and "+
-			"the gate looks inside the directory at every up, which catches the "+
+			"the gate looks inside the directory at every start, which catches the "+
 			"trace rather than preventing it.", entry.Name)
 	}
 }

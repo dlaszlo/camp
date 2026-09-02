@@ -33,9 +33,9 @@ session:
 `
 }
 
-func prepared(t *testing.T, env *testenv.Env, yaml string, mode plan.Mode) plan.Plan {
+func prepared(t *testing.T, env *testenv.Env, yaml string) plan.Plan {
 	t.Helper()
-	built, refused := plan.Prepare(env.Config(t, yaml), mode)
+	built, refused := plan.Prepare(env.Config(t, yaml))
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}
@@ -50,7 +50,7 @@ func prepared(t *testing.T, env *testenv.Env, yaml string, mode plan.Mode) plan.
 func TestNoInheritedValueReachesPlanOrExplain(t *testing.T) {
 	t.Setenv("TEST_SENTINEL_SOURCE", sentinel)
 	env := testenv.NewEnv(t)
-	built := prepared(t, env, declaring(env), plan.Namespace)
+	built := prepared(t, env, declaring(env))
 
 	for name, text := range map[string]string{
 		"plan":    report.Plan(built),
@@ -75,7 +75,7 @@ func TestNoInheritedValueReachesPlanOrExplain(t *testing.T) {
 func TestThePlansSessionBlockSaysWhatWillBeApplied(t *testing.T) {
 	t.Setenv("TEST_SENTINEL_SOURCE", sentinel)
 	env := testenv.NewEnv(t)
-	text := report.Plan(prepared(t, env, declaring(env), plan.Namespace))
+	text := report.Plan(prepared(t, env, declaring(env)))
 
 	for _, want := range []string{
 		"CAMP_LIVE", "PWD", "SESSION_TOKEN",
@@ -101,57 +101,18 @@ session:
     ALPHA: "one"
     ZULU: "two"
     MIDDLE: "$HOME"
-`, plan.Namespace))
+`))
 	other := report.Plan(prepared(t, env, env.YAML()+`
 session:
   environment:
     MIDDLE: "$HOME"
     ZULU: "two"
     ALPHA: "one"
-`, plan.Namespace))
+`))
 
 	if one != other {
 		t.Errorf("two orderings of one map produced different plans:\n%s\n---\n%s",
 			one, other)
-	}
-}
-
-// The privileged mode starts no session. It says so once -- not applied,
-// not refused, not silently skipped -- and prints no session block.
-func TestThePrivilegedModeAnnouncesTheSectionExactlyOnce(t *testing.T) {
-	env := testenv.NewEnv(t)
-	cases := map[string]string{
-		"a populated section": env.YAML() + "\nsession:\n  environment:\n    A: \"x\"\n",
-		"an empty map":        env.YAML() + "\nsession:\n  environment: {}\n",
-		"identity alone":      env.YAML() + "\nsession:\n  identity: uidmap\n",
-	}
-	for name, yaml := range cases {
-		t.Run(name, func(t *testing.T) {
-			built := prepared(t, env, yaml, plan.Privileged)
-			for where, text := range map[string]string{
-				"plan":    report.Plan(built),
-				"explain": report.Explain(built),
-			} {
-				if count := strings.Count(text, "starts no session"); count != 1 {
-					t.Errorf("%s carries the announcement %d times:\n%s", where, count, text)
-				}
-				if strings.Contains(text, "CAMP_LIVE =") {
-					t.Errorf("%s printed a session block in the mode that starts no "+
-						"session:\n%s", where, text)
-				}
-			}
-		})
-	}
-}
-
-// No section, nothing to announce. A mode that says something about a
-// section that is not there would be noise, and noise is what makes the
-// announcement worth reading when it does appear.
-func TestNothingIsAnnouncedWithoutASection(t *testing.T) {
-	env := testenv.NewEnv(t)
-	built := prepared(t, env, "", plan.Privileged)
-	if strings.Contains(report.Plan(built), "starts no session") {
-		t.Error("a configuration with no session: section was announced anyway")
 	}
 }
 
@@ -170,14 +131,13 @@ func TestTheCommentedSessionBlocksUncommentIntoSomethingCampReads(t *testing.T) 
 		"examples/config.yml":    string(example),
 	} {
 		t.Run(name, func(t *testing.T) {
-			// The four things A5 and the build plan ask every introduction
-			// of the key to carry: the grammar, the distinction from env:,
-			// what the other mode does with the section, and where the
-			// worked recipe is.
+			// The three things every introduction of the key has to carry:
+			// the grammar, the distinction from env:, and where the worked
+			// recipe is.
 			for _, want := range []string{
 				"session:", "environment:", "$CAMP_LIVE",
 				"root directory", "process environment",
-				"camp up", "docs/install.md",
+				"docs/install.md",
 			} {
 				if !strings.Contains(unwrapped(text), want) {
 					t.Errorf("%s does not carry %q", name, want)
@@ -297,14 +257,14 @@ func TestWhatIsWrongIsMarkedAsWrong(t *testing.T) {
 	say := report.Narrate(&out)
 
 	say.Checked(3)
-	say.Note("this mode starts no session")
-	say.Failed("camp up failed. Nothing of this composition is mounted.")
+	say.Note("only your own id is mapped")
+	say.Failed("camp run failed. Nothing of this composition is mounted.")
 
 	text := out.String()
 	for marker, want := range map[string]string{
 		report.MarkOK:    "checked:",
-		report.MarkNote:  "starts no session",
-		report.MarkError: "camp up failed",
+		report.MarkNote:  "own id is mapped",
+		report.MarkError: "camp run failed",
 	} {
 		var found bool
 		for _, line := range strings.Split(text, "\n") {
@@ -340,7 +300,7 @@ func TestASilentNarratorIsSafe(t *testing.T) {
 	var say *report.Narrator
 	say.Locks("a", "b")
 	say.Identity(config.Session{})
-	say.Announcement(config.Session{Present: true})
+	say.Warnings([]string{"nothing"})
 }
 
 // What is worth knowing and stops nothing has its own marker, and a
@@ -389,11 +349,10 @@ func TestWhatStopsNothingIsStillSaid(t *testing.T) {
 // 'camp plan' is read by somebody deciding whether to run the thing it
 // describes, so a printed sequence that has drifted from the performed
 // one is worse than no sequence at all -- it reads as authority. This
-// was a fourth independent account of the overlay: the syscalls, the
-// record, the verification and this, none of them compared with any
-// other.
+// was a third independent account of the overlay: the syscalls, the
+// verification and this, none of them compared with any other.
 func TestThePrintedCallsAreTheCallsCampWouldMake(t *testing.T) {
-	built := prepared(t, testenv.NewEnv(t), "", plan.Namespace)
+	built := prepared(t, testenv.NewEnv(t), "")
 
 	var overlay plan.Mount
 	for _, mount := range built.Mounts {
@@ -427,45 +386,18 @@ func TestThePrintedCallsAreTheCallsCampWouldMake(t *testing.T) {
 	}
 }
 
-// The printed calls are the calls of the mode they are printed for.
-//
-// The two halves of camp make a bind differently, and for a reason: the
-// privileged one has a boundary between the check and the mount, so it
-// takes a detached copy of the source through a descriptor and attaches
-// it to the descriptor it checked, then speaks to the mount it made
-// rather than to the name it landed on. Printing MS_BIND there described
-// a sequence camp stopped performing -- on the one command somebody
-// reads to decide whether to run it.
-func TestThePrintedCallsAreTheOnesThatModeMakes(t *testing.T) {
-	env := testenv.NewEnv(t)
-
-	inside := report.Syscalls(prepared(t, env, "", plan.Namespace))
-	elevated := report.Syscalls(prepared(t, env, "", plan.Privileged))
-
-	// The namespace mode binds by name, inside a namespace of its own,
-	// where there is no boundary to lose anything across.
-	if !strings.Contains(inside, `, "", MS_BIND, "")`) {
-		t.Errorf("the namespace mode's binds are not printed as binds:\n%s", inside)
+// The printed binds are the binds camp makes: mount(2) by name, inside a
+// namespace of its own, where there is no boundary between the check and
+// the mount to lose anything across. camp once printed a detached-copy
+// sequence here for a half of itself that no longer exists, and a plan
+// that prints calls camp does not make is worse than no plan -- it is read
+// to decide whether to run the thing it describes.
+func TestThePrintedBindsAreTheBindsCampMakes(t *testing.T) {
+	printed := report.Syscalls(prepared(t, testenv.NewEnv(t), ""))
+	if !strings.Contains(printed, `, "", MS_BIND, "")`) {
+		t.Errorf("the binds are not printed as binds:\n%s", printed)
 	}
-	if strings.Contains(inside, "open_tree(") {
-		t.Errorf("the namespace mode does not take detached copies, and its "+
-			"plan says it does:\n%s", inside)
-	}
-
-	// The privileged mode takes a copy and attaches it, and addresses
-	// what it made rather than the name.
-	if strings.Contains(elevated, `, "", MS_BIND, "")`) {
-		t.Errorf("the privileged mode makes no bind by name, and its plan "+
-			"says it does:\n%s", elevated)
-	}
-	for _, call := range []string{
-		"open_tree(fd of ",
-		"OPEN_TREE_CLONE|AT_EMPTY_PATH|OPEN_TREE_CLOEXEC",
-		"move_mount(clone, \"\", fd of ",
-		`mount("", "/proc/self/fd/<the mount just made>", "", MS_PRIVATE, "")`,
-	} {
-		if !strings.Contains(elevated, call) {
-			t.Errorf("the privileged plan does not print %q:\n%s", call, elevated)
-		}
+	if strings.Contains(printed, "open_tree(") || strings.Contains(printed, "/proc/self/fd/") {
+		t.Errorf("the plan prints calls camp does not make:\n%s", printed)
 	}
 }

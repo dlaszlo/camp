@@ -3,23 +3,21 @@
 # Everything camp can be measured by, on a machine that exists for the
 # length of one run and belongs to nobody.
 #
-# Why this exists. Three things used to need a person: sudo's password,
-# which cannot be typed without a terminal (C33); the apparmor gate, which
-# grants the namespace permission to one *installed* binary path and so
-# needs an install; and the fact that the privileged mode is machine-wide,
-# so it cannot run beside anybody's work. A throwaway virtual machine
-# answers all three at once. Inside it, passwordless sudo is not a hole
-# because there is nothing behind it, an install is free, and the machine
-# is the only thing on the machine.
+# Why this exists. The apparmor gate grants the namespace permission to
+# one *installed* binary path, so the tests that need a real composition
+# cannot run from a checkout -- they need an install, and an install on a
+# machine somebody works on is not a thing a test may do. A throwaway
+# virtual machine answers that: inside it an install is free, the sudo
+# the install needs has nothing behind it, and the machine is the only
+# thing on the machine.
 #
-# What it is not: a container. The privileged mode needs a real filesystem
-# for the trusted.overlay.* namespace, a systemd machine so that / is
+# What it is not: a container. camp needs a systemd machine so that / is
 # shared and the propagation rules camp is written around actually apply,
-# and no overlay underneath its own overlay. A container fails all three
-# and would measure something else while looking like it had measured this.
+# and no overlay underneath its own overlay. A container fails both and
+# would measure something else while looking like it had measured this.
 #
 #   ./run                 prepare if needed, then run every stage
-#   ./run 50-kill-matrix  one stage, by name
+#   ./run 50-one-ordinary-run   one stage, by name
 #   ./run --shell         boot and leave an ssh session open, for a person
 #   ./run --rebuild       throw the prepared image away and make it again
 #

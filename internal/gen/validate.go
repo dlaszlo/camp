@@ -14,9 +14,9 @@ import (
 // Validate treats the generation step's output as hostile data.
 //
 // It has to be. Whoever can edit the configuration can choose the
-// program that runs at prepare, and in the privileged mode the mounts
-// that follow are made by root. A generator that could name any entry it
-// liked would be steering a privileged mount, so nothing it produced
+// program that runs at prepare, and the mounts that follow are made by a
+// process holding the mount capability. A generator that could name any
+// entry it liked would be steering those mounts, so nothing it produced
 // steers one unchecked.
 //
 // Static validation before generation checks everything configured; this

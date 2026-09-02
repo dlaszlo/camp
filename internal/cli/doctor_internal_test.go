@@ -47,7 +47,7 @@ func doctor(t *testing.T) (string, string, int) {
 //
 // doctor read the table, threw the error away and carried on -- so it
 // printed that the configuration is sound and exited 0 on the same host
-// state that makes 'camp up', 'camp status' and 'camp down' refuse.
+// state that makes 'camp run', 'camp shell' and 'camp status' refuse.
 // Whoever ran doctor to find out why the others were failing was told
 // nothing was wrong.
 func TestDoctorSaysWhenTheMountTableCannotBeRead(t *testing.T) {

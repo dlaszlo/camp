@@ -554,7 +554,8 @@ func (r *Repo) Worktrees() ([]Worktree, error) {
 // These are the ones whose registration dies with the composition: git
 // stores a worktree's git directory as an absolute path and compares it
 // as a string, so a worktree created through the live tree records the
-// live path on both sides, and after down neither pointer resolves. The
+// live path on both sides, and once the session has ended neither pointer
+// resolves. The
 // checkout's files are intact; git simply cannot see them any more.
 func WorktreesUnder(worktrees []Worktree, live string) []Worktree {
 	var inside []Worktree

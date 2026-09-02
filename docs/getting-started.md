@@ -5,7 +5,7 @@ real: you can type it, and at the end you will have a directory that
 behaves the way the rest of the documentation describes.
 
 Before you start, install camp — see [install.md](install.md) — and check
-`camp doctor` says the namespace mode is available.
+`camp doctor` says this machine can run it.
 
 ## The example
 
@@ -47,12 +47,10 @@ git add -A && git commit -m 'the development environment'
 cd ..
 ```
 
-And an empty directory for the composed tree. It has to exist, and it has
-to be empty — camp will not lay a tree over content it would then hide:
-
-```
-mkdir shop-live
-```
+The composed tree's directory, `shop-live`, camp makes for you at the
+first start: git cannot record an empty directory, so a clone of an
+environment could never bring one. If you make it yourself it has to be
+empty — camp will not lay a tree over content it would then hide.
 
 ## 2. The configuration
 

@@ -147,12 +147,11 @@ func orphans(cfg config.Config) []Note {
 // behind.
 //
 // OverlayFS creates a directory of its own inside the workdir it is
-// given, and makes it mode 000 so that nothing wanders in. The namespace
-// mode has no teardown step that could remove it -- the kernel discards
-// the mounts when the session ends, but the directory is on the real
-// filesystem and outlives them, and while the overlay is still mounted it
-// is in use and cannot be removed anyway. So the next 'camp run' sweeps
-// it.
+// given, and makes it mode 000 so that nothing wanders in. A session has
+// no teardown step that could remove it -- the kernel discards the mounts
+// when the session ends, but the directory is on the real filesystem and
+// outlives them, and while the overlay is still mounted it is in use and
+// cannot be removed anyway. So the next 'camp run' sweeps it.
 //
 // Somebody looking at their own filesystem meanwhile finds a directory
 // they cannot open, owned by them, inside a tool's scratch space. That is
@@ -188,8 +187,8 @@ func leftoverWork(cfg config.Config) []Note {
 				"made unreadable so that nothing wanders into it. It is empty of " +
 				"anything you own. The next 'camp run' in this environment removes " +
 				"it; camp does not remove it sooner because while the composition " +
-				"is up the directory is in use, and a namespace session has no " +
-				"teardown step of its own.",
+				"is up the directory is in use, and a session has no teardown " +
+				"step of its own.",
 		})
 	}
 	return notes

@@ -1,10 +1,11 @@
 #!/bin/bash
-# Up and down, once, with nothing in the way.
+# One session, with nothing in the way.
 #
 # What it proves is small and it is the thing everything after it rests on:
-# the mount path and the teardown path both work on a machine that has
-# never had a composition on it. A failure here is worth reading on its own
-# rather than from inside a driver's census.
+# a composition comes up inside a session on a machine that has never had
+# one, the workload runs in it, and when the session ends the kernel has
+# taken every mount with it. A failure here is worth reading on its own
+# rather than from inside a later stage's census.
 set -eu
 src=${CAMP_SRC:-$HOME/camp}
 measure=${CAMP_MEASURE:-$src/measure}
@@ -12,15 +13,24 @@ env=${CAMP_ENV:-$HOME/campcheck}
 
 cd "$env"
 
-camp up
-camp down
+# From inside, the composed tree holds both repositories at once; the
+# workspace's file is there and read-only.
+seen=$(camp run -- sh -c 'ls; printf x >> notes 2>&1 || echo "notes: read-only"')
+case "$seen" in
+    *README.md*notes*read-only*) ;;
+    *)
+        echo "the session did not show the composed tree, or the workspace was writable:" >&2
+        printf '%s\n' "$seen" >&2
+        exit 1
+        ;;
+esac
 
-left=$(awk -v e="$env" '$5 == e || index($5, e "/") == 1 ||
-                        $5 == "/run/camp" || index($5, "/run/camp/") == 1 {print $1, $5}' \
-       /proc/self/mountinfo)
+# And from outside, afterwards, nothing: the namespace took the mounts.
+left=$(awk -v e="$env" '$5 == e || index($5, e "/") == 1 {print $1, $5}' /proc/self/mountinfo)
 if [ -n "$left" ]; then
-    echo "still mounted after an ordinary teardown:" >&2
+    echo "still mounted after the session ended:" >&2
     echo "$left" >&2
     exit 1
 fi
-echo "   clean: nothing of camp's is mounted"
+[ -z "$(ls -A "$env/live")" ] || { echo "the composed tree's directory is not empty after the session" >&2; exit 1; }
+echo "   clean: the tree was there inside, and nothing of camp's is mounted now"

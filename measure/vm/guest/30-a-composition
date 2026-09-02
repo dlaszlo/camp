@@ -53,5 +53,5 @@ YAML
 
 cd "$env"
 camp accept
-camp plan --privileged >/dev/null
+camp plan >/dev/null
 echo "   $env is composed of two repositories and camp accepted it"

@@ -12,11 +12,10 @@
 // never by `up`. A refresh that happened silently on the way past would
 // swallow the very signal the file exists to raise.
 //
-// At up a new lower root entry blocks and a type change blocks; a
-// disappeared entry or a change on the upper side warns. At down, and at
-// the end of a namespace session, the same comparison runs and only
-// reports -- the end of a session is when the cause is still fresh, and a
-// teardown that refused would wall the user in.
+// At a start a new lower root entry blocks and a type change blocks; a
+// disappeared entry or a change on the upper side warns. At the end of a
+// session the same comparison runs and only reports -- that is when the
+// cause is still fresh, and there is nothing left to refuse with.
 //
 // It shares its enumeration with the exclude, so the two cannot drift
 // apart and start describing different sets.
@@ -318,7 +317,7 @@ func Check(root pathx.Root, current Snapshot, code Ignoring) (refused refusal.Li
 		refused.Add("inventory-missing",
 			"there is no accepted snapshot of the two repositories' root "+
 				"entries at %s.\n"+
-				"camp compares against it at every up, because a new name at the "+
+				"camp compares against it at every start, because a new name at the "+
 				"workspace root changes what the read-only binds protect and what "+
 				"the exclude covers -- and that should be a change somebody "+
 				"decided. Look at what the two roots hold, and then accept it:\n"+

@@ -203,8 +203,8 @@ func Adopt(built plan.Plan) (Output, refusal.List) {
 // succeeds and exists in no repository -- the design's worst failure
 // shape. An entry added is a name that exists but that the source does
 // not contribute -- the source's own runtime junk, or a file somebody
-// dropped there -- and mounting it is the generator steering a mount that
-// root makes in the privileged mode.
+// dropped there -- and mounting it is the generator steering a mount on
+// nothing but its own say-so.
 //
 // camp has the right answer in its hand either way: it derives the same
 // set independently, from what the repository tracks, which is what
@@ -249,8 +249,8 @@ func matchIslands(built plan.Plan, want, got Output) refusal.List {
 					"not contribute: %s.\n"+
 					"An island stands for content the source repository tracks. A "+
 					"name that merely exists there -- the source's own runtime file, "+
-					"something somebody dropped in -- would be mounted on camp's "+
-					"say-so, by root in the privileged mode.\ncamp's own list: %s",
+					"something somebody dropped in -- would be mounted on the "+
+					"step's say-so alone.\ncamp's own list: %s",
 				len(extra), target, strings.Join(extra, ", "),
 				strings.Join(names(expected), ", "))
 		}

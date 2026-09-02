@@ -14,7 +14,7 @@ import (
 
 func prepare(t *testing.T, env *testenv.Env, yaml string) (plan.Plan, refusal.List) {
 	t.Helper()
-	return plan.Prepare(env.Config(t, yaml), plan.Namespace)
+	return plan.Prepare(env.Config(t, yaml))
 }
 
 func mustPass(t *testing.T, env *testenv.Env, yaml string) plan.Plan {
@@ -207,7 +207,8 @@ func TestANonEmptyLiveDirectoryIsRefused(t *testing.T) {
 		t.Error("the refusal should name what is in the way")
 	}
 	if !strings.Contains(list.Error(), "camp status") {
-		t.Error("the refusal should point at status, in case it is crash residue")
+		t.Error("the refusal should point at status, in case something is " +
+			"mounted there rather than written there")
 	}
 }
 
@@ -221,7 +222,7 @@ func TestAMissingLiveDirectoryIsAWarningAndNotARefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := env.Config(t, "")
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("a missing composed tree refused the composition:\n%v", refused)
 	}
@@ -433,13 +434,20 @@ func TestAConfigurationWithoutAGenerationStepIsLegal(t *testing.T) {
 	}
 }
 
-func TestModeChoosesTheXattrNamespace(t *testing.T) {
-	if got := plan.Namespace.Xattr(); got != "userxattr" {
-		t.Errorf("the namespace mode asks for %q", got)
+// The overlay asks for userxattr by name. The kernel forces it inside a
+// user namespace anyway, and the plan still has to say so, because a plan
+// that does not say what it means cannot be checked against what happened.
+func TestTheOverlayAsksForUserXattr(t *testing.T) {
+	built := mustPass(t, testenv.NewEnv(t), "")
+	for _, mount := range built.Mounts {
+		if mount.Kind == plan.Overlay {
+			if mount.Xattr != "userxattr" {
+				t.Errorf("the composed tree asks for %q", mount.Xattr)
+			}
+			return
+		}
 	}
-	if got := plan.Privileged.Xattr(); got != "nouserxattr" {
-		t.Errorf("the privileged mode asks for %q", got)
-	}
+	t.Fatal("the fixture plans no composed tree")
 }
 
 func TestWorkAndStorageDoNotShareAParent(t *testing.T) {
@@ -470,7 +478,7 @@ func TestGitFailingDuringPlanningStopsTheComposition(t *testing.T) {
 	// git to ask, and the code repository is unchanged.
 	t.Setenv("PATH", filepath.Join(env.Path, "nothing-here"))
 
-	_, refused := plan.Prepare(cfg, plan.Namespace)
+	_, refused := plan.Prepare(cfg)
 	if !refused.Has("git-unreadable") {
 		t.Fatalf("the composition was not refused for an unanswerable git; it "+
 			"answered %v", refused.Rules())
@@ -496,7 +504,7 @@ func TestATrackedContentAnswerThatFailsStopsTheComposition(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(index, 0o644) })
 
-	_, refused := plan.Prepare(cfg, plan.Namespace)
+	_, refused := plan.Prepare(cfg)
 	if !refused.Has("git-unreadable") {
 		t.Fatalf("a code repository that could not answer what it tracks was "+
 			"accepted; the rules that fired were %v", refused.Rules())
@@ -525,7 +533,7 @@ func TestAnAllowListedNameIsStillJudgedForWhatItIs(t *testing.T) {
 
 	cfg := env.Config(t, yaml)
 	env.Accept(t, cfg)
-	_, refused := plan.Prepare(cfg, plan.Namespace)
+	_, refused := plan.Prepare(cfg)
 	if !refused.Has("root-entry-symlink") {
 		t.Fatalf("an allow-listed symlink at the workspace root was accepted; "+
 			"the rules that fired were %v", refused.Rules())
@@ -549,7 +557,7 @@ func TestAnUnreadableAllowListedDirectoryStopsTheComposition(t *testing.T) {
 		"allow_overlap: [.gitignore, shared]", 1)
 	cfg := env.Config(t, yaml)
 	env.Accept(t, cfg)
-	_, refused := plan.Prepare(cfg, plan.Namespace)
+	_, refused := plan.Prepare(cfg)
 	if !refused.Has("overlap-unreadable") {
 		t.Fatalf("an unreadable allow-listed directory passed the gate; the "+
 			"rules that fired were %v", refused.Rules())

@@ -40,7 +40,7 @@ func TestColourIsOnlyOfferedWhereItIsHonest(t *testing.T) {
 func TestOnlyTheMarkerIsColoured(t *testing.T) {
 	sink := &Sink{terminal: &strings.Builder{}, colour: true}
 
-	painted := sink.paint(Marked(MarkError, "camp up failed"))
+	painted := sink.paint(Marked(MarkError, "camp run failed"))
 	if !strings.HasPrefix(painted, sgrBold+MarkError+sgrReset) {
 		t.Errorf("[ERROR] is not bold red on its own: %q", painted)
 	}

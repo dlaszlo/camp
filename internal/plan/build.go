@@ -17,8 +17,8 @@ import (
 // The order is the frame's, and the frame is not negotiable: the
 // workspace is frozen first, then the composed tree, then the derived
 // protections, and only then whatever the configuration asked for.
-func Build(cfg config.Config, mode Mode, live, hash string, lowerRoot, upperRoot []pathx.Info) Plan {
-	b := newBuilder(cfg, mode, live, hash, lowerRoot, upperRoot)
+func Build(cfg config.Config, live, hash string, lowerRoot, upperRoot []pathx.Info) Plan {
+	b := newBuilder(cfg, live, hash, lowerRoot, upperRoot)
 	b.freezeLower()
 	b.composedTree()
 	b.rootGuards()
@@ -46,12 +46,11 @@ type builder struct {
 	storeParts []string
 }
 
-func newBuilder(cfg config.Config, mode Mode, live, hash string, lowerRoot, upperRoot []pathx.Info) *builder {
+func newBuilder(cfg config.Config, live, hash string, lowerRoot, upperRoot []pathx.Info) *builder {
 	work := WorkDir(cfg.Env, hash)
 	return &builder{
 		plan: Plan{
 			Config:      cfg,
-			Mode:        mode,
 			Live:        live,
 			Hash:        hash,
 			Work:        work,
@@ -108,7 +107,7 @@ func (b *builder) composedTree() {
 		Lower:       []string{b.lowerPath},
 		Upper:       b.upperPath,
 		Work:        b.plan.OverlayWork,
-		Xattr:       b.plan.Mode.Xattr(),
+		Xattr:       UserXattr,
 		Why: "the composed tree: the workspace read-only underneath, the code " +
 			"repository on top, where every ordinary write lands",
 	})

@@ -122,22 +122,11 @@ func TestAnEscapedCommaInAPathSurvives(t *testing.T) {
 	}
 }
 
-func TestOverlaysFindsEveryCompositionOnAnUpper(t *testing.T) {
-	entries := read(t)
-	found := mountinfo.Overlays(entries, "/home/x/code")
-	if len(found) != 1 || found[0].Point != "/home/x/live" {
-		t.Errorf("the scan for an overlay on /home/x/code found %v", found)
-	}
-	if len(mountinfo.Overlays(entries, "/home/x/co,de")) != 1 {
-		t.Error("the escaped upperdir was not matched")
-	}
-}
-
-// The privileged mode's own shape, copied from a real run: the live path
-// carries a self-bind that gives the move a private parent, and the
-// composed tree sits on top of it. The overlay was made first and MS_MOVE
-// kept its identity, so it is listed first while standing highest -- the
-// parent field is the only thing that says so.
+// A stacked pair, copied from a real run: the live path carries a
+// self-bind, and the composed tree sits on top of it. The overlay was made
+// first and moved into place, and a move keeps a mount's identity, so it
+// is listed first while standing highest -- the parent field is the only
+// thing that says so.
 const stacked = `33 1 252:1 / /home rw,relatime - ext4 /dev/sda1 rw
 3575 3711 0:228 / /home/x/live rw,relatime - overlay overlay rw,lowerdir=/home/x/ws,upperdir=/home/x/code,workdir=/home/x/.camp/work/abc/work,nouserxattr
 3711 33 252:1 /home/x/live /home/x/live rw,relatime - ext4 /dev/sda1 rw
@@ -306,8 +295,8 @@ func TestOneRawByteSomewhereElseDoesNotHideCampsOwnMount(t *testing.T) {
 	if _, found := mountinfo.Top(entries, "/home/x/live"); !found {
 		t.Error("camp's own overlay was lost with the unrelated mount")
 	}
-	if len(mountinfo.Overlays(entries, "/home/x/code")) != 1 {
-		t.Error("the guard against a second composition on this upper found nothing")
+	if len(mountinfo.AllOverlays(entries)) != 1 {
+		t.Error("the overlay was lost among the other mounts")
 	}
 }
 
@@ -583,7 +572,7 @@ func TestAnOptionValueIsDecodedTheWayTheKernelWroteIt(t *testing.T) {
 	if !ok {
 		t.Fatal("the overlay was not parsed")
 	}
-	if got := mountinfo.UpperOf(overlay); got != "/home/z/up per" {
+	if got := mountinfo.UnescapeOption(overlay.Super["upperdir"]); got != "/home/z/up per" {
 		t.Errorf("an upper directory with a space came out as %q", got)
 	}
 	if got := mountinfo.WorkOf(overlay); got != `/home/z/wo\rk,x` {

@@ -1,20 +1,20 @@
-// Package reports carries what a namespace session found, out of a
-// namespace that is about to stop existing.
+// Package reports carries what a session found, out of a namespace that
+// is about to stop existing.
 //
-// The namespace mode has no down and leaves no state record: the
+// A session has no teardown command and leaves no state record: the
 // namespace is the state, and it vanishes with its last process. That is
-// its whole strength, and it left one hole -- the drift report, the
-// worktree repairs, the index scan, all the things `down` says in the
-// other mode had no way to be delivered here. A detached tmux session's
-// terminal is long gone by the time the last window closes, so printing
-// them was not enough.
+// its whole strength, and it leaves one hole -- the drift report, the
+// worktree repairs, the index scan, everything worth saying at the end of
+// a session has nowhere to be said. A detached tmux session's terminal is
+// long gone by the time the last window closes, so printing them was not
+// enough.
 //
 // So the session's init writes them to a file before it exits, and the
 // next camp command run in that environment prints any unseen report once
 // and renames it. A report is **output, not authority**: nothing reads it
-// back as state, nothing decides anything from it, and "the namespace
-// mode leaves no state record" still holds. What it leaves is the message
-// the mode otherwise had no way to deliver.
+// back as state, nothing decides anything from it, and "a session leaves
+// no state record" still holds. What it leaves is the message that
+// otherwise had no way to be delivered.
 package reports
 
 import (

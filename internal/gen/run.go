@@ -128,10 +128,8 @@ func toEntries(infos []pathx.Info) []islands.Entry {
 // because camp is driven from a terminal by somebody who can interrupt
 // it, and an optional one kills the process group when it expires.
 //
-// It always runs as the invoking user. In the privileged mode that is
-// true by construction rather than by a drop protocol: prepare runs in
-// the unprivileged front end, and no privileged camp process ever
-// executes a configured command.
+// It always runs as the invoking user: camp holds no privilege at this
+// point and never acquires any in the process that runs configured code.
 //
 // Starting it and waiting for it is runx's -- the same mechanism the
 // prepare commands run on. The wording is here, because a generation step
@@ -145,8 +143,9 @@ func external(built plan.Plan, step config.Step) refusal.List {
 			"the configuration's generation step would run as root, and camp "+
 				"never runs configured code with privilege.\n"+
 				"Whoever can edit the configuration would otherwise gain root "+
-				"through it. Run 'camp up' without sudo: the front end does the "+
-				"generating as you, and only the mounting itself is elevated.")
+				"through it. Run the same command again as yourself, without "+
+				"sudo: camp needs no privilege, and mounts inside a namespace of "+
+				"its own.")
 		return refused
 	}
 

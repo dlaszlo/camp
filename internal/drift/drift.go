@@ -1,9 +1,10 @@
 // Package drift is the read-only pass camp runs when a session ends.
 //
-// It runs at `down`, and at the end of a namespace session, and it never
-// blocks anything -- a teardown that refused would wall the user in. What
-// it does is tell, while the cause is still fresh. The end of a session
-// is the moment somebody still remembers what they did.
+// It never blocks anything -- an ending that refused would wall the user
+// in, and there is nothing here to refuse with anyway: the kernel takes the
+// namespace when the last process goes. What it does is tell, while the
+// cause is still fresh. The end of a session is the moment somebody still
+// remembers what they did.
 //
 // Four scans, and the fourth is the one that matters most.
 //
@@ -21,11 +22,10 @@
 // this pass exists to find. `git ls-files --stage` sees it.
 //
 // The framing that makes detection worth having: the point of no return
-// for a shared history is push, not commit. A leak caught at down is
-// usually still free -- git reset in the code repository, composition
-// down, the user's own hand -- and the last automated gate before that
-// point, the repository's own pre-push hook, measurably runs in both
-// modes.
+// for a shared history is push, not commit. A leak caught when the session
+// ends is usually still free -- git reset in the code repository, the
+// user's own hand -- and the last automated gate before that point, the
+// repository's own pre-push hook, measurably runs inside a session.
 package drift
 
 import (
@@ -99,7 +99,8 @@ func Scan(built plan.Plan) Report {
 //
 // Git stores a worktree's git directory as an absolute path and compares
 // it as a string, so a worktree created through the composed tree records
-// the live path on both sides: after down, neither pointer resolves. The
+// the live path on both sides: once the session has ended, neither pointer
+// resolves. The
 // files are intact and git simply cannot see them. Worse, git prunes a
 // dead registration after gc.worktreePruneExpire -- three months by
 // default -- and auto-gc runs from ordinary commands, so this is the
@@ -108,7 +109,7 @@ func Scan(built plan.Plan) Report {
 //
 // `git worktree repair <path outside the composition>` rewrites both
 // pointers to paths that outlive the composition, after which the
-// worktree is composition-independent and stops dying at every down.
+// worktree is composition-independent and stops dying with every session.
 func (r *Report) worktrees(built plan.Plan, code *gitwire.Repo) {
 	registered, err := code.Worktrees()
 	if err != nil {
@@ -264,7 +265,7 @@ func Refresh(built plan.Plan) Report {
 	if err != nil || upperErr != nil {
 		// The two comparisons that need the roots do not run, and the one
 		// that does not still does: a worktree registered inside the
-		// composed tree dies at down whatever the roots say.
+		// composed tree dies with the session whatever the roots say.
 		report := Report{Failures: failures}
 		code, state, gitErr := gitwire.Open(built.Config.UpperPath())
 		switch state {

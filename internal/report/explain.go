@@ -7,18 +7,9 @@ import (
 	"github.com/dlaszlo/camp/internal/plan"
 )
 
-// Tree is what a description needs, whichever source it came from.
-//
-// Two sources, because the specification names both and they do not
-// always agree. §16 says explain is generated from the live
-// configuration so that it cannot go stale; §12 says down, status and
-// explain read the recorded plan, never a configuration that may have
-// been edited while the composition was up. Both are right about their
-// own case: with a composition standing, what the reader is standing in
-// is the recorded one, and the file may since have become a description
-// of something else; with nothing recorded -- the namespace mode leaves
-// no record at all -- the configuration is the only source there is.
-// This type is what lets one set of sentences serve both.
+// Tree is what a description needs, taken from the plan a configuration
+// derives -- the one source there is, and the one the session standing
+// here was built from.
 type Tree struct {
 	// Live is the composed tree's directory, Upper the code repository,
 	// Lower the workspace.
@@ -27,14 +18,10 @@ type Tree struct {
 	Lower string
 	// Mounts are the ones worth describing, in plan order.
 	Mounts []TreeMount
-	// Privileged says which mode composed it, which decides what the
-	// description promises about the rest of the machine.
-	Privileged bool
 	// Generated says the tree carries a generated exclude.
 	Generated bool
-	// Ownership and Session are the blocks only a plan can render. Empty
-	// from a record: the privileged mode announces its session rather than
-	// applying it, and the ownership note belongs to the namespace mode.
+	// Ownership and Session are the two blocks about the processes inside
+	// rather than about the tree.
 	Ownership string
 	Session   string
 }
@@ -58,12 +45,11 @@ type TreeMount struct {
 // in here.
 func Explain(p plan.Plan) string {
 	tree := Tree{
-		Live:       p.Live,
-		Upper:      p.Config.UpperPath(),
-		Lower:      p.Config.LowerPath(),
-		Privileged: p.Mode == plan.Privileged,
-		Ownership:  Ownership(p),
-		Session:    Session(p, "Session environment"),
+		Live:      p.Live,
+		Upper:     p.Config.UpperPath(),
+		Lower:     p.Config.LowerPath(),
+		Ownership: Ownership(p),
+		Session:   Session(p, "Session environment"),
 	}
 	_, tree.Generated = p.Config.GenerationStep()
 	for _, mount := range p.Mounts {
@@ -162,25 +148,19 @@ func Describe(p Tree) string {
 	b.WriteString("Worktrees\n\n")
 	b.WriteString("  A worktree made from in here records this tree's path on " +
 		"both sides, and\n  git compares those paths as strings -- so when the " +
-		"composition comes down,\n  git stops being able to see the checkout. " +
-		"The files are fine. Run\n  'camp down' and read what it says: it prints " +
-		"the exact repair command for\n  each one, and after that repair the " +
-		"worktree is independent of the\n  composition.\n\n")
+		"session ends, git stops\n  being able to see the checkout. The files " +
+		"are fine. When the session ends\n  camp prints the exact repair command " +
+		"for each one -- and, if no terminal is\n  attached by then, the next " +
+		"camp command in this environment prints it --\n  and after that repair " +
+		"the worktree is independent of the composition.\n\n")
 
-	if p.Privileged {
-		fmt.Fprintf(&b, "This mode\n\n  The composition is visible to every "+
-			"process on this machine, and %s\n  is read-only for all of them "+
-			"until 'camp down' -- your editor included.\n  That is the price of "+
-			"this mode. The namespace mode ('camp run') keeps both\n  promises, "+
-			"and is where normal work happens.\n\n", p.Lower)
-	} else {
-		b.WriteString("This mode\n\n  This composition exists only for the " +
-			"processes inside it. Nothing outside\n  can see it, nothing has to " +
-			"be cleaned up, and when the last process here\n  exits the kernel " +
-			"removes every mount with it. There is no 'camp down'.\n\n")
+	b.WriteString("This session\n\n  This composition exists only for the " +
+		"processes inside it. Nothing outside\n  can see it -- a program started " +
+		"outside the session, an editor already\n  running, sees the composed " +
+		"tree's directory empty. Nothing has to be\n  cleaned up: when the last " +
+		"process here exits the kernel removes every\n  mount with it.\n\n")
 
-		b.WriteString(p.Ownership)
-	}
+	b.WriteString(p.Ownership)
 
 	if session := p.Session; session != "" {
 		b.WriteString(session)

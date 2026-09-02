@@ -1,4 +1,4 @@
-// Package compose builds a composition and takes it apart.
+// Package compose builds a composition, and unwinds one that failed.
 //
 // It is the middle of the tool: the plan says what, mountx says how, this
 // says in what order and what happens when a step fails. The split it
@@ -6,11 +6,13 @@
 // configuration's steps in the middle of it, and verification before
 // anything is declared up.
 //
-// One rule governs failure: up may refuse, and a refusal leaves nothing
-// mounted. Every mount that was made is removed in reverse before the
-// refusal is reported. If that unwinding itself cannot finish, the
-// composition is *partly up*, and it is said so, with what remains listed
-// by path -- never quietly detached to make the report look clean.
+// One rule governs failure: a start may refuse, and a refusal leaves
+// nothing mounted. Every mount that was made is removed in reverse before
+// the refusal is reported. If that unwinding itself cannot finish, what
+// remains is listed by path -- never quietly detached to make the report
+// look clean -- and the namespace takes it with it when the session ends.
+// There is no teardown of a composition that came up: the kernel does
+// that, when the session's last process exits.
 package compose
 
 import (
@@ -23,7 +25,6 @@ import (
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/enc"
 	"github.com/dlaszlo/camp/internal/fsx"
-	"github.com/dlaszlo/camp/internal/holders"
 	"github.com/dlaszlo/camp/internal/mountinfo"
 	"github.com/dlaszlo/camp/internal/mountx"
 	"github.com/dlaszlo/camp/internal/pathx"
@@ -45,24 +46,10 @@ const MarkerName = ".camp-target"
 // Setup is one build.
 type Setup struct {
 	Plan plan.Plan
-	// Prefix is where the tree is being built: the live path, or the
-	// staging root in the privileged mode.
-	Prefix string
 	// Exclude is the validated payload, empty when nothing generates one.
 	Exclude []byte
 	UID     int
 	GID     int
-}
-
-// Target returns where one mount goes in this build.
-func (s Setup) Target(mount plan.Mount) string {
-	if !mount.InLive {
-		return mount.Target
-	}
-	if mount.Rel.Empty() {
-		return s.Prefix
-	}
-	return mount.Rel.Join(s.Prefix)
 }
 
 // Directories creates everything camp provides for itself, before any
@@ -143,27 +130,21 @@ func marker(area fsx.Area, p plan.Plan) error {
 // ReadMarker reads a work or storage directory's attribution, by name.
 //
 // For the callers asking about a directory camp holds no capability for:
-// doctor walking what is on the machine, and the sweep. Where the answer
-// decides what a privileged step then removes, the bytes come from a
-// descriptor beneath a held root and go to ParseMarker instead -- a
-// marker read through a name says nothing about the directory something
-// else is about to act in.
+// doctor walking what is on the machine, and the sweep. Both only read
+// and report from it; the sweep's removal is addressed through an fsx
+// area beneath the held environment root, never through this name.
 func ReadMarker(directory string) (live, config string, err error) {
 	path := filepath.Join(directory, MarkerName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", "", err
 	}
-	return ParseMarker(path, data)
+	return parseMarker(path, data)
 }
 
-// ParseMarker reads an attribution out of a marker's own bytes.
-//
-// Separate from the reading so that a caller who obtained the bytes some
-// other way -- through a descriptor it already holds, which is what the
-// privileged helper does -- gets the same answer from the same code. The
-// name is for the message only.
-func ParseMarker(name string, data []byte) (live, config string, err error) {
+// parseMarker reads an attribution out of a marker's own bytes. The name
+// is for the message only.
+func parseMarker(name string, data []byte) (live, config string, err error) {
 	records, err := enc.Parse(data)
 	if err != nil {
 		return "", "", err
@@ -209,9 +190,7 @@ func Build(s Setup) Result {
 	result := Result{}
 
 	for _, mount := range s.Plan.Mounts {
-		operation := mount
-		operation.Target = s.Target(mount)
-		placed, err := mountx.Mount(operation)
+		placed, err := mountx.Mount(mount)
 		// Recorded as soon as the mount exists rather than when the whole
 		// operation finishes. A read-only bind is two calls and the
 		// propagation change a third, so a failure after the first leaves a
@@ -240,14 +219,11 @@ func Build(s Setup) Result {
 	}
 
 	result.Refused = verify.Run(verify.Input{
-		Plan:      s.Plan,
-		Prefix:    s.Prefix,
-		LowerPath: s.Plan.Config.LowerPath(),
-		Storage:   s.Plan.Storage,
-		Table:     table,
-		Exclude:   s.Exclude,
-		UID:       s.UID,
-		GID:       s.GID,
+		Plan:    s.Plan,
+		Table:   table,
+		Exclude: s.Exclude,
+		UID:     s.UID,
+		GID:     s.GID,
 	})
 	if !result.Refused.Empty() {
 		result.Stranded = unwind(s, result.Mounted)
@@ -270,23 +246,26 @@ func Check(s Setup) refusal.List {
 		return refused
 	}
 	return verify.Run(verify.Input{
-		Plan:      s.Plan,
-		Prefix:    s.Prefix,
-		LowerPath: s.Plan.Config.LowerPath(),
-		Storage:   s.Plan.Storage,
-		Table:     table,
-		Exclude:   s.Exclude,
-		UID:       s.UID,
-		GID:       s.GID,
+		Plan:    s.Plan,
+		Table:   table,
+		Exclude: s.Exclude,
+		UID:     s.UID,
+		GID:     s.GID,
 	})
 }
 
 // unwind removes what was mounted, in reverse, and returns what it could
 // not remove.
+//
+// Never lazily. A detached mount leaves the kernel's table while it is
+// still alive and still being written through, and a rollback that
+// reported a clean namespace over one would be the one lie camp's failure
+// handling may never tell. What will not come away is named, and the
+// namespace takes it with it when the session ends.
 func unwind(s Setup, mounted []plan.Mount) []string {
 	var stranded []string
 	for index := len(mounted) - 1; index >= 0; index-- {
-		target := s.Target(mounted[index])
+		target := mounted[index].Target
 		outcome, _ := mountx.Unmount(target)
 		if outcome == mountx.Busy {
 			stranded = append(stranded, target)
@@ -295,113 +274,12 @@ func unwind(s Setup, mounted []plan.Mount) []string {
 	return stranded
 }
 
-// Teardown is one attempt at taking a composition down.
-type Teardown struct {
-	// Removed is what came away.
-	Removed []string
-	// Absent is what was not mounted to begin with.
-	Absent []string
-	// Stuck is what could not be removed, with whoever is holding it.
-	Stuck []Stuck
-}
-
-// Stuck is one mount that would not come down.
-type Stuck struct {
-	Target  string
-	Reason  string
-	Holders holders.Report
-}
-
-// Done reports whether everything came away.
-func (t Teardown) Done() bool { return len(t.Stuck) == 0 }
-
-// Down removes a list of targets in the order given, which is the reverse
-// of the order they were made.
-//
-// It never refuses to try, and it never lies about the result. A mount
-// something is holding stays mounted, is reported as still mounted, and
-// makes the command exit non-zero. There is no lazy detach: that would
-// take the mount out of the kernel's table while it is still alive and
-// still being written through, and in the privileged mode the table is
-// the only guard against a second composition on the same upper.
-func Down(targets []string) Teardown {
-	report := Teardown{}
-	for _, target := range targets {
-		outcome, err := mountx.Unmount(target)
-		switch outcome {
-		case mountx.Unmounted:
-			report.Removed = append(report.Removed, target)
-		case mountx.Absent:
-			report.Absent = append(report.Absent, target)
-		default:
-			report.Stuck = append(report.Stuck, Stuck{
-				Target:  target,
-				Reason:  errorText(err),
-				Holders: holders.Find(target),
-			})
-		}
-	}
-	return report
-}
-
-func errorText(err error) string {
-	if err == nil {
-		return "the kernel refused to remove it"
-	}
-	return err.Error()
-}
-
-// RemoveWorkDir removes the whole work directory for a composition that
-// is down.
-//
-// Taken from the environment root and the hash rather than from a plan,
-// because the one caller is the privileged teardown and it works from the
-// record: the configuration may have been edited, or deleted, while the
-// composition was up, and the record is what says where this composition
-// put things. That caller opens the root itself, from the path the record
-// carries.
-func RemoveWorkDir(root pathx.Root, hash string) error {
-	area := fsx.Work(root, hash)
-	entries, err := os.ReadDir(area.Root())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	for _, entry := range entries {
-		if err := area.RemoveTree(entry.Name()); err != nil {
-			return err
-		}
-	}
-	return area.RemoveSelf()
-}
-
-// Residue reports what is left in the live directory after a teardown.
-//
-// Reported, never removed. If the composed tree's directory is not empty
-// once everything is unmounted, that is evidence of a problem -- content
-// that was written somewhere it should not have been -- and cleaning it
-// away would destroy the only sign of it.
-func Residue(live string) ([]string, error) {
-	entries, err := os.ReadDir(live)
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	enc.SortNames(names)
-	return names, nil
-}
-
 // Sweep removes stale work directories left by sessions that are gone.
 //
-// The namespace mode has no down -- the kernel tears the namespace down,
-// including the mounts, but the work directory is on the real filesystem
-// and outlives it. So the next up sweeps: an entry is stale when the live
-// directory its marker names no longer exists, or when nothing holds that
+// A session has no teardown step of its own -- the kernel tears the
+// namespace down, including the mounts, but the work directory is on the
+// real filesystem and outlives it. So the next start sweeps: an entry is
+// stale when the live directory its marker names no longer exists, or when nothing holds that
 // live directory's lock -- ended answers that -- and, before either is
 // believed, when no overlay in the table is standing on it. An entry
 // whose marker is missing or unreadable is reported and left alone,
@@ -563,29 +441,4 @@ func removeIfEmpty(area fsx.Area, directory string) error {
 		}
 	}
 	return area.RemoveSelf()
-}
-
-// DescribeStuck renders one mount that would not come down, with what to
-// do about it.
-func DescribeStuck(stuck Stuck) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s is still mounted: %s\n", stuck.Target, stuck.Reason)
-	if !stuck.Holders.Any() {
-		b.WriteString("  camp could not find what is holding it. ")
-		if caveat := stuck.Holders.Caveat(); caveat != "" {
-			b.WriteString(caveat)
-		}
-		b.WriteString("\n")
-		return b.String()
-	}
-	for _, holder := range stuck.Holders.Holders {
-		fmt.Fprintf(&b, "  held by %s\n", holder.Describe())
-	}
-	b.WriteString("  A composition cannot be unmounted from under a process " +
-		"standing in it. Leave that directory or close that file, then run " +
-		"'camp down' again.\n")
-	if caveat := stuck.Holders.Caveat(); caveat != "" {
-		fmt.Fprintf(&b, "  %s\n", caveat)
-	}
-	return b.String()
 }

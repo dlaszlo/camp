@@ -12,12 +12,12 @@ import (
 // Narrator says what a command is doing, in order, as each frame step
 // completes.
 //
-// Why the commands narrate at all: the two modes differ in what they
-// start, what they make visible, and to whom -- and no amount of
-// configuration structure makes that legible at the moment somebody is
-// using one. A short line per step does, and it lands in the terminal
-// scrollback and in captured logs where a question asked later is
-// actually answered.
+// Why the commands narrate at all: a session does several things before
+// the workload runs -- locks, checks, generation, mounts, an identity
+// route, an environment -- and no amount of configuration structure makes
+// that legible at the moment somebody is using it. A short line per step
+// does, and it lands in the terminal scrollback and in captured logs where
+// a question asked later is actually answered.
 //
 // The rules these lines are held to: they say what happened, never what
 // might; they name no hypothetical; and they print no inherited
@@ -77,8 +77,8 @@ func (n *Narrator) say(format string, args ...any) {
 	n.mark(MarkOK, fmt.Sprintf(format, args...))
 }
 
-// Note is something true that is not a step: what a mode does not do,
-// what a section does not apply to.
+// Note is something true that is not a step: a standing fact about the
+// run, rather than an outcome of it.
 func (n *Narrator) Note(format string, args ...any) {
 	n.mark(MarkNote, fmt.Sprintf(format, args...))
 }
@@ -88,8 +88,8 @@ func (n *Narrator) Note(format string, args ...any) {
 // The composition is going ahead; this is the thing about it that the
 // reader has not agreed to yet -- a workspace root entry that has
 // disappeared since the snapshot was accepted, a change on the code side.
-// Until this existed those were computed at every up and shown by nobody:
-// 'camp plan' and 'camp doctor' printed them, and the command that
+// Until this existed those were computed at every start and shown by
+// nobody: 'camp plan' and 'camp doctor' printed them, and the command that
 // actually composes the tree said nothing.
 func (n *Narrator) Warn(format string, args ...any) {
 	n.mark(MarkWarn, fmt.Sprintf(format, args...))
@@ -188,37 +188,6 @@ func (n *Narrator) Verified(count int, where string) {
 	n.say("verified: %d mounts at %s", count, where)
 }
 
-// Record: the privileged mode's teardown list, written before anything is
-// mounted so that whatever happens next, something knows what to undo.
-func (n *Narrator) Record(path string) {
-	n.say("record: %s", path)
-}
-
-// Helper: the one elevated step, and the only one.
-func (n *Narrator) Helper() {
-	n.say("helper: sudo camp helper-mount")
-}
-
-// Moved: the moment the tree becomes visible to the machine.
-func (n *Narrator) Moved(staging, live string) {
-	n.say("moved: %s -> %s", staging, live)
-}
-
-// MachineWide: the two effects this mode has outside the composition,
-// stated as facts now in force.
-func (n *Narrator) MachineWide(workspace, live string) {
-	n.Note("machine-wide: %s is read-only until 'camp down'", workspace)
-	n.Note("machine-wide: %s is visible to every process", live)
-}
-
-// Announcement: the session section this mode does not apply.
-func (n *Narrator) Announcement(session config.Session) {
-	if !session.Present {
-		return
-	}
-	n.Note("session: not applied here; 'camp run' and 'camp shell' apply it")
-}
-
 // Done is a command's closing line, in the same columns as the steps that
 // led to it. A run whose ending is rendered in some other shape is a run
 // whose ending somebody has to hunt for.
@@ -226,25 +195,12 @@ func (n *Narrator) Done(format string, args ...any) {
 	n.say(format, args...)
 }
 
-// Unmounted: one line per operation, because a teardown is a sequence
-// like the one that built it, and "11 of 11 removed" says nothing about
-// which eleven.
-func (n *Narrator) Unmounted(target string) {
-	n.say("unmounted: %s", target)
-}
-
-// Swept: a work directory left by a session that is gone. The namespace
-// mode has no teardown of its own, so the next run clears what the last
-// one could not.
+// Swept: a work directory left by a session that is gone. A session has
+// no teardown step of its own, so the next run clears what the last one
+// could not. Storage is never in this line: it holds unfinished work and
+// camp does not remove it.
 func (n *Narrator) Swept(directory string) {
 	n.say("swept: %s, left by a session that has ended", directory)
-}
-
-// Removed: camp's own disposable work directory, at the end of a
-// teardown that finished. Storage is never in this line: it holds
-// unfinished work and camp does not remove it.
-func (n *Narrator) Removed(directory string) {
-	n.say("removed: %s, camp's own work directory", directory)
 }
 
 // LeftAlone: something in camp's own work area that camp could not prove

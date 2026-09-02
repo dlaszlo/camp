@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -113,50 +112,6 @@ func Tracked(t *testing.T) []string {
 			"without looking at anything", root)
 	}
 	return paths
-}
-
-// SkipIfItCouldMount skips a test that is about what the mount
-// primitives do when the kernel refuses them.
-//
-// An ordinary user can ask a mount syscall exactly one question and get a
-// real answer: what happens when it is not allowed. open_tree with
-// OPEN_TREE_CLONE needs CAP_SYS_ADMIN, so unprivileged it fails, nothing
-// is attached, and the shape of the refusal -- the error, and the claim
-// about what is standing afterwards -- is a contract a test can hold to.
-// A process that does hold the capability would get the other answer: it
-// would make a mount. The tests that ask this question are not written to
-// clean one up, and this repository's tests must not leave one behind, so
-// they skip instead.
-func SkipIfItCouldMount(t *testing.T) {
-	t.Helper()
-	if os.Geteuid() == 0 {
-		t.Skip("this is running as root, and this test must not make a mount")
-	}
-	status, err := os.ReadFile("/proc/self/status")
-	if err != nil {
-		t.Skipf("this test needs to know whether it could mount, and "+
-			"/proc/self/status could not be read: %v", err)
-	}
-	for _, line := range strings.Split(string(status), "\n") {
-		rest, found := strings.CutPrefix(line, "CapEff:")
-		if !found {
-			continue
-		}
-		effective, err := strconv.ParseUint(strings.TrimSpace(rest), 16, 64)
-		if err != nil {
-			t.Skipf("this test needs to know whether it could mount, and "+
-				"CapEff reads %q: %v", strings.TrimSpace(rest), err)
-		}
-		// CAP_SYS_ADMIN is bit 21, and it is the one that would turn the
-		// refusal these tests measure into a mount.
-		if effective&(1<<21) != 0 {
-			t.Skip("this process holds CAP_SYS_ADMIN, and this test must not " +
-				"make a mount")
-		}
-		return
-	}
-	t.Skip("/proc/self/status names no effective capability set, so whether " +
-		"this could mount is unknown")
 }
 
 // Root returns a scratch directory that is removed when the test ends.

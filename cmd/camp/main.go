@@ -7,7 +7,6 @@ import (
 
 	"github.com/dlaszlo/camp/internal/cli"
 	"github.com/dlaszlo/camp/internal/preflight"
-	"github.com/dlaszlo/camp/internal/privileged"
 	"github.com/dlaszlo/camp/internal/session"
 )
 
@@ -28,18 +27,6 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == session.InitArg {
 		session.InitMain(os.Args[2:])
 		return
-	}
-
-	// The privileged helper: the only part of camp sudo ever wraps. It
-	// reads its whole instruction from stdin -- never from argv, which
-	// /proc exposes to every user on the machine.
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case privileged.MountArg:
-			os.Exit(privileged.Helper(privileged.ActionMount, os.Stdin, os.Stdout))
-		case privileged.UnmountArg:
-			os.Exit(privileged.Helper(privileged.ActionUnmount, os.Stdin, os.Stdout))
-		}
 	}
 
 	os.Exit(cli.Main(os.Args[1:], os.Stdout, os.Stderr))

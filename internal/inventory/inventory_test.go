@@ -20,7 +20,7 @@ func TestANewWorkspaceRootEntryBlocks(t *testing.T) {
 	cfg := env.Config(t, "")
 	testenv.Write(t, filepath.Join(env.Workspace, "NEW.md"), "appeared\n")
 
-	_, refused := plan.Prepare(cfg, plan.Namespace)
+	_, refused := plan.Prepare(cfg)
 	if !refused.Has("inventory-appeared") {
 		t.Fatalf("the rules that fired were %v", refused.Rules())
 	}
@@ -40,7 +40,7 @@ func TestATypeChangeBlocks(t *testing.T) {
 	}
 	testenv.MkDir(t, filepath.Join(env.Workspace, "CLAUDE.md"))
 
-	_, refused := plan.Prepare(cfg, plan.Namespace)
+	_, refused := plan.Prepare(cfg)
 	if !refused.Has("inventory-changed") {
 		t.Fatalf("the rules that fired were %v", refused.Rules())
 	}
@@ -55,7 +55,7 @@ func TestADisappearedEntryOnlyWarns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("a disappeared entry should not stop a composition:\n%v", refused)
 	}
@@ -69,7 +69,7 @@ func TestANewCodeRootEntryOnlyWarns(t *testing.T) {
 	cfg := env.Config(t, "")
 	testenv.Write(t, filepath.Join(env.Code, "CHANGELOG.md"), "new\n")
 
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("a new name on the code side should not stop a composition:\n%v", refused)
 	}
@@ -89,7 +89,7 @@ func TestAMissingSnapshotIsRefusedAndNotGenerated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, refused := plan.Prepare(cfg, plan.Namespace)
+	_, refused := plan.Prepare(cfg)
 	if !refused.Has("inventory-missing") {
 		t.Fatalf("the rules that fired were %v", refused.Rules())
 	}
@@ -148,7 +148,7 @@ func TestTheSnapshotIsSortedByBytesAndSurvivesHostileNames(t *testing.T) {
 	}
 
 	// And with it accepted, the composition is not blocked by it.
-	_, refused := plan.Prepare(cfg, plan.Namespace)
+	_, refused := plan.Prepare(cfg)
 	for _, rule := range refused.Rules() {
 		if strings.HasPrefix(rule, "inventory-") {
 			t.Errorf("the accepted name still blocked: %v", refused.Error())
@@ -165,7 +165,7 @@ func TestADamagedSnapshotIsRefusedRatherThanIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, refused := plan.Prepare(cfg, plan.Namespace)
+	_, refused := plan.Prepare(cfg)
 	if !refused.Has("inventory-unreadable") {
 		t.Fatalf("the rules that fired were %v", refused.Rules())
 	}
@@ -189,7 +189,7 @@ func TestANewCodeRootEntryGitIgnoresSaysSo(t *testing.T) {
 	testenv.Write(t, filepath.Join(env.Code, "camp"), "a built binary\n")
 	testenv.Write(t, filepath.Join(env.Code, "CHANGELOG.md"), "content\n")
 
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("a new name on the code side should not stop a composition:\n%v", refused)
 	}

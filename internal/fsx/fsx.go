@@ -9,8 +9,7 @@
 //
 //	work     $ENV/.camp/work/<hash>      disposable, swept when nothing is mounted
 //	storage  $ENV/.camp/storage/<hash>   persistent, never removed by camp
-//	state    $XDG_STATE_HOME/camp        the privileged mode's records
-//	reports  $ENV/.camp/reports          what a namespace session leaves behind
+//	reports  $ENV/.camp/reports          what a session leaves behind
 //	logs     $ENV/.camp/logs             every line camp wrote to stderr
 //
 // **An area is a pinned root and the components below it, and every one
@@ -26,8 +25,8 @@
 //
 // The root is the one thing camp trusts, and it is a descriptor, not a
 // string. The environment root is resolved once, when the configuration
-// is read, and held open for the whole command; the state directory and
-// the probe's scratch tree are resolved once each in the same way. A root
+// is read, and held open for the whole command; the probe's scratch tree
+// is resolved once in the same way. A root
 // kept as a name would be resolved again at every write, and its owner
 // can rename it away and leave a symlink at the old name between camp's
 // validation and camp's write -- which is the whole class of attack the
@@ -56,8 +55,8 @@ import (
 
 // Area is a directory camp owns, and the root of everything it may write.
 type Area struct {
-	// Kind names the area for a message: "work", "storage", "state",
-	// "reports", "logs".
+	// Kind names the area for a message: "work", "storage", "reports",
+	// "logs".
 	Kind string
 	// root is the directory camp trusts, held open, and parts are the
 	// components below it that make up this area. They are kept apart
@@ -152,12 +151,7 @@ func Storage(root pathx.Root, hash string) Area {
 	return In("storage", root, config.Dir, "storage", hash)
 }
 
-// State is where the privileged mode's records live. Its root is the
-// user's own state directory, which is not camp's to vouch for; camp's
-// own directory below it is.
-func State(root pathx.Root, name string) Area { return In("state", root, name) }
-
-// Reports is where a namespace session leaves its end-of-session report.
+// Reports is where a session leaves its end-of-session report.
 func Reports(root pathx.Root) Area { return In("reports", root, config.Dir, "reports") }
 
 // Logs is where camp keeps what it said. It is the one area written by
@@ -212,33 +206,6 @@ func Scratch(prefix string) (Area, func() error, error) {
 		}
 		return err
 	}, nil
-}
-
-// EnsureBase creates a directory camp was pointed at but did not make.
-//
-// The one caller is the state directory. camp keeps its records under
-// $XDG_STATE_HOME, or $HOME/.local/state when that is unset -- and a user
-// who has never run anything that keeps state has no ~/.local at all, so
-// camp's records would be the first thing in it. Refusing there is
-// refusing to run on a machine nobody has used yet, which is exactly the
-// machine somebody is trying camp on for the first time. Measured: a fresh
-// account on a fresh machine, where 'camp up' got as far as the record and
-// stopped.
-//
-// The specification says an application that needs the directory creates
-// it, 0700. That is the whole of what this does, and it is here rather
-// than at the caller because everything camp creates is created in this
-// file.
-//
-// It is not an Area and cannot become one. An Area is confined beneath a
-// root camp holds open, and this is the call that makes such a root
-// possible in the first place -- the same exception Scratch has, for the
-// same reason, and the reason both are so short.
-func EnsureBase(path string, mode os.FileMode) error {
-	if err := os.MkdirAll(path, mode); err != nil {
-		return fmt.Errorf("creating %s: %w", path, err)
-	}
-	return nil
 }
 
 // removeTree is Scratch's own cleanup: the whole directory, including
@@ -310,9 +277,6 @@ func (a Area) Sub(parts ...string) (Area, error) {
 
 // Ensure creates the area's own directory, and every directory above it
 // down from the root, with a mode of its own for the area itself.
-//
-// The state directory is 0700 and its records are 0600: a record names
-// every path of a composition, and that is nobody else's business.
 func (a Area) Ensure(mode os.FileMode) error {
 	if !a.root.Valid() {
 		return fmt.Errorf("an empty %s area was used", a.Kind)
@@ -336,17 +300,10 @@ func (a Area) RemoveSelf() error {
 // MkdirAll creates a directory inside the area, and every directory above
 // it up to the area's own root.
 func (a Area) MkdirAll(parts ...string) (string, error) {
-	return a.MkdirAllMode(0o755, parts...)
-}
-
-// MkdirAllMode creates a directory with a mode of its own -- the
-// privileged mode's staging root is 0700, because until the move it is
-// the only place the half-built composition exists.
-func (a Area) MkdirAllMode(mode os.FileMode, parts ...string) (string, error) {
 	if err := a.usable(parts); err != nil {
 		return "", err
 	}
-	fd, err := a.make(parts, mode)
+	fd, err := a.make(parts, 0o755)
 	if err != nil {
 		return "", err
 	}
@@ -766,82 +723,6 @@ func removeTreeOnce(dir int, name string) error {
 			return fmt.Errorf("%s: %w", name, ErrChangedType)
 		}
 		return fmt.Errorf("removing %s: %w", name, err)
-	}
-	return nil
-}
-
-// Chown gives everything in the area to a user.
-//
-// Used by the privileged helper for the one thing the kernel creates as
-// root: the overlay's leftover work directory. The path camp guarantees
-// writable must not end up owned by root -- and root walking a tree by
-// path is exactly where a symlink would be waiting, so this walk is by
-// descriptor too.
-func (a Area) Chown(uid, gid int, parts ...string) error {
-	if err := a.usable(parts); err != nil {
-		return err
-	}
-	dir, name, err := a.parent(parts)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(dir)
-	return chownTreeAt(dir, name, uid, gid)
-}
-
-// chownTreeAt gives one name and everything under it to a user, and
-// refuses rather than retrying when the name stops being the directory it
-// was walking.
-//
-// The other way from the removal above, and for a reason rather than for
-// symmetry. A removal is asked to make a name absent, so a second pass on
-// whatever is there now still reaches what it was asked for. This is
-// asked to give a known subtree to a user: if the directory it had
-// identified is gone, a second pass would be giving away whatever
-// replaced it, which is a different act with the same name. The caller is
-// the privileged helper, running as root over the one directory the
-// kernel made, and handing a stranger's object to somebody is not the
-// operation it went there to perform.
-func chownTreeAt(dir int, name string, uid, gid int) error {
-	if err := unix.Fchownat(dir, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		if isAbsent(err) {
-			return nil
-		}
-		return fmt.Errorf("giving %s to uid %d: %w", name, uid, err)
-	}
-	var st unix.Stat_t
-	if err := unix.Fstatat(dir, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		if isAbsent(err) {
-			return nil
-		}
-		return err
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
-		return nil
-	}
-	afterTypeCheck(name)
-	child, err := openAt(dir, name, unix.O_RDONLY|unix.O_DIRECTORY, 0)
-	if err != nil {
-		switch {
-		case isAbsent(err):
-			return nil
-		case errors.Is(err, unix.ENOTDIR):
-			// A file stands where the directory was, so nothing below it was
-			// reached. The old code read this as absence and reported the whole
-			// subtree given away.
-			return fmt.Errorf("giving %s to uid %d: %w", name, uid, ErrChangedType)
-		}
-		return err
-	}
-	defer unix.Close(child)
-	names, err := readNames(child)
-	if err != nil {
-		return err
-	}
-	for _, entry := range names {
-		if err := chownTreeAt(child, entry, uid, gid); err != nil {
-			return err
-		}
 	}
 	return nil
 }

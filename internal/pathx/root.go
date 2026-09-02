@@ -3,7 +3,6 @@ package pathx
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -66,36 +65,6 @@ func OpenRoot(path string) (Root, error) {
 	return Root{state: &rootState{fd: fd, name: resolved}}, nil
 }
 
-// OpenRootExactly opens the path it was given and resolves nothing.
-//
-// Which of the two constructors a caller wants is decided by where the
-// path came from. A configuration's env: is written by a person, who may
-// well have written it through a symlink and meant it, so OpenRoot
-// resolves it once and holds what it resolved to. The privileged
-// helper's base is not written by anybody: it arrives on a pipe from a
-// front end that already resolved it. A symlink at its final component
-// is therefore not a convenience but a replacement, made after the front
-// end looked -- and root following it would mount this composition's
-// operands beneath whatever the link points at. O_NOFOLLOW with
-// O_DIRECTORY is that refusal, made by the kernel in the same call that
-// opens.
-//
-// What this does not cover: every component above the final one is still
-// resolved by the kernel here, by name, as any open resolves them. A base
-// whose parent is a symlink is opened through it. Nothing about a name
-// proves which directory a descriptor holds -- the check made on the
-// descriptor afterwards is what decides, which for the helper is the
-// ownership test, and it is made on this descriptor and on nothing that
-// was looked at earlier.
-func OpenRootExactly(path string) (Root, error) {
-	fd, err := unix.Open(path,
-		unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return Root{}, fmt.Errorf("opening %s: %w", path, err)
-	}
-	return Root{state: &rootState{fd: fd, name: path}}, nil
-}
-
 // Valid reports whether this Root holds a directory.
 func (r Root) Valid() bool { return r.state != nil && r.state.fd >= 0 }
 
@@ -120,32 +89,6 @@ func (r Root) Identity() (Identity, error) {
 		return Identity{}, fmt.Errorf("looking at %s: %w", r.state.name, err)
 	}
 	return Identity{Device: uint64(st.Dev), Inode: st.Ino}, nil
-}
-
-// Current is the path this directory has now.
-//
-// A Root is the one thing camp holds that a rename cannot move: every
-// operation starts at the descriptor, so the name it was opened by can be
-// changed without changing where camp acts. That is the whole point of it
-// -- and it leaves camp unable to notice that the name *was* changed,
-// which matters wherever camp compares its own paths against something
-// that reports paths of its own.
-//
-// The mount table is that something. It reports a mount at the path it is
-// at now, and a mount point cannot be renamed (C34) while an ancestor
-// can, so renaming the environment root moves every camp mount's reported
-// path while camp goes on looking them up under the old one -- and "no
-// mount is at that path" then answers a question about a name.
-//
-// /proc/self/fd/<descriptor> is the kernel's own answer, recomputed from
-// the dentry tree at every read. A caller compares it against the path it
-// believes this Root to be, and acts on the difference; nothing here
-// decides what that difference means.
-func (r Root) Current() (string, error) {
-	if err := r.held(); err != nil {
-		return "", err
-	}
-	return os.Readlink(fmt.Sprintf("/proc/self/fd/%d", r.state.fd))
 }
 
 // Close releases the descriptor. Closing twice is not an error, and every
@@ -176,7 +119,7 @@ func (r Root) Stat(parts []string) (Info, error) {
 		}
 		return Info{
 			Name:  filepath.Base(r.state.name),
-			Type:  TypeOf(st.Mode),
+			Type:  typeOf(st.Mode),
 			Ident: Identity{Device: uint64(st.Dev), Inode: st.Ino},
 		}, nil
 	}

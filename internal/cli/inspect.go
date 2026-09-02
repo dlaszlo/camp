@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
@@ -12,37 +11,19 @@ import (
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/report"
-	"github.com/dlaszlo/camp/internal/state"
 )
 
 // The commands that only look, and the one that records what they see.
 //
-// explain has two sources and the specification names both. §16: generated
-// from the live configuration, so that it cannot go stale. §12: down,
-// status and explain read the recorded plan, never a configuration that
-// may have been edited while the composition was up. Each is right about
-// its own case, and the composition decides which case this is: what the
-// reader is standing in is the one that is mounted, so a record whose
-// mounts are actually there is what gets described. With nothing standing
-// -- and the namespace mode leaves no record at all -- the configuration
-// is the only source there is.
+// explain is generated from the live configuration, so that it cannot go
+// stale (§16). A session leaves no record of its own -- the namespace is
+// the state, and it goes with its last process -- so the configuration is
+// the only source there is, and it is the one the session standing here
+// was built from.
 func cmdExplain(ctx *context, args []string) error {
 	set, file := flagsFor("explain")
-	systemWide := set.Bool("privileged", false, "describe the system-wide mode")
-	live, hash := recoveryFlags(set)
 	if err := set.Parse(args); err != nil {
 		return wrap(err, ExitUsage, "")
-	}
-
-	if record, found, err := selectRecord(*file, *live, *hash); err == nil && found {
-		table, err := mountinfo.Read(mountinfo.Self)
-		if err != nil {
-			return wrap(err, ExitFailure, "")
-		}
-		if standing(record, table) {
-			ctx.printf("%s", report.Describe(treeFromRecord(record)))
-			return nil
-		}
 	}
 
 	cfg, err := resolve(ctx, *file)
@@ -54,7 +35,7 @@ func cmdExplain(ctx *context, args []string) error {
 	// rendered beside a standing refusal describes a tree that will not
 	// exist -- which is worse than no description, because it reads as
 	// authority.
-	built, refused := plan.Prepare(cfg, parseMode(*systemWide))
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() || built.Live == "" {
 		return refusedComposition(refused)
 	}
@@ -63,9 +44,9 @@ func cmdExplain(ctx *context, args []string) error {
 	return nil
 }
 
-// cmdAccept takes the snapshot every up is compared against.
+// cmdAccept takes the snapshot every start is compared against.
 //
-// Only this command writes it. An up that refreshed the file on the way
+// Only this command writes it. A start that refreshed the file on the way
 // past would swallow the very signal the file exists to raise: a new name
 // at the workspace root changes what the derived read-only binds protect
 // and what the exclude covers, and that has to be a change somebody
@@ -109,18 +90,22 @@ func cmdAccept(ctx *context, args []string) error {
 	}
 	ctx.printf("wrote %s: %d root entries across both repositories.\n"+
 		"Its diff is meant to be read -- it is byte-sorted, one record per "+
-		"line -- and camp compares against it at every up.\n",
+		"line -- and camp compares against it at every start.\n",
 		inventory.Path(cfg.Env), len(current.Entries))
 	return nil
 }
 
-// cmdStatus says what is on the machine, and it is the command a person
-// reaches for when something has gone wrong. So it asks the record first
-// and the configuration only when there is no record: the configuration
-// may have been edited, or deleted, while the composition was up (§12).
+// cmdStatus says what is mounted at the composed tree's path, from where
+// the command is run.
+//
+// A session's mounts exist only inside its namespace (C20), so from
+// outside every session this reports nothing mounted, and that is the true
+// answer for the process asking. From inside a session it answers for the
+// session: the configuration says which tree to look at, and the
+// verification pass says whether what stands there is what the
+// configuration plans.
 func cmdStatus(ctx *context, args []string) error {
 	set, file := flagsFor("status")
-	live, hash := recoveryFlags(set)
 	if err := set.Parse(args); err != nil {
 		return wrap(err, ExitUsage, "")
 	}
@@ -129,67 +114,44 @@ func cmdStatus(ctx *context, args []string) error {
 	if err != nil {
 		return wrap(err, ExitFailure, "")
 	}
-
-	record, found, err := selectRecord(*file, *live, *hash)
-	if err != nil {
-		return err
-	}
-	for _, listing := range corruptRecords() {
-		ctx.printf("corrupt: %s\n         %v\n\n", listing.Path, listing.Corrupt)
-	}
-	if found {
-		return describeRecord(ctx, record, table)
-	}
-	return statusFromConfiguration(ctx, *file, table)
-}
-
-// statusFromConfiguration answers when no record claims this directory.
-//
-// The namespace mode leaves none by design -- the namespace is the state,
-// and it goes with its last process -- and a composition that was never
-// brought up leaves none either. Here the configuration is the only
-// source there is, and it says one thing worth having: which tree to look
-// at.
-func statusFromConfiguration(ctx *context, file string, table []mountinfo.Entry) error {
-	cfg, err := resolve(ctx, file)
+	cfg, err := resolve(ctx, *file)
 	if err != nil {
 		return err
 	}
 
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if built.Live == "" {
 		return refusedComposition(refused)
 	}
 
-	ctx.printf("no record for %s. A namespace session leaves none: the "+
-		"namespace is the state, and it goes with its last process. A "+
-		"privileged composition always leaves one.\n", built.Live)
-
 	present := mountinfo.Under(table, built.Live)
 	if len(present) == 0 {
-		ctx.printf("down: nothing is mounted under %s.\n", built.Live)
+		ctx.printf("nothing is mounted under %s, as seen from this process.\n"+
+			"A session's mounts exist only inside its namespace: from outside, "+
+			"a running session shows nothing here, and a second 'camp shell' "+
+			"on this tree is refused while one runs. From inside a session this "+
+			"command describes it.\n", built.Live)
 		return nil
 	}
 
-	ctx.printf("\n%d mount(s) under %s:\n", len(present), built.Live)
+	ctx.printf("%d mount(s) under %s:\n", len(present), built.Live)
 	for _, entry := range present {
 		ctx.printf("  %-8s %s\n", entry.FSType, entry.Point)
 	}
 
-	// Compared against the plan this configuration derives today, in the
-	// namespace mode -- which is what a session standing here was built
-	// from. It is a comparison against a file rather than against a
-	// record, and it says so, because the file may have moved on.
+	// Compared against the plan this configuration derives today, which is
+	// what a session standing here was built from. It is a comparison
+	// against a file, and it says so, because the file may have moved on
+	// since the session started.
 	//
 	// Through the same call a composition is built with, deliberately:
 	// status is that pass with the other exit -- reporting instead of
 	// refusing -- and a second assembly of the same input beside it is a
 	// second definition of what "up" means, free to drift from the first.
 	problems := compose.Check(compose.Setup{
-		Plan:   built,
-		Prefix: built.Live,
-		UID:    os.Getuid(),
-		GID:    os.Getgid(),
+		Plan: built,
+		UID:  os.Getuid(),
+		GID:  os.Getgid(),
 	})
 	if problems.Empty() {
 		ctx.printf("\nup: every mount the configuration plans is present, " +
@@ -198,62 +160,8 @@ func statusFromConfiguration(ctx *context, file string, table []mountinfo.Entry)
 	}
 	ctx.printf("\n%d thing(s) do not match the plan this configuration derives "+
 		"today:\n\n%s", problems.Count(), report.Refusals(problems))
-	return failure(ExitPrecondition, "", "run 'camp down' to take it apart")
-}
-
-func cmdList(ctx *context, args []string) error {
-	set := flag.NewFlagSet("list", flag.ContinueOnError)
-	if err := set.Parse(args); err != nil {
-		return wrap(err, ExitUsage, "")
-	}
-
-	listings := state.All()
-	if len(listings) == 0 {
-		ctx.printf("no records. A namespace session leaves none by design.\n")
-		return nil
-	}
-	for _, listing := range listings {
-		if listing.Corrupt != nil {
-			ctx.printf("corrupt  %s\n         %v\n", listing.Path, listing.Corrupt)
-			continue
-		}
-		ctx.printf("%-8s %s  (%s, %s)\n", listing.Record.Phase, listing.Record.Live,
-			listing.Record.Hash, listing.Record.Age())
-	}
-	return nil
-}
-
-func cmdForget(ctx *context, args []string) error {
-	set := flag.NewFlagSet("forget", flag.ContinueOnError)
-	if err := set.Parse(args); err != nil {
-		return wrap(err, ExitUsage, "")
-	}
-	if set.NArg() != 1 {
-		return failure(ExitUsage, "",
-			"'camp forget' takes one composition identifier. 'camp list' prints them.")
-	}
-
-	hash := set.Arg(0)
-	record, found, err := state.Load(hash)
-	if err != nil {
-		return wrap(err, ExitFailure, "")
-	}
-	if !found {
-		return failure(ExitNotFound, "", "there is no record %q", hash)
-	}
-
-	// Forgetting an active composition would discard the only
-	// authoritative list of what has to be unmounted, which is down's to
-	// consume and not forget's to lose. The rule is state's, and every
-	// command that discards a record asks it there.
-	table, err := mountinfo.Read(mountinfo.Self)
-	if err != nil {
-		return wrap(err, ExitFailure, "")
-	}
-	if err := state.Release(record, table); err != nil {
-		return failure(ExitPrecondition, "", "%v", err)
-	}
-	ctx.printf("forgot the record for %s. Nothing else was deleted: not the "+
-		"repositories, not the storage, not the composed tree.\n", record.Live)
-	return nil
+	return failure(ExitPrecondition,
+		"a session's mounts go when its last process exits: leave the "+
+			"session, and start it again from the configuration as it now is",
+		"what is mounted here is not what %s plans", cfg.Source)
 }

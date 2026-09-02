@@ -59,7 +59,7 @@ func prepareWith(t *testing.T, env *testenv.Env, yaml string) *ready {
 	t.Helper()
 
 	cfg := env.Config(t, yaml)
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}

@@ -1,12 +1,12 @@
 # What runs on every push, and why it can run all of it.
 #
 # The measurements camp needs are the ones a laptop cannot give you: a
-# machine where sudo does not ask, where an install is free, and where
-# mounting for the whole machine disturbs nobody. A hosted runner is
-# exactly that -- it is a virtual machine that exists for the length of one
-# job and is thrown away afterwards -- so the group that used to need a
-# person at a terminal runs here directly, with no machine inside the
-# machine.
+# machine where an install is free, because the namespace permission is
+# granted to one installed binary path and the tests that need a real
+# composition skip without it. A hosted runner is exactly that -- it is a
+# virtual machine that exists for the length of one job and is thrown away
+# afterwards -- so that group runs here directly, with no machine inside
+# the machine.
 #
 # The same stage files run here and on the throwaway machine
 # measure/vm boots locally. They are in measure/vm/guest, they run in
@@ -37,17 +37,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: the ordinary build
+      - name: build, vet and test
         run: |
           go build ./...
           go vet ./...
           CAMP_TEST_ROOT="$RUNNER_TEMP/plain" go test ./...
-
-      - name: the build with the barriers, which nobody ships
-        run: |
-          go build -tags camptest ./...
-          go vet -tags camptest ./...
-          CAMP_TEST_ROOT="$RUNNER_TEMP/barriers" go test -tags camptest ./...
 
       - name: the package builds
         run: packaging/deb/build
@@ -93,8 +87,5 @@ jobs:
       - name: what it left behind, if it failed
         if: failure()
         run: |
-          echo "--- mounts under the composition and in /run/camp ---"
-          awk -v e="$HOME/campcheck" '$5 == e || index($5, e "/") == 1 ||
-              index($5, "/run/camp") == 1 {print $1, $5}' /proc/self/mountinfo || true
-          echo "--- records ---"
-          ls -la "$HOME/.local/state/camp" 2>/dev/null || echo "none"
+          echo "--- mounts under the composition ---"
+          awk -v e="$HOME/campcheck" '$5 == e || index($5, e "/") == 1 {print $1, $5}' /proc/self/mountinfo || true

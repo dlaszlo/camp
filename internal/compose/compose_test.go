@@ -71,22 +71,10 @@ type outcome struct {
 	SecondRefused []string `json:"second_refused"`
 	SecondMounted int      `json:"second_mounted"`
 
-	// The held teardown.
-	HeldStuck    []string `json:"held_stuck"`
-	HeldMessage  string   `json:"held_message"`
-	StillMounted bool     `json:"still_mounted"`
-
 	// Teardown.
 	TornDown int      `json:"torn_down"`
 	Stuck    []string `json:"stuck"`
 	Residue  []string `json:"residue"`
-
-	// The descriptor scenario: the privileged helper's own mount path.
-	DescriptorErr      string `json:"descriptor_err"`
-	DescriptorReadOnly bool   `json:"descriptor_read_only"`
-	DescriptorPrivate  bool   `json:"descriptor_private"`
-	DescriptorSame     bool   `json:"descriptor_same"`
-	DescriptorStale    string `json:"descriptor_stale"`
 
 	// The sweep scenario: the lock lying about a running session.
 	SweptWhileUp    []string `json:"swept_while_up"`
@@ -124,7 +112,7 @@ func inside() int {
 		fail("loading the configuration: %v", err)
 		return report(out)
 	}
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		fail("validation: %s", refused.Error())
 		return report(out)
@@ -138,7 +126,6 @@ func inside() int {
 
 	setup := compose.Setup{
 		Plan:    built,
-		Prefix:  built.Live,
 		Exclude: generated.Exclude,
 		UID:     os.Getuid(),
 		GID:     os.Getgid(),
@@ -151,10 +138,6 @@ func inside() int {
 		return shadow(out, setup, built)
 	case "repeat":
 		return repeat(out, setup, built, cfg)
-	case "held":
-		return held(out, setup, built)
-	case "descriptor":
-		return descriptor(out, built)
 	case "sweep":
 		return sweep(out, setup, built, cfg)
 	}
@@ -227,19 +210,28 @@ func writeResult(path, content string) string {
 	}
 }
 
+// teardown unmounts what the build made, in reverse, and looks at what is
+// left in the composed tree's directory.
+//
+// camp itself never does this: the kernel discards the namespace and every
+// mount in it when the session's last process exits. The test does it so
+// that the property invariant 3 names can be measured -- the directory is
+// empty once the mounts are gone, or something was written where it should
+// not have been.
 func teardown(out *outcome, built plan.Plan, result compose.Result) {
-	setup := compose.Setup{Plan: built, Prefix: built.Live}
-	targets := make([]string, 0, len(result.Mounted))
 	for index := len(result.Mounted) - 1; index >= 0; index-- {
-		targets = append(targets, setup.Target(result.Mounted[index]))
+		target := result.Mounted[index].Target
+		switch outcome, _ := mountx.Unmount(target); outcome {
+		case mountx.Unmounted:
+			out.TornDown++
+		case mountx.Busy:
+			out.Stuck = append(out.Stuck, target)
+		}
 	}
-	report := compose.Down(targets)
-	out.TornDown = len(report.Removed)
-	for _, stuck := range report.Stuck {
-		out.Stuck = append(out.Stuck, stuck.Target)
-	}
-	if left, err := compose.Residue(built.Live); err == nil {
-		out.Residue = left
+	if entries, err := os.ReadDir(built.Live); err == nil {
+		for _, entry := range entries {
+			out.Residue = append(out.Residue, entry.Name())
+		}
 	}
 }
 
@@ -300,7 +292,7 @@ func repeat(out outcome, setup compose.Setup, built plan.Plan, cfg config.Config
 	teardown(&out, built, first)
 
 	// And again, from the top, exactly as a second session would.
-	second, refused := plan.Prepare(cfg, plan.Namespace)
+	second, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		out.SecondRefused = refused.Rules()
 		out.Problems = append(out.Problems, "second validation: "+refused.Error())
@@ -316,7 +308,6 @@ func repeat(out outcome, setup compose.Setup, built plan.Plan, cfg config.Config
 
 	result := compose.Build(compose.Setup{
 		Plan:    second,
-		Prefix:  second.Live,
 		Exclude: generated.Exclude,
 		UID:     os.Getuid(),
 		GID:     os.Getgid(),
@@ -335,54 +326,6 @@ func repeat(out outcome, setup compose.Setup, built plan.Plan, cfg config.Config
 	}
 	probe(&out, second)
 	teardown(&out, second, result)
-	return report(out)
-}
-
-// held is the scenario where something is standing in the tree.
-//
-// A composition cannot be unmounted from under a process whose working
-// directory is inside it, and camp does not pretend otherwise: the mount
-// stays mounted, it is reported as still mounted with the holder named,
-// and the command fails. There is no lazy detach to make the ending look
-// clean.
-func held(out outcome, setup compose.Setup, built plan.Plan) int {
-	result := compose.Build(setup)
-	if !result.OK() {
-		out.Problems = append(out.Problems, result.Refused.Error())
-		return report(out)
-	}
-	out.Mounted = len(result.Mounted)
-
-	inside := filepath.Join(built.Live, ".registry")
-	holder := exec.Command("/bin/sh", "-c", "sleep 30")
-	holder.Dir = inside
-	if err := holder.Start(); err != nil {
-		out.Problems = append(out.Problems, err.Error())
-		return report(out)
-	}
-	defer func() {
-		_ = holder.Process.Kill()
-		_, _ = holder.Process.Wait()
-	}()
-
-	targets := make([]string, 0, len(result.Mounted))
-	for index := len(result.Mounted) - 1; index >= 0; index-- {
-		targets = append(targets, setup.Target(result.Mounted[index]))
-	}
-	teardownReport := compose.Down(targets)
-	for _, stuck := range teardownReport.Stuck {
-		out.HeldStuck = append(out.HeldStuck, stuck.Target)
-		out.HeldMessage += compose.DescribeStuck(stuck)
-	}
-
-	// What could not be removed is still there, and said to be.
-	if _, err := os.Stat(filepath.Join(inside, "events.jsonl")); err == nil {
-		out.StillMounted = true
-	}
-
-	_ = holder.Process.Kill()
-	_, _ = holder.Process.Wait()
-	_ = compose.Down(targets)
 	return report(out)
 }
 
@@ -426,77 +369,7 @@ func sweep(out outcome, setup compose.Setup, built plan.Plan, cfg config.Config)
 	return report(out)
 }
 
-// descriptor exercises the mount path the privileged helper uses, which
-// no mounting test ever ran.
-//
-// The helper mounts by descriptor so that the object it checked is the
-// object it mounts. What that costs is subtle: an O_PATH descriptor holds
-// the mount and dentry it was opened on, so once a bind is stacked on
-// that dentry the descriptor still names what is underneath -- and the
-// read-only remount and the propagation change, made through it, are
-// about the wrong mount. The helper's answer is open_tree and move_mount:
-// the bind is a detached clone, attached to the target descriptor, and
-// the clone's own descriptor names the mount from then on. This measures
-// the whole operation through the same entry point the helper uses, and
-// then proves the mechanism directly: the same MS_PRIVATE call through
-// the descriptor opened before the mount is the one that fails.
-func descriptor(out outcome, built plan.Plan) int {
-	source := built.Config.LowerPath()
-	target := filepath.Join(built.Config.Env, "descriptor-target")
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		out.Problems = append(out.Problems, err.Error())
-		return report(out)
-	}
-	open := func(path string) (int, error) {
-		return pathx.OpenBeneath(built.Config.Env, strings.Split(
-			strings.TrimPrefix(path, built.Config.Env+"/"), "/"), unix.O_PATH)
-	}
-	sourceFD, err := open(source)
-	if err != nil {
-		out.Problems = append(out.Problems, err.Error())
-		return report(out)
-	}
-	targetFD, err := open(target)
-	if err != nil {
-		out.Problems = append(out.Problems, err.Error())
-		return report(out)
-	}
-
-	mount := plan.Mount{Kind: plan.BindRO, Source: source, Target: target}
-	placed, err := mountx.MountByDescriptor(mount, sourceFD, targetFD,
-		mountx.NoOperands())
-	unix.Close(sourceFD)
-	if err != nil {
-		out.DescriptorErr = err.Error()
-	}
-	if placed {
-		var st unix.Statfs_t
-		if err := unix.Statfs(target, &st); err == nil {
-			out.DescriptorReadOnly = st.Flags&unix.ST_RDONLY != 0
-		}
-		if table, err := mountinfo.Read(mountinfo.Self); err == nil {
-			if entry, found := mountinfo.Top(table, target); found {
-				out.DescriptorPrivate = entry.Private()
-			}
-		}
-		var here, there unix.Stat_t
-		if unix.Stat(source, &here) == nil && unix.Stat(target, &there) == nil {
-			out.DescriptorSame = here.Dev == there.Dev && here.Ino == there.Ino
-		}
-
-		// The mechanism, shown rather than argued: the same call through the
-		// descriptor opened before the mount is the one that cannot work.
-		if err := unix.Mount("", fmt.Sprintf("/proc/self/fd/%d", targetFD),
-			"", unix.MS_PRIVATE, ""); err != nil {
-			out.DescriptorStale = err.Error()
-		}
-		_, _ = mountx.Unmount(target)
-	}
-	unix.Close(targetFD)
-	return report(out)
-}
-
-// lockedFlags is the C34 scenario: a read-only remount inside a user
+// lockedFlags is the C41 scenario: a read-only remount inside a user
 // namespace must replicate the source mount's locked flags or the kernel
 // refuses it. The test asserts the fix, and reproduces the old bug only
 // through the deliberately wrong call.
@@ -552,7 +425,7 @@ func run(t *testing.T, env *testenv.Env, scenario string) outcome {
 	t.Helper()
 
 	cfg := env.Config(t, "")
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("the fixture composition was refused before mounting:\n%v", refused)
 	}
@@ -637,7 +510,7 @@ func TestTheCompositionPassesEveryCheckAndBehavesAsDesigned(t *testing.T) {
 	}
 }
 
-// C34: the composition has to work on a nosuid filesystem, because the
+// C41: the composition has to work on a nosuid filesystem, because the
 // old failure there was a missing OR in the remount and not a property of
 // tmpfs. The test asserts the fix; the bug is reproduced only by the
 // deliberately flag-omitting call.
@@ -754,37 +627,12 @@ func TestARepeatedSessionAcceptsItsOwnScaffolding(t *testing.T) {
 	}
 }
 
-// A teardown that meets a process standing in the tree fails loudly,
-// names it, and leaves the composition where it is.
-func TestATeardownHeldByAProcessFailsLoudlyAndNamesIt(t *testing.T) {
-	env := testenv.NewEnv(t)
-	got := run(t, env, "held")
-
-	for _, problem := range got.Problems {
-		t.Errorf("inside the namespace: %s", problem)
-	}
-	if len(got.HeldStuck) == 0 {
-		t.Fatal("the teardown reported nothing stuck although a process was " +
-			"standing in the tree")
-	}
-	if !got.StillMounted {
-		t.Error("the mount camp could not remove is gone from the tree anyway. " +
-			"That is what a lazy detach does, and camp does not have one: what " +
-			"could not be removed is still mounted and is said to be")
-	}
-	for _, want := range []string{"held by", "Leave that directory"} {
-		if !strings.Contains(got.HeldMessage, want) {
-			t.Errorf("the message does not contain %q:\n%s", want, got.HeldMessage)
-		}
-	}
-}
-
 func TestANonEmptyLiveDirectoryStopsTheCompositionBeforeAnythingMounts(t *testing.T) {
 	env := testenv.NewEnv(t)
 	testenv.Write(t, filepath.Join(env.Live, "in-the-way.txt"), "x\n")
 
 	cfg := env.Config(t, "")
-	_, refused := plan.Prepare(cfg, plan.Namespace)
+	_, refused := plan.Prepare(cfg)
 	if !refused.Has("live-not-empty") {
 		t.Fatalf("expected the composition to be refused for a non-empty live "+
 			"directory; the rules that fired were %v", refused.Rules())
@@ -910,47 +758,5 @@ func TestTheSweepReadsTheKernelsSpellingOfAWorkDirectory(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(private, 0o755) })
 	if swept, kept := sweepWith("unreadable", filepath.Join(private, "snapshots", "7475", "work")); len(swept) != 1 || len(kept) > 0 {
 		t.Errorf("a container runtime's overlay stopped the sweep: swept %v, kept %v", swept, kept)
-	}
-}
-
-// The privileged helper's own mount path, run for real.
-//
-// It had never been run by any test, and it could not work: the read-only
-// remount and the propagation change were made through the descriptor
-// that was opened before the bind, which still names the object the bind
-// was stacked on. Every privileged composition failed on its first mount
-// and then reported a clean machine, because a mount was recorded for
-// rollback only after the whole operation finished.
-//
-// The bind is a clone attached with move_mount now, and the two calls
-// after it go through the clone's own descriptor. That is the part of
-// camp no machine has run: this is the test that runs it, on the first
-// kernel that gets the chance.
-func TestTheHelpersDescriptorMountCompletes(t *testing.T) {
-	env := testenv.NewEnv(t)
-	got := run(t, env, "descriptor")
-
-	for _, problem := range got.Problems {
-		t.Errorf("%s", problem)
-	}
-	if got.DescriptorErr != "" {
-		t.Fatalf("the helper's mount path failed: %s", got.DescriptorErr)
-	}
-	if !got.DescriptorSame {
-		t.Error("the target does not show the source after the bind")
-	}
-	if !got.DescriptorReadOnly {
-		t.Error("the bind is not read-only: the remount through the clone's " +
-			"own descriptor did not take")
-	}
-	if !got.DescriptorPrivate {
-		t.Error("the mount still propagates: the MS_PRIVATE call through the " +
-			"clone's own descriptor did not take")
-	}
-	if got.DescriptorStale == "" {
-		t.Error("the same call through the descriptor opened before the mount " +
-			"succeeded. That descriptor names the object underneath the mount, " +
-			"so if it works here the clone this test exists for is not what " +
-			"made the difference")
 	}
 }

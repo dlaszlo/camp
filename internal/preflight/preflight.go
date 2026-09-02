@@ -3,12 +3,12 @@
 //
 // Checked up front and named individually, because the failure modes
 // otherwise arrive disguised. Without OverlayFS the mount fails with
-// "invalid argument". Without /proc the holder report silently finds
-// nothing and a busy composition looks idle. Where unprivileged user
-// namespaces are restricted, the rootless mode fails while writing a uid
-// map, which reads as an internal error and is not one. On macOS or
-// Windows the whole approach is unavailable, and the honest thing is to
-// say so in one sentence rather than fail somewhere deep in a mount.
+// "invalid argument". Without /proc a lock's holder cannot be named and a
+// busy composition looks idle. Where unprivileged user namespaces are
+// restricted, a session fails while writing a uid map, which reads as an
+// internal error and is not one. On macOS or Windows the whole approach is
+// unavailable, and the honest thing is to say so in one sentence rather
+// than fail somewhere deep in a mount.
 package preflight
 
 import (
@@ -28,17 +28,6 @@ import (
 	"github.com/dlaszlo/camp/internal/fsx"
 	"github.com/dlaszlo/camp/internal/mountx"
 	"github.com/dlaszlo/camp/internal/plan"
-)
-
-// Mode is the way a composition is going to be built, because the two
-// modes need different things from the machine.
-type Mode string
-
-const (
-	// Namespace is the rootless mode: mounts inside a user namespace.
-	Namespace Mode = "namespace"
-	// Privileged is the system-wide mode: mounts visible to every process.
-	Privileged Mode = "privileged"
 )
 
 // Check is one requirement and whether this machine meets it.
@@ -62,21 +51,14 @@ func (c Check) Symbol() string {
 	}
 }
 
-// Run evaluates every requirement for a mode. All of them are evaluated,
-// so one run reports everything rather than one thing per attempt.
-func Run(mode Mode) []Check {
-	checks := []Check{platform(), procfs(), overlayfs(), mountAPI(), git()}
-	switch mode {
-	case Namespace:
-		checks = append(checks, userNamespaces())
-	case Privileged:
-		// No check for mount(8) or umount(8): camp does not use them. The
-		// privileged helper calls mount(2) directly, the same way the
-		// namespace mode does, because the messages the binaries print are
-		// translated and their exit codes say less than the syscall's errno.
-		checks = append(checks, privilege(), privilegedBehaviour())
-	}
-	return checks
+// Run evaluates every requirement. All of them are evaluated, so one run
+// reports everything rather than one thing per attempt.
+//
+// No check for mount(8) or umount(8): camp does not use them. It calls the
+// mount syscalls directly, because the messages the binaries print are
+// translated and their exit codes say less than the syscall's errno.
+func Run() []Check {
+	return []Check{platform(), procfs(), overlayfs(), mountAPI(), git(), userNamespaces()}
 }
 
 // Failures returns the checks that are fatal and unmet.
@@ -241,50 +223,6 @@ func git() Check {
 	}
 }
 
-func privilege() Check {
-	if os.Geteuid() == 0 {
-		return Check{Name: "privilege", OK: true, Detail: "running as root", Fatal: true}
-	}
-	if _, err := exec.LookPath("sudo"); err != nil {
-		return Check{
-			Name:   "privilege",
-			Detail: "not root and sudo is not installed",
-			Fatal:  true,
-			Hint:   "mounting needs root here; install sudo, run as root, or use 'camp run'",
-		}
-	}
-	return Check{
-		Name:   "privilege",
-		OK:     true,
-		Detail: "not root; sudo will be used and may ask for a password",
-		Fatal:  false,
-	}
-}
-
-// privilegedBehaviour says what this report does not know.
-//
-// The namespace mode is answered by doing it: a real overlay in a real
-// namespace, mounted and written to, in a directory that exists for a
-// moment. The privileged mode cannot be answered that way, because
-// answering it would mean running sudo -- asking somebody for a password
-// to satisfy a question they did not ask, and elevating to find out
-// whether elevating works.
-//
-// So it says so. What doctor knows about this mode is that sudo is
-// installed; whether root's overlay behaves is measured by 'camp up',
-// with a person at the terminal, and reported there.
-func privilegedBehaviour() Check {
-	return Check{
-		Name:   "privileged behaviour",
-		OK:     true,
-		Detail: "not tested; it needs a terminal",
-		Hint: "camp does not run sudo to answer a question. What this mode " +
-			"does on this machine is measured the first time you run 'camp up' " +
-			"-- which asks for a password, mounts, verifies at the live path, " +
-			"and says what it found.",
-	}
-}
-
 // ProbeArg is the hidden argument the capability probe is started with.
 //
 // The child does one thing: it tries to make mount propagation private
@@ -322,7 +260,7 @@ const overlayLine = "overlay: "
 // that a mount succeeds for this user in this namespace, that a write to
 // a lower-provided file copies up rather than failing, or that removing
 // one leaves the whiteout the design has to preclude. Those are the
-// behaviours doctor claims when it says the mode is available, and this
+// behaviours doctor claims when it says camp can run here, and this
 // is the only way to claim them honestly: do them, in a directory that
 // exists for a moment inside a namespace nothing else can see.
 func probeOverlay() (result string) {
@@ -363,7 +301,7 @@ func probeOverlay() (result string) {
 		Lower:  []string{lower.Root()},
 		Upper:  filepath.Join(area.Root(), "upper"),
 		Work:   filepath.Join(area.Root(), "work"),
-		Xattr:  plan.Namespace.Xattr(),
+		Xattr:  plan.UserXattr,
 	}
 	if _, err := mountx.Mount(mount); err != nil {
 		return "a real overlay could not be mounted here: " + err.Error()
@@ -503,8 +441,7 @@ func restrictionHint(detail string) string {
 			"can create one. Raising it affects every program on the machine, " +
 			"and it does not survive a reboot unless you also write it to " +
 			"/etc/sysctl.d:\n" +
-			"  sudo sysctl -w user.max_user_namespaces=15000\n" +
-			"Or use the system-wide mode instead: 'camp up'."
+			"  sudo sysctl -w user.max_user_namespaces=15000"
 	}
 
 	if allowed, ok := readInt("/proc/sys/kernel/unprivileged_userns_clone"); ok && allowed == 0 {
@@ -512,8 +449,7 @@ func restrictionHint(detail string) string {
 			"user namespaces outright -- some Debian and hardened kernels do. " +
 			"There is no per-binary exception for it; turning it on affects " +
 			"every program on the machine:\n" +
-			"  sudo sysctl -w kernel.unprivileged_userns_clone=1\n" +
-			"Or use the system-wide mode instead: 'camp up'."
+			"  sudo sysctl -w kernel.unprivileged_userns_clone=1"
 	}
 
 	if restricted, ok := readInt("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"); ok && restricted == 1 {
@@ -521,19 +457,20 @@ func restrictionHint(detail string) string {
 			"the profile camp ships (packaging/apparmor/camp) so that this one " +
 			"binary may create one -- the profile names the path the binary is " +
 			"installed at, and a copy run from anywhere else is not covered by " +
-			"it. Or use the system-wide mode: 'camp up'."
+			"it."
 	}
 
 	if enforcing, ok := readInt("/sys/fs/selinux/enforce"); ok && enforcing == 1 {
 		return "Something denied the namespace and none of the usual switches " +
 			"is set. SELinux is enforcing on this machine, so it is the likely " +
 			"cause: check 'sudo ausearch -m AVC -ts recent' for a denial naming " +
-			"this binary. Or use the system-wide mode: 'camp up'."
+			"this binary."
 	}
 
 	return "Something denied the namespace and none of the switches camp knows " +
 		"about is set. Check the kernel log ('sudo dmesg | tail') for a denial. " +
-		"The system-wide mode does not need a namespace at all: 'camp up'."
+		"camp cannot compose without one: every mount it makes lives inside " +
+		"the namespace it creates."
 }
 
 func readInt(path string) (int, bool) {

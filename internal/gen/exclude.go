@@ -43,7 +43,7 @@ const MarkerPrefix = "# camp:generated "
 
 // Marker renders the whole first line of the generated block.
 func Marker(hash string) string {
-	return MarkerPrefix + hash + " -- do not edit; regenerated at every up"
+	return MarkerPrefix + hash + " -- do not edit; regenerated at every start"
 }
 
 // ExcludeLines derives the patterns, from the raw lower root listing and

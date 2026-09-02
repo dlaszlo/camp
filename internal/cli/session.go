@@ -9,15 +9,13 @@ import (
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/locks"
 	"github.com/dlaszlo/camp/internal/mountinfo"
-	"github.com/dlaszlo/camp/internal/plan"
-	"github.com/dlaszlo/camp/internal/preflight"
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/report"
 	"github.com/dlaszlo/camp/internal/session"
 )
 
-// The namespace mode: the primary way camp runs, and the one that needs
-// no privilege.
+// The two commands that compose: a session, built inside a namespace, that
+// needs no privilege and leaves nothing behind.
 func cmdRun(ctx *context, args []string) error {
 	set, file := flagsFor("run")
 	if err := set.Parse(args); err != nil {
@@ -37,13 +35,13 @@ func cmdShell(ctx *context, args []string) error {
 // enter builds the composition inside a namespace and hands over.
 //
 // Nothing is left behind when the session ends: the kernel discards the
-// namespace and every mount in it. There is no down to run.
+// namespace and every mount in it. There is nothing to take down.
 func enter(ctx *context, file string, argv []string) error {
 	cfg, err := resolve(ctx, file)
 	if err != nil {
 		return err
 	}
-	if err := requireMachine(preflight.Namespace); err != nil {
+	if err := requireMachine(); err != nil {
 		return err
 	}
 
@@ -81,7 +79,7 @@ func enter(ctx *context, file string, argv []string) error {
 	// the environment -- is narrated by the init, which is where those
 	// things happen and which is one sequential process, so the lines
 	// arrive in the order the steps did.
-	composition, err := getReady(cfg, plan.Namespace, report.Narrate(ctx.err))
+	composition, err := getReady(cfg, report.Narrate(ctx.err))
 	if err != nil {
 		return err
 	}
@@ -129,9 +127,9 @@ func notInside(cfg config.Config) error {
 
 // sweep clears work directories left by sessions that are gone.
 //
-// The namespace mode has no down: the kernel tears the namespace down,
-// mounts included, but camp's work directory is on the real filesystem
-// and outlives it. So the next run sweeps. An entry whose marker cannot
+// A session has no teardown step of its own: the kernel tears the
+// namespace down, mounts included, but camp's work directory is on the
+// real filesystem and outlives it. So the next run sweeps. An entry whose marker cannot
 // be read is reported and left alone -- camp removes only what it can
 // prove is its own.
 func sweep(say *report.Narrator, cfg config.Config, table []mountinfo.Entry) {

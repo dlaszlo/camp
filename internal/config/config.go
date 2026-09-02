@@ -1,7 +1,7 @@
 // Package config reads the one file that states intent.
 //
 // Everything else camp holds is derived: the plan, the exclude, the
-// inventory, the state record. This file is the only thing a person
+// inventory. This file is the only thing a person
 // writes, so it is read strictly -- an unknown key, an unknown step kind
 // or a path that could climb out of what it is resolved against is
 // refused rather than guessed at.
@@ -56,15 +56,15 @@ type Config struct {
 	// this still the file camp is working from" must ask it against what
 	// camp actually parsed. Re-reading the path answers a different
 	// question by a hair -- the file may already have changed between the
-	// parse and the second read -- and the two places that ask are the
-	// post-prepare check and the digest the privileged record keeps.
+	// parse and the second read -- and the place that asks is the
+	// post-prepare check.
 	Declared []byte
 	// Env is the environment root: absolute, and the one path camp ever
 	// resolves through symlinks.
 	Env string
 	// Root is that same directory, resolved once and held open for the
 	// whole command. Env is the recorded, reported path; Root is the
-	// capability every write, mount and privileged step is addressed from,
+	// capability every write and mount is addressed from,
 	// so that a rename of the environment between validation and use
 	// cannot redirect camp to somebody else's directory. It is beside Env
 	// rather than instead of it: a great many things read the path.
@@ -106,17 +106,9 @@ type Config struct {
 //
 // It exists as a section because more than one key is scoped this way, and
 // because a flat key does not say in the file what it applies to. What is
-// mounted, protected and generated is the composition itself -- the same
-// in every mode -- and stays outside this section. The privileged mode
-// starts no session, so it announces this section rather than applying it
-// or refusing it (§14): an explicit statement of non-application cannot
-// look applied, and refusing would only force editing the file to move
-// between the modes.
+// mounted, protected and generated is the composition itself, and stays
+// outside this section.
 type Session struct {
-	// Present is whether the file has the section at all. It is what the
-	// privileged mode announces on; an empty section declares nothing but is
-	// still present.
-	Present bool
 
 	// Identity selects how the user is mapped inside the namespace. Empty
 	// is route A, the only route camp takes on its own.
@@ -144,7 +136,7 @@ type Declaration struct {
 // Declares reports whether the session declares any environment variable.
 func (s Session) Declares() bool { return len(s.Environment) > 0 }
 
-// Identity is the uid-mapping route for the namespace mode.
+// Identity is the uid-mapping route of the session's namespace.
 type Identity string
 
 const (
@@ -678,17 +670,13 @@ func checkMovedIdentity(value string, refused *refusal.List) {
 			"the mounts. Nothing else about it changed.", enc.Encode(value))
 }
 
-// parseSession reads the section that configures the session.
-//
-// Presence is exactly whether the key is in the file, which is what the
-// privileged mode announces on. A section with nothing under it is still
-// a section: it declares nothing, and saying so is not the same as
-// saying nothing.
+// parseSession reads the section that configures the session. A section
+// with nothing under it is legal and declares nothing.
 func parseSession(node yaml.Node, refused *refusal.List) Session {
 	if node.Kind == 0 {
 		return Session{}
 	}
-	session := Session{Present: true}
+	session := Session{}
 	if node.Tag == "!!null" {
 		return session
 	}

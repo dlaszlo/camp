@@ -88,10 +88,9 @@ Description: Compose several git repositories into one working directory
  in the code repository or in machine-local storage -- never in the
  workspace.
  .
- It has two modes. The rootless one composes inside a user namespace that
- belongs to the session and vanishes with it. The system-wide one mounts
- for the whole machine, for when something outside the session has to see
- the tree, and needs root for that one step only.
+ It composes inside a user namespace that belongs to the session and
+ vanishes with it: no privilege is needed, nothing outside the session
+ sees the tree, and nothing is left behind when the session ends.
 CONTROL
 
 cat > "$stage/DEBIAN/postinst" <<'POSTINST'
@@ -99,10 +98,10 @@ cat > "$stage/DEBIAN/postinst" <<'POSTINST'
 set -e
 
 # The profile grants one binary the permission to create a user namespace,
-# which is what the rootless mode needs on a machine where
+# which every camp session needs on a machine where
 # kernel.apparmor_restrict_unprivileged_userns is 1. Loading it is not
-# fatal: the system-wide mode does not need it, and a machine without
-# apparmor has nothing to load it into.
+# fatal here: a machine without apparmor has nothing to load it into, and
+# 'camp doctor' says so where it matters.
 if [ "$1" = configure ] && command -v apparmor_parser >/dev/null 2>&1; then
     apparmor_parser -r -T -W /etc/apparmor.d/camp || true
 fi

@@ -30,12 +30,10 @@ jobs:
 
       # Nothing is released that has not passed the suite on the machine
       # that is about to build it.
-      - name: both builds
+      - name: build, vet and test
         run: |
           go build ./... && go vet ./...
           CAMP_TEST_ROOT="$RUNNER_TEMP/plain" go test ./...
-          go build -tags camptest ./... && go vet -tags camptest ./...
-          CAMP_TEST_ROOT="$RUNNER_TEMP/barriers" go test -tags camptest ./...
 
       - name: build the package
         id: package

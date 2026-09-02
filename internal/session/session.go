@@ -1,4 +1,5 @@
-// Package session is the namespace mode: the primary way camp runs.
+// Package session builds the composition inside a namespace of its own
+// and supervises what runs there. It is the one way camp composes.
 //
 // A session is two processes, and the split between them is the whole
 // design.
@@ -28,8 +29,8 @@
 // resident holding the composition open for every terminal that attaches
 // later.
 //
-// There is no down here, and no state record. When the last process in
-// the namespace exits the kernel discards the namespace and every mount
+// There is no teardown command, and no state record. When the last process
+// in the namespace exits the kernel discards the namespace and every mount
 // in it: teardown cannot fail, there is nothing to hold it open, and no
 // half-removed state to reason about. What a session does leave is its
 // end-of-session report, which is output rather than authority.
@@ -365,7 +366,6 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 
 	setup := compose.Setup{
 		Plan:    built,
-		Prefix:  built.Live,
 		Exclude: exclude,
 		UID:     insideUID,
 		GID:     insideGID,
@@ -433,8 +433,9 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	// The last thing this process does before the kernel takes the
 	// namespace apart: look, while the composition still exists, and leave
 	// what it found where somebody will meet it. This is the only moment
-	// anything can look -- there is no down here, and by the time a
-	// detached session empties, its terminal is long gone.
+	// anything can look -- nothing runs after the kernel takes the
+	// namespace, and by the time a detached session empties, its terminal
+	// is long gone.
 	farewell(built, stderr)
 
 	pipe.Close()
@@ -478,9 +479,9 @@ func locksMatch(built plan.Plan, upper, live *locks.Held) error {
 	return nil
 }
 
-// farewell runs the same read-only pass the privileged down runs, writes
-// it where the next camp command will find it, and prints it when there
-// is still a terminal attached.
+// farewell runs the read-only end-of-session pass, writes what it found
+// where the next camp command will find it, and prints it when there is
+// still a terminal attached.
 func farewell(built plan.Plan, stderr io.Writer) {
 	found := drift.Refresh(built)
 	if found.Empty() {
@@ -512,7 +513,7 @@ func rebuild(configPath string) (plan.Plan, []byte, refusal.List) {
 		return plan.Plan{}, nil, refused
 	}
 
-	built, problems := plan.Prepare(cfg, plan.Namespace)
+	built, problems := plan.Prepare(cfg)
 	if !problems.Empty() {
 		return plan.Plan{}, nil, problems
 	}

@@ -19,7 +19,6 @@ import (
 	"github.com/dlaszlo/camp/internal/prepare"
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/report"
-	"github.com/dlaszlo/camp/internal/state"
 )
 
 // composeCommands are the ones that mount something, and the ones that
@@ -28,11 +27,7 @@ func composeCommands() []command {
 	return []command{
 		{"run", "run a command inside the composition, without root", cmdRun},
 		{"shell", "open a shell inside the composition, without root", cmdShell},
-		{"up", "assemble the composed tree for the whole machine", cmdUp},
-		{"down", "take the composed tree apart", cmdDown},
 		{"status", "what is mounted, and what is not", cmdStatus},
-		{"list", "every recorded composition", cmdList},
-		{"forget", "drop a composition's record; deletes nothing else", cmdForget},
 		{"accept", "record the two repositories' root entries as they are now", cmdAccept},
 		{"explain", "describe the composed tree to whoever is standing in it", cmdExplain},
 	}
@@ -63,12 +58,12 @@ func (r *ready) release() { r.Locks.Release() }
 // still the one moment when repairing a repository by hand is safe:
 // nothing is mounted, and nothing anybody does can land in the wrong
 // place.
-func getReady(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, error) {
+func getReady(cfg config.Config, say *report.Narrator) (*ready, error) {
 	upper, upperOK := repositoryParts(cfg, cfg.Upper)
 	if !upperOK {
 		// The configuration does not name a usable upper; let validation
 		// say so properly rather than failing on a lock.
-		return nil, validationError(cfg, mode)
+		return nil, validationError(cfg)
 	}
 
 	// The one directory camp makes for the reader rather than asking them
@@ -101,7 +96,7 @@ func getReady(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, 
 		}
 		// Anything else -- a missing directory, a symlink where a directory
 		// was expected -- has a better message in the validation.
-		return nil, validationError(cfg, mode)
+		return nil, validationError(cfg)
 	}
 	say.Locks(cfg.UpperPath(), cfg.Live())
 
@@ -122,8 +117,8 @@ func getReady(cfg config.Config, mode plan.Mode, say *report.Narrator) (*ready, 
 		say.Prepared(len(cfg.Prepare))
 	}
 
-	built, refused := plan.Prepare(cfg, mode)
-	refused.Extend(runtimeChecks(built, mode))
+	built, refused := plan.Prepare(cfg)
+	refused.Extend(runtimeChecks(built))
 	if !refused.Empty() {
 		pair.Release()
 		return nil, refusedComposition(refused)
@@ -193,11 +188,12 @@ func lockWork(cfg config.Config) (*locks.Held, error) {
 // A command that renames the code repository and puts another directory
 // at the same path leaves camp holding a lock on an inode nothing will
 // mount, while the composition it goes on to build is one no lock
-// protects -- which is the state the locks exist to make impossible, and
-// which the namespace init would catch at its own re-check while the
-// privileged mode would not.
+// protects -- which is the state the locks exist to make impossible. The
+// init re-checks the same thing against the locks it inherits, and this
+// check is what lets the launcher refuse first, with a message about the
+// prepare commands rather than about a file that changed.
 //
-// A command that edits the configuration leaves the front end planning
+// A command that edits the configuration leaves the launcher planning
 // from one file and the process that mounts reading another. Compared by
 // bytes, and the whole file: a change camp cannot see the meaning of is
 // still a change it must not plan through.
@@ -276,8 +272,8 @@ func repositoryParts(cfg config.Config, name string) ([]string, bool) {
 	return repo.Path.Components(), true
 }
 
-func validationError(cfg config.Config, mode plan.Mode) error {
-	_, refused := plan.Prepare(cfg, mode)
+func validationError(cfg config.Config) error {
+	_, refused := plan.Prepare(cfg)
 	if refused.Empty() {
 		return failure(ExitFailure, "",
 			"this composition could not be locked, and validation found nothing "+
@@ -296,7 +292,7 @@ func refusedComposition(refused refusal.List) error {
 
 // runtimeChecks are the refusals that need the machine's current state
 // rather than the configuration's.
-func runtimeChecks(built plan.Plan, mode plan.Mode) refusal.List {
+func runtimeChecks(built plan.Plan) refusal.List {
 	var refused refusal.List
 	if built.Live == "" {
 		return refused
@@ -308,34 +304,11 @@ func runtimeChecks(built plan.Plan, mode plan.Mode) refusal.List {
 		return refused
 	}
 	refused.Extend(locks.Residue(table, built.Live, built.Config.LowerPath()))
-	if mode == plan.Privileged {
-		refused.Extend(locks.ScanUpper(table, built.Config.UpperPath()))
-	}
-
-	// A record in an active phase means a composition on this live path is
-	// mounted, or was and did not finish coming down. Either way status
-	// and down come before another up.
-	record, found, err := state.Load(built.Hash)
-	switch {
-	case err != nil:
-		refused.Add("record-unreadable",
-			"the record for this composition could not be read: %v.\n"+
-				"It is at %s. It names everything a teardown would have to remove, "+
-				"so camp will not start a second composition without knowing what "+
-				"the first one left.", err, state.Path(built.Hash))
-	case found && record.Phase.Active():
-		refused.Add("record-active",
-			"there is already a record for this composed tree, in phase %q.\n"+
-				"Run 'camp status' to see what is mounted, and 'camp down' to "+
-				"remove it. The record is the only authoritative list of what a "+
-				"teardown has to undo, and starting a second composition over it "+
-				"would lose that list.", record.Phase)
-	}
 	return refused
 }
 
-func requireMachine(mode preflight.Mode) error {
-	failed := preflight.Failures(preflight.Run(mode))
+func requireMachine() error {
+	failed := preflight.Failures(preflight.Run())
 	if len(failed) == 0 {
 		return nil
 	}
@@ -344,11 +317,11 @@ func requireMachine(mode preflight.Mode) error {
 		details = append(details, check.Name+": "+check.Detail)
 	}
 	code := ExitPrecondition
-	if failed[0].Name == "privilege" || failed[0].Name == "user namespaces" {
+	if failed[0].Name == "user namespaces" {
 		code = ExitPrivilege
 	}
 	return failure(code, failed[0].Hint,
-		"this machine cannot run camp in %s mode -- %s", mode, strings.Join(details, "; "))
+		"this machine cannot run camp -- %s", strings.Join(details, "; "))
 }
 
 // makeLive creates the composed tree's directory when it is not there.

@@ -16,7 +16,7 @@ import (
 func built(t *testing.T, env *testenv.Env) plan.Plan {
 	t.Helper()
 	cfg := env.Config(t, "")
-	p, refused := plan.Prepare(cfg, plan.Namespace)
+	p, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}
@@ -199,7 +199,7 @@ func TestTheGateComparisonRerunsAndReports(t *testing.T) {
 	testenv.Write(t, filepath.Join(env.Workspace, "README.md"), "appeared\n")
 
 	cfg := env.Config(t, "")
-	p, _ := plan.Prepare(cfg, plan.Namespace)
+	p, _ := plan.Prepare(cfg)
 	if p.Live == "" {
 		t.Skip("the composition was refused before a plan existed")
 	}
@@ -230,7 +230,7 @@ func TestNothingToSayMeansNothingIsSaid(t *testing.T) {
 func TestAScanThatCouldNotRunIsSaidRatherThanOmitted(t *testing.T) {
 	env := testenv.NewEnv(t)
 	cfg := env.Config(t, "")
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}

@@ -60,8 +60,7 @@ const (
 // Local as asked for, and unambiguous to a parser because the offset is in
 // every line. The one caveat worth knowing: across a daylight-saving
 // change local times repeat for an hour, so a plain lexicographic sort of
-// the file is briefly out of order even though no line is ambiguous. The
-// state record stamps UTC and is a different kind of thing.
+// the file is briefly out of order even though no line is ambiguous.
 const Stamp = "2006-01-02T15:04:05.000-07:00"
 
 // Trouble is how the log says the one thing that can change about it

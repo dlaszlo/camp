@@ -1,8 +1,8 @@
 # A worked configuration, with three repositories.
 #
 # This file lives at $ENV/.camp/config.yml. It states intent, and nothing
-# else: the mount plan, the exclude, the inventory and the state record
-# are all derived from it.
+# else: the mount plan, the exclude and the inventory are all derived from
+# it.
 #
 # The names here are an example. Use your own.
 
@@ -99,10 +99,9 @@ steps:
   - git_exclude
 
 # The session -- what 'camp run' and 'camp shell' start. Everything here
-# configures that session and nothing configures the tree, which is why it
-# has a section of its own: 'camp up' mounts the tree and exits, so it
-# starts no session, applies none of this, and prints one line saying so
-# rather than leaving you to guess.
+# configures the processes inside that session and nothing configures the
+# tree, which the keys above describe; that is why it has a section of its
+# own.
 #
 # camp writes none of the launchers named below and knows nothing about
 # ssh: it applies what this file declares, and the next program that

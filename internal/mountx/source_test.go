@@ -17,8 +17,7 @@ import (
 // while a shell whose working directory is inside keeps writing through
 // it -- and a second overlay then mounts on the same upper and writes
 // too, which is exactly the state the locks exist to prevent, re-entered
-// by the tool's own switch. In the privileged mode that table is the only
-// steady-state guard there is.
+// by the tool's own switch.
 //
 // So a mount that cannot be removed is an error: named, reported, and a
 // non-zero exit. It was --force wearing another name, and the flag that
@@ -148,9 +147,8 @@ func TestEveryFsconfigCallGoesThroughTheDescription(t *testing.T) {
 		t.Errorf("an overlay operand reaches the kernel outside the described "+
 			"sequence:\n  %s\n\n"+
 			"What camp tells the kernel about a composed tree is one object: "+
-			"DescribeOverlay derives it, the mount is performed from it, the "+
-			"record keeps it and the verification compares the mounted "+
-			"filesystem against it. A call made anywhere else is an operand "+
-			"nothing else knows about.", strings.Join(offenders, "\n  "))
+			"DescribeOverlay derives it, the mount is performed from it and "+
+			"the verification compares the mounted filesystem against it. A "+
+			"call made anywhere else is an operand nothing else knows about.", strings.Join(offenders, "\n  "))
 	}
 }

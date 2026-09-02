@@ -311,23 +311,13 @@ func session(env *testenv.Env, body string) string {
 	return env.YAML() + "\nsession:\n" + body
 }
 
-// Absent, present-and-empty, and present-with-declarations are three
-// different states, and the privileged mode's announcement hangs on the
-// difference between the first and the second.
-func TestAnAbsentSectionAndAnEmptyOneAreDifferentStates(t *testing.T) {
+// A session: section with an empty environment map is legal and declares
+// nothing.
+func TestAnEmptyEnvironmentMapDeclaresNothing(t *testing.T) {
 	env := testenv.NewEnv(t)
-
-	cfg := env.Config(t, "")
-	if cfg.Session.Present {
-		t.Error("a configuration with no session: section reports one")
-	}
-
 	cfg, err := env.TryConfig(session(env, "  environment: {}\n"))
 	if err != nil {
 		t.Fatalf("an empty environment map is legal and was refused:\n%v", err)
-	}
-	if !cfg.Session.Present {
-		t.Error("a session: section with an empty map is still present")
 	}
 	if cfg.Session.Declares() {
 		t.Error("an empty map declares nothing")
@@ -420,17 +410,12 @@ func TestSessionShapeRefusals(t *testing.T) {
 	}
 }
 
-// A section with nothing under it is still a section. It declares nothing,
-// and the privileged mode saying so is not the same as it saying nothing.
-func TestASectionWithNoBodyIsStillPresent(t *testing.T) {
+// A section with nothing under it is legal, and declares nothing.
+func TestASectionWithNoBodyDeclaresNothing(t *testing.T) {
 	env := testenv.NewEnv(t)
 	cfg, err := env.TryConfig(env.YAML() + "\nsession:\n")
 	if err != nil {
 		t.Fatalf("an empty section is legal and was refused:\n%v", err)
-	}
-	if !cfg.Session.Present {
-		t.Error("'session:' with nothing under it reports no section at all, so " +
-			"the privileged mode would say nothing about a key that is in the file")
 	}
 	if cfg.Session.Declares() {
 		t.Error("an empty section declares something")

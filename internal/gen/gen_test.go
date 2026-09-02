@@ -24,7 +24,7 @@ import (
 func prepared(t *testing.T, env *testenv.Env, yaml string) (plan.Plan, gen.Output, refusal.List) {
 	t.Helper()
 	cfg := env.Config(t, yaml)
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("the composition was refused before generation:\n%v", refused)
 	}
@@ -151,7 +151,7 @@ func TestAMissingRepositoryExcludeIsRefusedWithBothCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := env.Config(t, "")
-	built, _ := plan.Prepare(cfg, plan.Namespace)
+	built, _ := plan.Prepare(cfg)
 	if built.Work == "" {
 		t.Skip("the composition was already refused for the missing directory")
 	}
@@ -199,11 +199,11 @@ func TestIslandsComeFromTrackedContentAndNotFromTheRawListing(t *testing.T) {
 
 // The generator's output is hostile data. Whoever can edit the
 // configuration can choose the program that runs at prepare, and in the
-// privileged mode the mounts that follow are made by root.
+// mounts that follow are made on what it produced.
 func TestHostileGeneratorOutputIsRefused(t *testing.T) {
 	env := testenv.NewEnv(t)
 	cfg := env.Config(t, "")
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}
@@ -302,7 +302,7 @@ func TestTheScaffoldManifestAcceptsItsOwnAttachmentPointsOnASecondRun(t *testing
 func TestAnUnrecordedFileInTheWaterRefusesTheIsland(t *testing.T) {
 	env := testenv.NewEnv(t)
 	cfg := env.Config(t, "")
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}
@@ -479,7 +479,7 @@ func TestACodeRepositoryWhoseIndexCannotBeReadStopsTheComposition(t *testing.T) 
 	}
 	t.Cleanup(func() { os.Chmod(index, 0o644) })
 
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if refused.Empty() {
 		if err := os.MkdirAll(built.Work, 0o755); err != nil {
 			t.Fatal(err)
@@ -533,7 +533,7 @@ func TestAnAmbientGitVariableCannotUnlockAMountOverTrackedCode(t *testing.T) {
 			// what is under test.
 			t.Setenv(hostile.name, filepath.Join(env.Path, hostile.value))
 
-			built, refused := plan.Prepare(cfg, plan.Namespace)
+			built, refused := plan.Prepare(cfg)
 			if refused.Empty() {
 				if err := os.MkdirAll(built.Work, 0o755); err != nil {
 					t.Fatal(err)
@@ -838,7 +838,7 @@ session:
 func TestTheShippedStepRefusesWhenGitIsNotInstalled(t *testing.T) {
 	env := testenv.NewEnv(t)
 	cfg := env.Config(t, "")
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}
@@ -922,7 +922,7 @@ func TestInsideAnAllowListedDirectoryTheExcludeNamesEachWorkspacePath(t *testing
 // writable machine-local storage -- so an edit that should fail loudly
 // succeeds and lands in no repository. An entry added is a name that
 // exists but that the source does not contribute, mounted on the
-// generator's say-so, by root in the privileged mode.
+// generator's say-so.
 func TestAGeneratorsIslandsMustMatchWhatTheSourceContributes(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -1057,7 +1057,7 @@ func generateFrom(configPath string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		fmt.Fprintln(os.Stderr, refused.Error())
 		return 2

@@ -1,14 +1,14 @@
 // Package nsx creates the namespace a composition lives in, and decides
 // who the processes inside it are.
 //
-// The namespace mode is primary. Three things follow from building the
-// composition inside a user and mount namespace, and together they are
-// why it is primary: no privilege is needed, because a process may mount
-// inside a user namespace it created itself; nothing leaks, because the
-// mounts exist only for processes inside; and teardown cannot fail,
-// because when the last process exits the kernel discards the namespace
-// and every mount in it -- there is no unmount to refuse and no
-// half-removed state to reason about.
+// Three things follow from building the composition inside a user and
+// mount namespace, and together they are why camp does it no other way: no
+// privilege is needed, because a process may mount inside a user namespace
+// it created itself; nothing leaks, because the mounts exist only for
+// processes inside; and teardown cannot fail, because when the last
+// process exits the kernel discards the namespace and every mount in it --
+// there is no unmount to refuse and no half-removed state to reason
+// about.
 //
 // Identity is the part that needed a decision. Two routes exist and camp
 // takes exactly one of them by itself:
@@ -32,7 +32,7 @@
 // permission checks against host files keep honouring them. Measured:
 // inside the namespace docker's group-owned socket still works and a
 // group-readable log still reads. That is what makes the pre-push gate
-// run inside the primary mode.
+// run inside a session.
 package nsx
 
 import (
@@ -270,7 +270,7 @@ func MountProc() error {
 // Detach stops every mount made here from travelling back out.
 //
 // Mounts propagate by default on a systemd machine, and without this the
-// isolation the whole mode rests on would be an illusion: a mount made
+// isolation the whole design rests on would be an illusion: a mount made
 // inside would appear outside, on the backing store's own path.
 func Detach() error {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {

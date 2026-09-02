@@ -32,7 +32,7 @@ import (
 // supplementary groups the caller had outside still grant access to host
 // files inside, even though setgroups is denied and they display as
 // nogroup -- which is what makes the repository's own pre-push gate run
-// in this mode.
+// inside a session.
 //
 // Running it needs permission to create a user namespace. On this machine
 // that permission is granted by an AppArmor profile to one installed
@@ -303,7 +303,7 @@ func TestRouteAKeepsTheUserAndGivesTheCapabilityBack(t *testing.T) {
 		t.Errorf("%s could not be read inside the namespace. setgroups is "+
 			"denied there and the groups display as nogroup, but the kernel "+
 			"credential retains them and host permission checks keep honouring "+
-			"them -- this is what makes the pre-push gate run in this mode",
+			"them -- this is what makes the pre-push gate run inside a session",
 			groupFile)
 	}
 }

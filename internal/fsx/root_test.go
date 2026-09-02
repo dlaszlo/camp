@@ -72,12 +72,13 @@ func TestARenamedEnvironmentDoesNotRedirectAWriteIntoARepository(t *testing.T) {
 	}
 }
 
-// A base that is itself a symlink -- XDG_STATE_HOME is the one camp meets
-// -- is resolved once, when the root is opened, and the root holds what it
-// resolved to. Pointing the link somewhere else afterwards moves nothing.
+// A base that is itself a symlink -- an env: written through one is how
+// camp meets it -- is resolved once, when the root is opened, and the root
+// holds what it resolved to. Pointing the link somewhere else afterwards
+// moves nothing.
 func TestARootOpenedOnALinkHoldsWhatTheLinkPointedAt(t *testing.T) {
 	scratch := t.TempDir()
-	intended := filepath.Join(scratch, "state")
+	intended := filepath.Join(scratch, "environment")
 	mkdir(t, intended)
 	repository := filepath.Join(scratch, "code")
 	mkdir(t, filepath.Join(repository, "src"))
@@ -93,7 +94,7 @@ func TestARootOpenedOnALinkHoldsWhatTheLinkPointedAt(t *testing.T) {
 		t.Errorf("the root is called %q; it has to name the directory it "+
 			"resolved to, because that is the one it holds", root.Name())
 	}
-	area := fsx.State(root, "camp")
+	area := fsx.Reports(root)
 	before := tree(t, repository)
 
 	// The link now names a repository. A base resolved again at every write
@@ -105,18 +106,18 @@ func TestARootOpenedOnALinkHoldsWhatTheLinkPointedAt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := area.Ensure(0o700); err != nil {
-		t.Fatalf("the state area could not be made: %v", err)
+	if err := area.Ensure(0o755); err != nil {
+		t.Fatalf("the reports area could not be made: %v", err)
 	}
-	if err := area.Write("cbfbbb63ee0d.json", []byte("{}\n"), 0o600); err != nil {
-		t.Fatalf("the record could not be written: %v", err)
+	if err := area.Write("cbfbbb63ee0d-1", []byte("a report\n"), 0o644); err != nil {
+		t.Fatalf("the report could not be written: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(intended, "camp", "cbfbbb63ee0d.json")); err != nil {
-		t.Errorf("the record did not land where the root resolved to: %v", err)
+	if _, err := os.Stat(filepath.Join(intended, ".camp", "reports", "cbfbbb63ee0d-1")); err != nil {
+		t.Errorf("the report did not land where the root resolved to: %v", err)
 	}
 	if after := tree(t, repository); after != before {
-		t.Errorf("the record landed in the repository the link was pointed at "+
+		t.Errorf("the report landed in the repository the link was pointed at "+
 			"afterwards:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }

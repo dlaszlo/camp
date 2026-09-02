@@ -27,9 +27,9 @@
 #     sudo rm /etc/apparmor.d/camp
 #     sudo systemctl reload apparmor
 #
-# This is only needed for the rootless mode ("camp run", "camp shell"). The
-# privileged mode ("camp up") does not create a user namespace and is not
-# affected.
+# Every camp session is built inside a user namespace, so on a machine
+# with this restriction camp does nothing at all until the profile is
+# loaded.
 
 abi <abi/4.0>,
 

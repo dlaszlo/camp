@@ -88,13 +88,13 @@ or a branch, never clones, never commits. It removes only what it made.
 If the composed tree's directory is not empty after unmounting, that is
 evidence of a problem and it is reported, never cleaned away.
 
-## The two modes
+## The session
 
-**`camp run` — the namespace mode, and the one to use.** The composition
-is built inside a user and mount namespace. No privilege is needed;
+The composition is built inside a user and mount namespace, for the
+processes camp starts there and for nothing else. No privilege is needed;
 nothing outside the session can see it; and when the last process exits
 the kernel discards the namespace and every mount in it. Teardown cannot
-fail, and there is no `camp down`.
+fail, and there is no command to take a composition down.
 
 ```
 camp run -- claude              # or your editor, your shell, your test suite
@@ -127,23 +127,13 @@ descriptor open either: the locks that guarantee one composition per
 repository are held by camp itself, resident as the session's first
 process.
 
-**`camp up` — the system-wide mode, for when something outside must see
-the tree.** A GUI editor that was already running, most often. Here there
-is one mount table for the whole machine, so two things become true and
-camp says so before it starts: the composed tree appears at its path for
-everyone, and **the workspace is read-only for every process on the
-machine**, your editor included, until `camp down`. That is the price of
-the mode. Normal work runs in the namespace mode, where both promises
-hold.
-
-```
-camp up                         # asks for sudo once, for the mounting alone
-camp down                       # takes it apart, and reports what it found
-```
-
-`camp up` itself runs as you from start to finish; `sudo` wraps only a
-narrow helper that executes the already-validated plan. Running
-`sudo camp up` is refused.
+**A program has to be started inside the session to see the tree.** That
+includes your editor: start it with `camp run -- <editor>`, or from a
+shell `camp shell` opened, and it sees the composed tree. An editor that
+was already running when the session started sees the composed tree's
+directory empty, and there is no other way to run camp that would show it
+the tree. The [limits](#limits-plainly) below say so again, because it is
+the one thing about camp that surprises people.
 
 ## Requirements and install
 
@@ -160,7 +150,7 @@ module at boot. Take the one from the latest release:
 ```
 gh release download --repo dlaszlo/camp --pattern '*.deb'
 sudo dpkg -i camp_*.deb
-camp doctor                     # says whether both modes are available
+camp doctor                     # says whether this machine can run camp
 ```
 
 Or from [the releases page](https://github.com/dlaszlo/camp/releases), if
@@ -192,8 +182,9 @@ restriction is per-binary, and granting one path is narrower than turning
 the restriction off for every program on the machine. Where a different
 switch is in the way, `camp doctor` names it and the repair, because it
 finds out by trying rather than by reading switches.
-[docs/install.md](docs/install.md) has the full table, and the other way
-out is always `camp up`, which needs no namespace at all.
+[docs/install.md](docs/install.md) has the full table. There is no other
+way to run camp: every session needs the namespace, and a machine that
+refuses one cannot compose.
 
 ### One more step if you use ssh
 
@@ -223,13 +214,10 @@ a directory in your workspace repository, prepended to the session's
 has the complete arrangement, including how a launcher finds the real
 program without naming a distribution path.
 
-`camp up` creates no namespace, so none of this applies there — and it
-says so when it meets a `session:` section.
-
 ## The configuration
 
 One file, `$ENV/.camp/config.yml`. It states intent; the mount plan, the
-exclude, the inventory and the state record are all derived from it.
+exclude and the inventory are all derived from it.
 
 ```yaml
 env: /home/you/work               # the one absolute path in the file
@@ -277,8 +265,8 @@ directly — no shell, so nothing is split on spaces and nothing is
 expanded — with the environment root as its working directory and
 `CAMP_ENV` and `CAMP_LIVE` in its environment. The first one that does
 not succeed refuses the composition with nothing mounted, and the ones
-after it do not run. They always run as you and never as root, in both
-modes; `camp plan` lists them and says it did not run them. Note the one
+after it do not run. They always run as you and never as root; `camp
+plan` lists them and says it did not run them. Note the one
 boundary this crosses: camp itself never writes into a repository, and
 one of these is your program, running as you, which can. That is what it
 is for.
@@ -332,8 +320,7 @@ beginning `CAMP_` are camp's own, and so is `PWD`. `identity:` selects
 how you are mapped inside the namespace: left out, your own uid maps to
 itself and the mount capability is dropped before anything runs, which is
 the route you want unless you know otherwise; `uidmap` uses `newuidmap`
-and your subuid range instead. `camp up` starts no session, applies none
-of this, and says so when it meets the section.
+and your subuid range instead.
 
 A `prepare:` command does **not** receive these declarations, and that is
 deliberate: they are the workload's, and they are resolved against a
@@ -348,17 +335,14 @@ camp plan          what would be mounted, in order, with the reason for each
 camp doctor        what this machine and this environment lack
 camp accept        record the two repositories' root entries as they are now
 camp explain       describe the composed tree to whoever is standing in it
-camp status        what is mounted and what is not
-camp list          every recorded composition, with its phase
-camp forget        drop a composition's record; deletes nothing else
+camp status        what is mounted and what is not, from where you run it
 camp init          write a configuration skeleton
 ```
 
-`camp forget` is the way out of a composition camp can no longer take
-apart — a record left by a machine that was restarted with mounts up, say.
-It refuses while anything of that composition is still mounted, because
-the record is the only list of what has to come down, and discarding it
-while something stands would leave somebody with mounts nothing names.
+`camp status` answers for the process that runs it. From outside every
+session it reports nothing mounted, which is true: a session's mounts
+exist only inside its namespace. From inside a session it describes that
+session and checks it against the configuration as it now stands.
 
 `camp accept` is the only thing that writes the inventory. camp compares
 against it at every start, because a new name at the workspace root
@@ -394,6 +378,18 @@ copy-up. A process inside can still walk to the backing directories and
 read anything on the machine. camp does not pretend otherwise.
 
 **Linux only.** It is built on OverlayFS and bind mounts.
+
+**A program started outside a session cannot see the composed tree.** The
+mounts exist only inside the session's namespace, so an editor, a
+language server or a daemon that was already running sees the composed
+tree's directory empty, and nothing camp offers shows it the tree. Start
+such programs inside — `camp run -- <program>`, or from a `camp shell` —
+and they see it. The tree is never visible machine-wide, and no record of
+a session survives it: when the last process exits, the kernel takes
+everything, and there is nothing left to describe. camp once had a second
+way of running that mounted the tree for the whole machine; it was
+removed, because nothing used it and every change to the session would
+have had to be designed twice.
 
 **Worktrees made through the tree need one repair.** Git records a
 worktree's git directory as an absolute path and compares it as a string,

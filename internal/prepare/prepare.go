@@ -48,16 +48,16 @@ func Run(cfg config.Config) refusal.List {
 
 	// Never with privilege, for the reason the generation step gives:
 	// whoever can edit the configuration would otherwise gain root through
-	// it. In the privileged mode this cannot happen anyway -- these run in
-	// the unprivileged front end -- and it is checked rather than assumed.
+	// it. camp needs none, so this only fires on a 'sudo camp shell'
+	// somebody typed -- and it is checked rather than assumed.
 	if os.Geteuid() == 0 {
 		refused.Add("prepare-privileged",
 			"the prepare commands %s declares would run as root, and camp never "+
 				"runs configured code with privilege.\n"+
 				"Whoever can edit the configuration would otherwise gain root "+
-				"through it. Run the same command again without sudo: camp's front "+
-				"end runs them as you, and in the privileged mode only the mounting "+
-				"itself is elevated.", cfg.Source)
+				"through it. Run the same command again as yourself, without sudo: "+
+				"camp needs no privilege, and mounts inside a namespace of its own.",
+			cfg.Source)
 		return refused
 	}
 

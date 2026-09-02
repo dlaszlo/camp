@@ -16,7 +16,7 @@ $ENV/
 ├── .camp/
 │   ├── config.yml            the configuration — intent, and the only file you write
 │   ├── inventory             the accepted snapshot of both repositories' root entries
-│   ├── work/<id>/            DISPOSABLE: the overlay's workdir, generated files, staging
+│   ├── work/<id>/            DISPOSABLE: the overlay's workdir, generated files
 │   ├── storage/<id>/         PERSISTENT: machine-local files, worktrees — never removed
 │   ├── reports/              what a session found, waiting to be read once
 │   └── logs/                 every line camp wrote to stderr, timestamped and rotated
@@ -148,7 +148,10 @@ exists to prevent.
 **9. Verify everything.** Any failure unmounts in reverse, names the
 check that failed, and exits non-zero.
 
-Teardown is that list reversed, and never lazy.
+There is no teardown step: the mounts exist only inside the session's
+namespace, and the kernel discards them with it when the last process
+exits. The one unmount camp ever performs is that rollback of a start
+that failed, and it is never lazy.
 
 ## Why `steps:` is an ordered list
 
@@ -323,8 +326,8 @@ all count. Nothing has been mounted at that point — but what a command
 changed before it stopped is still changed, and camp says so rather than
 letting "nothing was mounted" read as "nothing happened".
 
-They always run as you, never as root, in both modes. And they are the
-one thing in a real run that `camp plan` will not do for you: it lists
+They always run as you, never as root. And they are the one thing in a
+real run that `camp plan` will not do for you: it lists
 them and says it did not run them, because a plan that quietly performed
 them would not be a plan.
 
@@ -346,14 +349,13 @@ two steps claiming it cannot both be right. The custom form is
 `- generate: { command: [...] }` — an argv vector executed directly,
 never through a shell, with camp's scratch as its working directory so
 that a naive generator's relative writes land there and not in a
-repository. It always runs as the invoking user; in the system-wide mode
-that is true by construction, because generation happens in the
-unprivileged front end and no privileged process ever executes a
-configured command.
+repository. It always runs as the invoking user: camp holds no privilege
+when it runs, and the process that does hold the mount capability, the
+session's init, never executes a configured command.
 
 **Its output is hostile data until checked.** Whoever can edit the
 configuration chooses the program that runs, and the mounts that follow
-may be made by root. So camp refuses: an entry that is not exactly one
+are made on what it produced. So camp refuses: an entry that is not exactly one
 path component, a declared type that disagrees with what is really there,
 a name the source does not have, a duplicate, an unsupported type, or an
 exclude payload that is not byte-identical to camp's own assembly of it.
@@ -406,14 +408,15 @@ After mounting, before declaring anything up, camp checks each mount for:
 - **ownership** — camp's storage belongs to the invoking user.
 
 `camp status` is this same pass run read-only: one code path, two exits.
+It answers for the process that runs it, which from outside every session
+is "nothing is mounted" -- true, and the reason it is worth saying.
 
-## The two modes
+## The session
 
-**The namespace mode (`camp run`) is primary.** The composition is built
-inside a user and mount namespace. No privilege is needed; nothing
-outside can see it; and when the last process exits the kernel discards
-the namespace and every mount in it. Teardown cannot fail and there is no
-`camp down`.
+The composition is built inside a user and mount namespace, and in no
+other way. No privilege is needed; nothing outside can see it; and when
+the last process exits the kernel discards the namespace and every mount
+in it. Teardown cannot fail and there is nothing to take down.
 
 A session is two processes. The **launcher** locks, validates, gates and
 generates — all as you, with nothing privileged existing yet. The
@@ -481,83 +484,44 @@ setuid binary owned by an unmapped id confers nothing, so `sudo` and
 `pkexec` cannot work inside a session. And a program that *records*
 ownership into what it builds — `tar`, `rsync -a`, an image build — will
 write `65534` for a file that is root's outside, with nothing failing and
-nothing warning. Build such an artefact outside a session, or with `camp
-up`, which creates no user namespace and so sees every owner as it really
-is. `camp explain` says all of this in its "Ownership view" section.
+nothing warning. Build such an artefact outside a session, from the
+repositories' own directories; nothing camp offers keeps the real owners
+inside one. `camp explain` says all of this in its "Ownership view"
+section.
 
-**The system-wide mode (`camp up`)** exists for when something started
-*outside* must see the tree — a GUI editor, most often. Here there is one
-mount table for the machine, so two effects are machine-wide for as long
-as the composition is up: the tree appears at the composed path for every
-process, and **the workspace is read-only for every process, your editor
-included.** Both promises cannot hold at once here, and the protection
-wins; camp prints that as a line of its own before it starts.
+**What a session cannot do, plainly.** A program started outside it
+cannot see the composed tree: the mounts exist only in the session's
+namespace, so an editor already running, a language server, a daemon, sees
+the composed tree's directory empty. Start it inside -- `camp run --
+<program>` -- and it sees the tree. The tree is never visible machine-wide,
+and no record of a session survives it: when the last process exits the
+kernel takes the mounts, and there is nothing left to describe or to take
+apart. camp once had a second way of running that mounted the tree for
+the whole machine, with root, for exactly the already-running editor. It
+was removed on 2026-09-02: nothing used it, every change to the session
+would have had to be designed and measured twice, and it carried the
+whole `sudo` surface -- a root helper, records of what was mounted, a
+teardown command and the recovery story around them. What that gives up
+is what this paragraph names, and it is given up knowingly.
 
-`camp up` runs as you from start to finish. `sudo` wraps only a narrow
-helper that executes the already-validated plan, handed to it on stdin —
-never argv, which `/proc` exposes machine-wide. The helper re-resolves
-every operand itself, descriptor-relative, following no symlink, and
-compares each endpoint against what the front end saw: a component
-swapped between the check and the mount fails closed. It builds the whole
-tree in a staging directory, verifies it there, and moves it onto the
-composed path only then, so nothing outside ever sees a half-built tree.
-Running `sudo camp up` directly is refused.
+## Rollback
 
-## Recovery
+A start that fails after its first mount unwinds what it made, in reverse,
+before the refusal is reported. There is no lazy unmount anywhere in camp:
+a mount that cannot be removed stays mounted, is named in the refusal, and
+goes when the session's namespace goes. A detached mount would leave the
+kernel's table while it is still alive and still being written through,
+and a rollback that used one would report a clean namespace over a mount
+something is still writing to.
 
-The system-wide mode writes a record before the helper mounts anything,
-carrying the complete concrete plan. `down` and `status` read that
-record and **never the configuration**, which may have been edited while
-the composition was up. So there is no moment at which something is
-mounted and nothing knows what.
-
-There is no lazy unmount anywhere in camp. A mount that cannot be removed
-stays mounted, is reported as still mounted with the holding process
-named from `/proc`, and makes the command exit non-zero. A detached mount
-leaves the kernel's table while it is still alive and still being written
-through — and in the system-wide mode that table is the only guard
-against a second composition on the same repository.
-
-### How a mount is removed
-
-`umount2` takes a path, and the kernel resolves it. That is a problem the
-helper cannot ignore: it decides *what* to remove by looking at a
-descriptor it resolved beneath the environment root it pinned, and the
-owner of every directory above that path is the person the helper is
-acting for. Between the decision and the call, a name can be made to
-reach something else.
-
-So the mount is not named to the kernel by the path it was recorded as.
-It is named by descriptor: `open_tree` takes a handle on the mount the
-descriptor holds, `move_mount` takes that same mount into a directory
-under `/run` that root makes for the purpose, and the unmount happens
-there — at a path no part of which anybody else can rename. A mount that
-will not come down is moved back where it was and reported busy, so the
-record, `camp status` and the next `camp down` all go on meaning what
-they meant.
-
-Two of camp's mounts cannot go that way. The staging and live points are
-bound onto themselves so that what is built on them cannot propagate, and
-the kernel refuses to move a mount whose parent is shared — which theirs
-is, on any machine where `/` is. Those are unmounted through the parent
-directory's own descriptor instead: `umount2` is given
-`/proc/self/fd/<the directory>/<one name>`, which the kernel resolves to
-the directory that descriptor holds rather than by walking the name it was
-opened by, and a mount point cannot be renamed while it is mounted.
-
-And a teardown whose environment root has moved since the record was
-written stops with nothing unmounted. The mount table reports a mount at
-the path it is at *now*, so after a rename every recorded path would
-answer "nothing is mounted there" — a true answer about a name and a
-false one about the machine. The base is a descriptor and knows where it
-is; when that is not where the record says, camp keeps the record and asks
-for the directory back.
+Nothing else is ever unmounted by camp. A composition that came up ends
+with its session, and the kernel takes every mount with it.
 
 ## What a session reports when it ends
 
-Four read-only scans, at `camp down` and at the end of a namespace
-session — the moment when the cause is still fresh. They never block; a
-teardown that refused would wall you in.
+Four read-only scans, at the end of a session -- the moment when the
+cause is still fresh. They never block; there is nothing left to refuse
+with.
 
 The gate's comparison and the inventory's re-run, so a change made during
 the session is named the same day. The code repository's untracked paths

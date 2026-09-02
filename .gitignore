@@ -15,6 +15,5 @@
 .camp/reports/
 camp_*.deb
 
-# What the measurements leave behind: their logs, and the machine's cache.
-measure/measure.log
+# What the measurements leave behind: the machine's log.
 measure/vm/vm.log

@@ -21,7 +21,7 @@ func environment(t *testing.T) pathx.Root {
 	return root
 }
 
-// A namespace session has no down and leaves no state record, so what it
+// A session has no teardown command and leaves no state record, so what it
 // found has to reach somebody by another route: a file, printed once by
 // whichever camp command comes next in that environment.
 func TestAReportIsPrintedOnceAndThenMarked(t *testing.T) {

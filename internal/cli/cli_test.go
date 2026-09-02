@@ -41,14 +41,8 @@ func shellFromInside(source string) int {
 	return 0
 }
 
-// TestMain points the state directory somewhere of its own, for every
-// test in this package.
-//
-// These tests invoke the real commands, and the commands that recover a
-// composition now find one by the directory the process is standing in --
-// which, for a test binary, is a directory inside a real environment.
-// Without this, one of them read the record of the machine's own
-// composition and got as far as calling sudo on it.
+// TestMain answers the two hidden arguments this binary is re-executed
+// with, the way cmd/camp does, before any test runs.
 func TestMain(m *testing.M) {
 	// The capability probe, answered before anything else, exactly as
 	// cmd/camp answers it and for the same reason: it has one job and
@@ -75,15 +69,7 @@ func TestMain(m *testing.M) {
 	if source := os.Getenv(insideEnv); source != "" {
 		os.Exit(shellFromInside(source))
 	}
-
-	directory, err := os.MkdirTemp("", "camp-cli-state-")
-	if err != nil {
-		panic(err)
-	}
-	os.Setenv("XDG_STATE_HOME", directory)
-	code := m.Run()
-	os.RemoveAll(directory)
-	os.Exit(code)
+	os.Exit(m.Run())
 }
 
 // run invokes a command the way a terminal does, and returns what each
@@ -113,67 +99,21 @@ func refusing(t *testing.T) string {
 func TestExplainDescribesNothingWhileARefusalStands(t *testing.T) {
 	path := refusing(t)
 
-	for _, mode := range [][]string{
-		{"explain", "-f", path},
-		{"explain", "--privileged", "-f", path},
-	} {
-		out, errOut, code := run(t, mode...)
-		if code == 0 {
-			t.Errorf("%v exited 0 with a refusal standing", mode)
-		}
-		if strings.Contains(out, "You are in") {
-			t.Errorf("%v described the tree anyway:\n%s", mode, out)
-		}
-		if !strings.Contains(errOut, "AGENTS.md") {
-			t.Errorf("%v did not name what stops the composition:\n%s", mode, errOut)
-		}
-	}
-}
-
-// A configuration that no longer parses must not stand between the user
-// and a teardown.
-//
-// down tears down from its record and reads the file only to learn which
-// record. A file edited while the composition was up -- and the session:
-// section adds a whole class of ways to get that wrong -- would otherwise
-// leave somebody behind mounts camp made and now refuses to remove, which
-// is the one thing down is never allowed to do.
-func TestATeardownIsNotBlockedByAConfigurationThatWillNotParse(t *testing.T) {
-	env := testenv.NewEnv(t)
-	env.Config(t, "")
-	path := config.Path(env.Path)
-
-	broken, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Everything that names the tree still parses; the session section does
-	// not.
-	testenv.Write(t, path, string(broken)+"\nsession:\n  environment:\n    PORT: 8080\n")
-
-	out, errOut, code := run(t, "down", "-f", path)
-
-	// There is no record here, so the teardown ends by saying so -- which is
-	// exactly the point: it got past the configuration to the record, and
-	// stopped on the record's own terms.
-	if !strings.Contains(errOut, "no record for") {
-		t.Errorf("down stopped on the configuration instead of reaching the "+
-			"record:\nstdout:\n%s\nstderr:\n%s", out, errOut)
-	}
-	if !strings.Contains(errOut, "environment-shape") && !strings.Contains(errOut, "PORT") {
-		t.Errorf("down did not say what it could not read in the file:\n%s", errOut)
-	}
-	if !strings.Contains(errOut, "goes ahead anyway") {
-		t.Errorf("down did not say that the teardown is unaffected:\n%s", errOut)
-	}
+	out, errOut, code := run(t, "explain", "-f", path)
 	if code == 0 {
-		t.Error("down exited 0 with nothing to tear down")
+		t.Error("explain exited 0 with a refusal standing")
+	}
+	if strings.Contains(out, "You are in") {
+		t.Errorf("explain described the tree anyway:\n%s", out)
+	}
+	if !strings.Contains(errOut, "AGENTS.md") {
+		t.Errorf("explain did not name what stops the composition:\n%s", errOut)
 	}
 }
 
-// The same file stops every command that genuinely needs to understand it.
-// Tolerating a broken configuration is a property of the teardown alone,
-// not a general loosening.
+// A file that no longer parses stops every command that has to understand
+// it -- the session: section adds a whole class of ways to get that wrong
+// -- and each of them names the entry it could not read.
 func TestABrokenSectionStillStopsTheCommandsThatNeedIt(t *testing.T) {
 	env := testenv.NewEnv(t)
 	env.Config(t, "")
@@ -264,8 +204,8 @@ func TestThePrepareCommandsRunBeforeAnythingIsDerived(t *testing.T) {
 		"  - command: [\"/bin/sh\", \"-c\", \"exit 3\"]\n")
 
 	_, errOut, code := run(t, "run", "-f", config.Path(env.Path), "--", "/bin/true")
-	if strings.Contains(errOut, "cannot run camp in namespace mode") {
-		t.Skipf("this machine refuses the namespace mode, so no command "+
+	if strings.Contains(errOut, "this machine cannot run camp") {
+		t.Skipf("this machine refuses the namespace camp needs, so no command "+
 			"that composes gets as far as the prepare commands:\n%s", errOut)
 	}
 	if code == 0 {
@@ -360,12 +300,13 @@ func TestTheConfigurationCannotChangeWhileThePrepareCommandsRun(t *testing.T) {
 func flat(text string) string { return strings.Join(strings.Fields(text), " ") }
 
 // skipUnlessComposable skips a test whose subject is only reached by a
-// command that builds a composition, on a machine that refuses the mode.
+// command that builds a composition, on a machine that refuses the
+// namespace camp needs.
 func skipUnlessComposable(t *testing.T, errOut string) bool {
 	t.Helper()
-	if strings.Contains(errOut, "cannot run camp in namespace mode") {
-		t.Skipf("this machine refuses the namespace mode, so no command that "+
-			"composes gets this far:\n%s", errOut)
+	if strings.Contains(errOut, "this machine cannot run camp") {
+		t.Skipf("this machine refuses the namespace camp needs, so no command "+
+			"that composes gets this far:\n%s", errOut)
 		return true
 	}
 	return false
@@ -494,7 +435,7 @@ func TestAConfigurationOutsideTheLayoutIsLoggedWhereItSaysToLog(t *testing.T) {
 func TestEnteringFromInsideIsRefusedBeforeAnythingSweeps(t *testing.T) {
 	env := testenv.NewEnv(t)
 	cfg := env.Config(t, "")
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}

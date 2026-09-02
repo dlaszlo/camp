@@ -136,26 +136,6 @@ func TestASwapAfterTheLookIsStillRefused(t *testing.T) {
 	}
 }
 
-// State is the one area whose base camp did not make: the user's own
-// state directory, which XDG_STATE_HOME may point anywhere -- including
-// into a repository. camp's own directory below it is still resolved the
-// strict way, so a link there is refused like any other.
-func TestTheStateAreaIsConfinedTheSameWay(t *testing.T) {
-	base := t.TempDir()
-	repository := filepath.Join(base, "code")
-	mkdir(t, repository)
-	if err := os.Symlink(repository, filepath.Join(base, "camp")); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := (fsx.State(environment(t, base), "camp")).Ensure(0o700); err == nil {
-		t.Fatal("records would be written into a repository through a link")
-	}
-	if entries, _ := os.ReadDir(repository); len(entries) != 0 {
-		t.Errorf("the repository was written into: %v", entries)
-	}
-}
-
 // environment opens a directory the way a parsed configuration opens the
 // environment root: once, held for as long as anything addresses areas
 // from it.

@@ -20,7 +20,7 @@ const (
 	ExitFailure      = 1 // something went wrong with no more specific code
 	ExitUsage        = 2 // the command or the configuration is wrong
 	ExitPrecondition = 3 // the world is not in a state where this can be done
-	ExitPrivilege    = 4 // root was required and not available
+	ExitPrivilege    = 4 // the machine refuses the user namespace camp needs
 	ExitBusy         = 5 // something is holding the composition
 	ExitNotFound     = 6 // no such composition
 )

@@ -196,14 +196,11 @@ func TestAFileInThePathIsNotAnAbsence(t *testing.T) {
 
 // One walk, three things about one object.
 //
-// The privileged teardown needs the mount, the directory it stands in and
-// the name it stands under, and it needs them to be about the same walk:
-// the identity is checked on the mount's descriptor, the handle that
-// removes it is taken from that descriptor, and a mount that would not
-// come down is put back into the directory descriptor under that name.
-// Resolving the path a second time to get the directory would be a second
-// chance to reach a different object, which is the whole class of defect
-// this package exists to close.
+// A caller that needs an object, the directory it stands in and the name
+// it stands under needs them to be about the same walk: resolving the path
+// a second time to get the directory would be a second chance to reach a
+// different object, which is the whole class of defect this package exists
+// to close.
 func TestOpenInGivesTheObjectAndTheDirectoryItIsIn(t *testing.T) {
 	base := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(base, "one", "two"), 0o755); err != nil {

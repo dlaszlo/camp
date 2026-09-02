@@ -122,10 +122,10 @@ func translate(err error, base, part string) error {
 // **The base is resolved by name, in this call and again in the next
 // one.** That is what this and its two neighbours are for: asking a
 // question about a directory camp holds no capability for -- a workspace,
-// a repository root, a store somebody named. Anything that writes,
-// mounts, or runs with privilege asks the same question of a Root
-// instead, whose base was resolved once and is held open, because a name
-// resolved twice is a name that can be two directories.
+// a repository root, a store somebody named. Anything that writes asks the
+// same question of a Root instead, whose base was resolved once and is
+// held open, because a name resolved twice is a name that can be two
+// directories.
 //
 // With no parts at all the base's own name is what is looked at, and a
 // symlink there is reported as a symlink rather than followed: callers
@@ -160,7 +160,7 @@ func statAt(dirfd int, name, full string) (Info, error) {
 
 	info := Info{
 		Name:  name,
-		Type:  TypeOf(st.Mode),
+		Type:  typeOf(st.Mode),
 		Ident: Identity{Device: uint64(st.Dev), Inode: st.Ino},
 	}
 	if info.Type == Symlink {
@@ -182,14 +182,10 @@ func isAbsent(err error) bool {
 	return errors.Is(err, unix.ENOENT)
 }
 
-// TypeOf names the kind of object a stat's mode describes.
-//
-// Exported because a descriptor is the only honest place to ask this
-// question at the moment it matters -- the privileged helper reads the
-// type off the same descriptor it mounts, having opened it once -- and
-// the answer has to come from the same vocabulary as the answer a name
-// gives, or the two would be comparable only by accident.
-func TypeOf(mode uint32) Type {
+// typeOf names the kind of object a stat's mode describes, in the same
+// vocabulary whether the object was reached by name or by descriptor, or
+// the two would be comparable only by accident.
+func typeOf(mode uint32) Type {
 	switch mode & unix.S_IFMT {
 	case unix.S_IFDIR:
 		return Dir
@@ -212,8 +208,8 @@ func TypeOf(mode uint32) Type {
 // symlink anywhere and never leaving base.
 //
 // The base is resolved by name at every call, as in StatBeneath, and for
-// the same callers. Where the descriptor is what a write, a mount or a
-// privileged step hangs off, it comes from a Root instead.
+// the same callers. Where the descriptor is what a write hangs off, it
+// comes from a Root instead.
 //
 // The descriptor is what later work hangs off: the flock that guarantees
 // one composition per directory, and the mount made by descriptor so that

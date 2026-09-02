@@ -16,7 +16,7 @@ import (
 func look(t *testing.T, env *testenv.Env) []health.Note {
 	t.Helper()
 	cfg := env.Config(t, "")
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}
@@ -34,7 +34,7 @@ func look(t *testing.T, env *testenv.Env) []health.Note {
 func TestOrphanedStorageIsListedAndNotRemoved(t *testing.T) {
 	env := testenv.NewEnv(t)
 	cfg := env.Config(t, "")
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		t.Fatalf("the fixture was refused:\n%v", refused)
 	}

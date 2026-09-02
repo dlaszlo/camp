@@ -64,22 +64,6 @@ type Entry struct {
 // evidence.
 func (e Entry) Private() bool { return len(e.Optional) == 0 }
 
-// Shared reports whether this mount is a member of a peer group.
-//
-// It is the one propagation kind that decides what may be done to a
-// mount rather than only what happens around it: the kernel refuses to
-// move a mount that is shared, and refuses to move any mount out of a
-// shared parent. Slave and unbindable say nothing about that, so this
-// asks for the one field rather than for propagation in general.
-func (e Entry) Shared() bool {
-	for _, field := range e.Optional {
-		if strings.HasPrefix(field, "shared:") {
-			return true
-		}
-	}
-	return false
-}
-
 // ReadOnly reports what the per-mount options say. It is a cross-check on
 // statvfs, which is the authority.
 func (e Entry) ReadOnly() bool {
@@ -182,7 +166,7 @@ const mandatory = 6
 // mount whose name carried a \r turned into an extra field or a shifted
 // separator -- and since a record that does not parse stops the whole
 // table, that one mount made every camp command on the machine refuse,
-// 'camp down' among them, with no way to get out of it. So: split on
+// with no way past it. So: split on
 // 0x20 and on nothing else, and hand every other byte to the escape
 // decoder exactly as the kernel wrote it.
 func parse(line string) (Entry, error) {
@@ -376,15 +360,15 @@ func At(entries []Entry, path string) []Entry {
 // stacked at that point, the one nothing else stands on.
 //
 // The stack is read from the parent field and never from the order of the
-// lines. Mounts are listed roughly as they were made, and MS_MOVE keeps a
-// mount's identity, so a mount moved onto a point appears *before* the
-// mount it now covers -- which is exactly the privileged mode's shape,
-// where the live path first gets a self-bind to give the move a private
-// parent and then receives the composed tree on top of it. Reading the
-// last line as the top one there returns the bind underneath, whose
-// filesystem is ext4 and whose overlay options are all empty, and every
-// privileged 'camp up' failed its own post-move check with four refusals
-// about a mount that was correct.
+// lines. Mounts are listed roughly as they were made, and a moved mount
+// keeps its identity, so a mount moved onto a point appears *before* the
+// mount it now covers. Measured, when camp still built its tree elsewhere
+// and moved it onto a self-bound live path: reading the last line as the
+// top one returned the bind underneath, whose filesystem was ext4 and
+// whose overlay options were all empty, and every such start failed its
+// own check with four refusals about a mount that was correct. Nothing
+// camp makes today is moved, and the rule stands because a table is read
+// wherever it came from.
 //
 // The parent field says it without ambiguity: a mount stacked on another
 // has that other one as its parent, so the top of the stack is the one
@@ -439,36 +423,12 @@ func Containing(entries []Entry, path string) (Entry, bool) {
 	return best, found
 }
 
-// Overlays returns every overlay mount whose upperdir is this directory.
-//
-// One upper must serve one overlay: the kernel does not enforce it -- a
-// second overlay on the same upper mounts without complaint -- and
-// sharing an upper corrupts data. In the privileged mode there is one
-// mount table for the machine, so this scan is the steady-state guard,
-// and it is why a lazy unmount could never be allowed: a detached mount
-// leaves the table while it is still alive, and the table is the only
-// guard there is.
-func Overlays(entries []Entry, upper string) []Entry {
-	var found []Entry
-	for _, entry := range entries {
-		if entry.FSType != "overlay" {
-			continue
-		}
-		if UpperOf(entry) == upper {
-			found = append(found, entry)
-		}
-	}
-	return found
-}
-
 // AllOverlays returns every overlay in the table, whatever it is built
 // on.
 //
-// The caller decides which of them are about one upper, because that
+// The caller decides which of them is about one directory, because that
 // question is about inodes and not about strings: two paths routinely
-// name one directory, and a bind alias of a repository is exactly how a
-// second composition would name the same upper differently. This package
-// parses; it does not stat.
+// name one directory. This package parses; it does not stat.
 func AllOverlays(entries []Entry) []Entry {
 	var found []Entry
 	for _, entry := range entries {
@@ -479,21 +439,10 @@ func AllOverlays(entries []Entry) []Entry {
 	return found
 }
 
-// UpperOf returns an overlay's upper directory, whichever spelling the
-// kernel used.
-//
-// "upperdir" from the option string, and the same key from the mount API,
-// which reports the layers it was given as descriptors under the key that
-// sets them.
-func UpperOf(entry Entry) string {
-	if value, found := entry.Super["upperdir"]; found {
-		return UnescapeOption(value)
-	}
-	return UnescapeOption(entry.Super["upperdir+"])
-}
-
-// WorkOf returns an overlay's work directory, under the same two spellings
-// as UpperOf.
+// WorkOf returns an overlay's work directory, whichever spelling the
+// kernel used: "workdir" from the option string, and the same key from the
+// mount API, which reports the layers it was given as descriptors under
+// the key that sets them.
 //
 // It is the one thing in the table that says a work directory is in use.
 // A namespace session's flock is invisible from inside it, so the sweep

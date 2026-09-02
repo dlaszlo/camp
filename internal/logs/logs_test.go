@@ -15,7 +15,7 @@ import (
 func TestEveryLineIsKeptWithItsTime(t *testing.T) {
 	log, env := open(t)
 
-	if _, err := log.Write([]byte("[OK] locks: taken\n[NOTE] this mode starts no session\n")); err != nil {
+	if _, err := log.Write([]byte("[OK] locks: taken\n[NOTE] only your own id is mapped\n")); err != nil {
 		t.Fatalf("writing the log: %v", err)
 	}
 	if err := log.Close(); err != nil {
@@ -38,7 +38,7 @@ func TestEveryLineIsKeptWithItsTime(t *testing.T) {
 			t.Errorf("the line lost its marker: %q", line)
 		}
 	}
-	if !strings.Contains(lines[0], "locks: taken") || !strings.Contains(lines[1], "no session") {
+	if !strings.Contains(lines[0], "locks: taken") || !strings.Contains(lines[1], "own id is mapped") {
 		t.Errorf("the lines are not in the order they were said:\n%s", strings.Join(lines, "\n"))
 	}
 }

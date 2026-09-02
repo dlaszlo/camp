@@ -273,19 +273,10 @@ func resolve(ctx *context, file string) (config.Config, error) {
 	return cfg, nil
 }
 
-func parseMode(privileged bool) plan.Mode {
-	if privileged {
-		return plan.Privileged
-	}
-	return plan.Namespace
-}
-
 // -- commands ---------------------------------------------------------------
 
 func cmdPlan(ctx *context, args []string) error {
 	set, file := flagsFor("plan")
-	systemWide := set.Bool("privileged", false,
-		"plan for the system-wide mode instead of the namespace mode")
 	if err := set.Parse(args); err != nil {
 		return wrap(err, ExitUsage, "")
 	}
@@ -294,7 +285,7 @@ func cmdPlan(ctx *context, args []string) error {
 		return err
 	}
 
-	built, refused := plan.Prepare(cfg, parseMode(*systemWide))
+	built, refused := plan.Prepare(cfg)
 	generated, problems := gen.Preview(built)
 	refused.Extend(problems)
 	if len(built.Mounts) > 0 {
@@ -334,23 +325,13 @@ func cmdDoctor(ctx *context, args []string) error {
 		return wrap(err, ExitUsage, "")
 	}
 
-	// Each mode is reported separately: one being unavailable is not a
-	// failure as long as the other works.
-	var usable []preflight.Mode
-	for _, mode := range []preflight.Mode{preflight.Namespace, preflight.Privileged} {
-		checks := preflight.Run(mode)
-		ctx.printf("%s mode:\n%s\n", mode, report.Checks(checks))
-		if len(preflight.Failures(checks)) == 0 {
-			usable = append(usable, mode)
-		}
-	}
-	switch len(usable) {
-	case 0:
-		ctx.printf("no mode is available on this machine.\n\n")
-	case 1:
-		ctx.printf("usable mode: %s\n\n", usable[0])
-	default:
-		ctx.printf("both modes are available.\n\n")
+	checks := preflight.Run()
+	ctx.printf("this machine:\n%s\n", report.Checks(checks))
+	usable := len(preflight.Failures(checks)) == 0
+	if usable {
+		ctx.printf("camp can run here.\n\n")
+	} else {
+		ctx.printf("camp cannot run here until the failures above are repaired.\n\n")
 	}
 
 	// The table is read before the configuration, because doctor is the
@@ -372,14 +353,14 @@ func cmdDoctor(ctx *context, args []string) error {
 		fmt.Fprintf(ctx.err, "%s\n", render(unreadableTable(tableErr)))
 	}
 	if err != nil {
-		if len(usable) == 0 {
+		if !usable {
 			return failure(ExitPrecondition, "", "this machine is missing something camp needs")
 		}
 		return incomplete(tableErr)
 	}
 
 	ctx.printf("composition: %s\n\n", report.ConfigSummary(cfg))
-	built, refused := plan.Prepare(cfg, plan.Namespace)
+	built, refused := plan.Prepare(cfg)
 	if !refused.Empty() {
 		fmt.Fprintf(ctx.err, "this composition would not start. %d thing(s) "+
 			"stop it:\n\n%s", refused.Count(), report.Refusals(refused))
@@ -405,7 +386,7 @@ func cmdDoctor(ctx *context, args []string) error {
 		}
 	}
 
-	if len(usable) == 0 {
+	if !usable {
 		return failure(ExitPrecondition, "", "this machine is missing something camp needs")
 	}
 	return incomplete(tableErr)
@@ -438,8 +419,8 @@ func unreadableTable(err error) *Error {
 			"filesystem each of its paths is on, and which flags are locked "+
 			"there for a read-only remount to replicate. Nothing else in this "+
 			"report answers those -- they were not asked. Every camp command "+
-			"reads this same table, so 'camp up', 'camp status' and 'camp "+
-			"down' refuse here too until it parses.", err)
+			"reads this same table, so 'camp run', 'camp shell' and 'camp "+
+			"status' refuse here too until it parses.", err)
 }
 
 // incomplete is doctor's ending when the table could not be read: nil

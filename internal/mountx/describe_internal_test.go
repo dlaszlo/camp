@@ -10,7 +10,7 @@ import (
 
 // composed is an overlay of the shape camp plans: two lower layers in a
 // deliberate order, a writable upper with its work directory, and the
-// extended-attribute namespace the mode decides.
+// extended-attribute namespace a mount inside a user namespace needs.
 func composed() plan.Mount {
 	return plan.Mount{
 		Kind:   plan.Overlay,
@@ -69,7 +69,7 @@ func TestTheDescriptionIsWhatThePlanAsksFor(t *testing.T) {
 // The mutation this exists for: change an fsconfig key, drop a flag, or
 // swap the lower layers in the sequence that performs the mount, and
 // leave the description alone. Before there was a description that was a
-// record and a verification describing a mount nobody made, with every
+// check and a plan describing a mount nobody made, with every
 // test green. Now it is this test failing.
 func TestTheKernelIsSentExactlyWhatIsDescribed(t *testing.T) {
 	type call struct {
@@ -155,7 +155,7 @@ func TestTheOptionLineRendersTheSameCalls(t *testing.T) {
 	}
 	// Every operand the kernel is given appears in it, and in the order it
 	// is given: the line is read by somebody deciding whether the tree
-	// standing in front of them is the one the record describes.
+	// standing in front of them is the one the calls describe.
 	for _, step := range described.Steps {
 		if step.Flag() {
 			continue

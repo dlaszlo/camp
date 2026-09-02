@@ -22,8 +22,8 @@
 // missed that way -- every path to the same directory is the same lock,
 // symlinks included.
 //
-// It also has to be something held rather than something written. In the
-// namespace mode the other composition's mounts are invisible, so no
+// It also has to be something held rather than something written. Another
+// session's mounts are invisible from outside its namespace, so no
 // mountinfo scan can see them; and a record file can go stale after
 // kill -9, which would then need exactly the --force this design refuses.
 // A flock is released by the kernel when the holder dies, so staleness is

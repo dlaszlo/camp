@@ -13,7 +13,7 @@
 // question the way the process asking it would experience the answer.
 //
 // status is this same pass run read-only: one code path, two exits --
-// refusing when it runs at up, reporting when it runs on demand.
+// refusing when it runs at a start, reporting when it runs on demand.
 package verify
 
 import (
@@ -40,10 +40,6 @@ const OverlayMagic = 0x794c7630
 // Input is everything one pass needs.
 type Input struct {
 	Plan plan.Plan
-	// Prefix is where the tree is right now. It is the live path in the
-	// namespace mode and in the privileged mode's second pass, and the
-	// staging root in the privileged mode's first.
-	Prefix string
 	// Table is the mount table as it stands.
 	Table []mountinfo.Entry
 	// Exclude is the payload the generated exclude must equal, byte for
@@ -54,31 +50,6 @@ type Input struct {
 	// UID and GID are who storage has to belong to.
 	UID int
 	GID int
-
-	// LowerPath is the workspace's own path, where the frame's first mount
-	// stands. Storage is camp's persistent store.
-	//
-	// Both are given here rather than read out of Plan.Config, because one
-	// caller does not have a configuration: the privileged helper is handed
-	// a concrete plan on a pipe and reads no file at all. When these were
-	// reached for through Plan.Config, that caller silently passed the zero
-	// value -- an empty lower path matches no mount, so the frame's first
-	// mount read as missing and every honest privileged composition was
-	// rolled back before it could be moved into place. A field that some
-	// callers cannot fill is a check that quietly does not run.
-	LowerPath string
-	Storage   string
-}
-
-// InputFor fills the fields a caller holding a whole plan already knows,
-// so that the two halves of a check cannot drift apart.
-func InputFor(p plan.Plan) Input {
-	return Input{
-		Plan:      p,
-		Prefix:    p.Live,
-		LowerPath: p.Config.LowerPath(),
-		Storage:   p.Storage,
-	}
 }
 
 // Run performs the whole pass and returns everything that is wrong.
@@ -89,29 +60,15 @@ func Run(in Input) refusal.List {
 	var refused refusal.List
 
 	for _, mount := range in.Plan.Mounts {
-		target := at(in, mount)
-		refused.Extend(identity(mount, target, in.Table))
-		refused.Extend(polarity(mount, target))
-		refused.Extend(propagation(mount, target, in.Table))
+		refused.Extend(identity(mount, mount.Target, in.Table))
+		refused.Extend(polarity(mount, mount.Target))
+		refused.Extend(propagation(mount, mount.Target, in.Table))
 	}
 
 	refused.Extend(artefact(in))
 	refused.Extend(completeness(in))
 	refused.Extend(ownership(in))
 	return refused
-}
-
-// at returns where a mount stands during this pass. Everything inside the
-// tree moves with the prefix; the workspace's self-bind does not, because
-// it is not in the tree.
-func at(in Input, mount plan.Mount) string {
-	if !mount.InLive {
-		return mount.Target
-	}
-	if mount.Rel.Empty() {
-		return in.Prefix
-	}
-	return mount.Rel.Join(in.Prefix)
 }
 
 // The checks that run once per mount, and so can fail for several mounts
@@ -342,7 +299,7 @@ func artefact(in Input) refusal.List {
 	if len(in.Exclude) == 0 {
 		return refused
 	}
-	path := filepath.Join(in.Prefix, ".git", "info", "exclude")
+	path := filepath.Join(in.Plan.Live, ".git", "info", "exclude")
 	got, err := os.ReadFile(path)
 	if err != nil {
 		refused.Add("verify-exclude-unreadable",
@@ -369,16 +326,16 @@ func completeness(in Input) refusal.List {
 	var refused refusal.List
 
 	present := map[string]bool{}
-	for _, entry := range mountinfo.Under(in.Table, in.Prefix) {
+	for _, entry := range mountinfo.Under(in.Table, in.Plan.Live) {
 		present[entry.Point] = true
 	}
-	for _, entry := range mountinfo.At(in.Table, in.LowerPath) {
+	for _, entry := range mountinfo.At(in.Table, in.Plan.Config.LowerPath()) {
 		present[entry.Point] = true
 	}
 
 	planned := map[string]bool{}
 	for _, mount := range in.Plan.Mounts {
-		planned[at(in, mount)] = true
+		planned[mount.Target] = true
 	}
 
 	var missing, extra []string
@@ -400,10 +357,11 @@ func completeness(in Input) refusal.List {
 	if len(extra) > 0 {
 		refused.Add("verify-extra-mounts",
 			"there are mounts under the composed tree that the plan does not "+
-				"have: %s.\nThat is residue from a run that did not come down, or "+
-				"another composition, or something outside camp mounting into this "+
-				"tree. camp will not declare a composition up that it cannot "+
-				"account for.", strings.Join(sorted(extra), ", "))
+				"have: %s.\ncamp did not make them: a session's mounts exist only "+
+				"inside its own namespace and go with it, so these were mounted by "+
+				"something else, into this tree or onto a path under it before the "+
+				"session started. camp will not declare a composition up that it "+
+				"cannot account for.", strings.Join(sorted(extra), ", "))
 	}
 	return refused
 }
@@ -411,34 +369,35 @@ func completeness(in Input) refusal.List {
 // ownership checks that camp's persistent storage belongs to the
 // invoking user.
 //
-// It is the one place the design guarantees writable, and in the
-// privileged mode the temptation for it to end up root-owned is real:
-// the helper runs as root. It creates nothing there, and this is what
-// proves it.
+// It is the one place the design guarantees writable. Everything under it
+// is created by a process running as the user, so this is a check that
+// what the design says is true rather than a repair -- and a check that
+// would have been the whole difference had a process with privilege ever
+// created anything there.
 //
 // Every path camp made there is checked, not only the root: the store of
-// each islands mount, and the attachment point of each island. Those are
-// the objects the helper could have created as root, and one of them
-// root-owned is a mount camp guarantees writable that nobody can write.
-// What is deliberately not walked is everything else under storage --
-// worktrees, machine-local files, a person's own work -- because that is
-// the user's, it can be enormous, and its ownership is not camp's claim
-// to make.
+// each islands mount, and the attachment point of each island. One of
+// them owned by anybody else is a mount camp guarantees writable that
+// nobody can write. What is deliberately not walked is everything else
+// under storage -- worktrees, machine-local files, a person's own work --
+// because that is the user's, it can be enormous, and its ownership is
+// not camp's claim to make.
 func ownership(in Input) refusal.List {
 	var refused refusal.List
-	if in.Storage == "" {
+	storage := in.Plan.Storage
+	if storage == "" {
 		return refused
 	}
 	for _, mount := range in.Plan.Mounts {
 		if mount.Role != plan.Store && mount.Role != plan.Island {
 			continue
 		}
-		if mount.Source == "" || !strings.HasPrefix(mount.Source, in.Storage) {
+		if mount.Source == "" || !strings.HasPrefix(mount.Source, storage) {
 			continue
 		}
 		refused.Extend(owns(mount.Source, in))
 	}
-	refused.Extend(owns(in.Storage, in))
+	refused.Extend(owns(storage, in))
 	return refused
 }
 
@@ -454,8 +413,7 @@ func owns(path string, in Input) refusal.List {
 		}
 		// Anything else is the check not running, which is not the same as
 		// the check passing. This is the one path the design guarantees
-		// writable, and the one the privileged helper must never have
-		// created.
+		// writable.
 		refused.Add("verify-storage-unreadable",
 			"camp's storage path %s could not be looked at: %v.\n"+
 				"That directory holds worktrees and machine-local files you have "+
@@ -468,8 +426,8 @@ func owns(path string, in Input) refusal.List {
 		refused.Add("verify-storage-owner",
 			"camp's storage path %s is owned by uid %d gid %d and should belong "+
 				"to uid %d gid %d.\nStorage holds worktrees and machine-local "+
-				"files you have to be able to write. The privileged helper creates "+
-				"nothing there for exactly this reason.",
+				"files you have to be able to write, and camp creates everything "+
+				"there as you.",
 			path, st.Uid, st.Gid, in.UID, in.GID)
 	}
 	return refused

@@ -1,8 +1,8 @@
 # Installing camp
 
 camp is a single binary with no runtime dependencies of its own. What it
-needs is a Linux kernel with OverlayFS, `git`, and — for the mode you
-will use every day — permission to create a user namespace.
+needs is a Linux kernel with OverlayFS, `git`, and permission to create a
+user namespace, because every session is built inside one.
 
 ## What the machine has to have
 
@@ -94,18 +94,16 @@ sudo install -m 755 camp /usr/local/bin/camp
 person installed by hand belongs — and the AppArmor profile names that
 path, so the two agree.
 
-You can stop here if you only want the system-wide mode (`camp up`). For
-the everyday mode, one more step.
-
 ## The namespace permission
 
-`camp run` builds the composition inside a user namespace, which is what
-lets it need no privilege and leave nothing behind.
+camp builds every composition inside a user namespace, which is what lets
+it need no privilege and leave nothing behind — and which is why it can
+do nothing at all on a machine that refuses one.
 
 **On most distributions this already works and there is nothing to do.**
 Unprivileged user namespaces are permitted by default on Fedora, RHEL and
-its rebuilds, Debian, Arch, and most others. Run `camp doctor`: if it
-says the namespace mode is available, skip the rest of this section.
+its rebuilds, Debian, Arch, and most others. Run `camp doctor`: if its
+user namespaces line says permitted, skip the rest of this section.
 
 Where it does not work, `camp doctor` names the reason and the repair,
 because it finds out by *trying* rather than by reading switches — there
@@ -125,8 +123,9 @@ restriction is per-binary and a profile is the narrow way to satisfy it —
 narrower than turning the restriction off for every program on the
 machine. On a system with no AppArmor at all, none of this applies.
 
-And in every case there is the other way out: `camp up` needs no
-namespace, only `sudo`.
+There is no way around the permission itself. camp has no mode that
+mounts with root instead: it once had one, and it was removed because
+nothing used it. A machine that refuses the namespace cannot compose.
 
 ### The Ubuntu case
 
@@ -268,11 +267,6 @@ content of your workspace repository, reviewed and versioned by you,
 because the moment camp generated a program-specific wrapper it would be
 carrying ssh knowledge in a tool that has none.
 
-`camp up` creates no namespace, so none of this applies there — and `camp
-up` says so when the configuration has a `session:` section, rather than
-leaving you to wonder whether it took effect. If you need the system-wide
-ssh configuration read as itself, that is the mode for it.
-
 ## Check that it worked
 
 ```
@@ -290,16 +284,6 @@ with the same identity mapping a real session uses, builds a real overlay
 inside it, writes through it and removes through it. If any of that
 fails, it says which restriction stopped it and what to do about it. The
 scratch tree it uses lives inside that namespace and goes with it.
-
-The system-wide mode is reported as far as it can honestly be:
-
-```
-  ok   privileged behaviour  not tested; it needs a terminal
-```
-
-Answering that one would mean running `sudo` to find out whether `sudo`
-works. What that mode does on this machine is measured the first time you
-run `camp up`.
 
 Run it with no configuration anywhere and it reports only the machine;
 run it inside an environment and it also reports that environment.
@@ -321,13 +305,11 @@ camp doctor
 
 The order matters only for the profile: it names the path the binary is
 at, so the old one is unloaded before the package loads its own. Nothing
-else of camp's is on the machine — no configuration outside an
-environment's own `.camp`, and the records under `~/.local/state/camp`
-belong to your compositions rather than to the installation.
+else of camp's is on the machine: no configuration outside an
+environment's own `.camp`, and no state anywhere else.
 
-Take any composition down first (`camp down`). Nothing breaks if you do
-not — the mounts are the kernel's and outlive the binary — but the
-teardown wants the same camp that built them.
+A running session is unaffected — its mounts are the kernel's and outlive
+the binary — and ends the way every session ends, with its last process.
 
 ## Uninstall
 
@@ -338,13 +320,6 @@ sudo systemctl reload apparmor
 ```
 
 Nothing else is left behind: camp writes only inside its own `.camp`
-directory in an environment, and inside your user's state directory
-(`~/.local/state/camp`) when the system-wide mode is used — which it
-creates, 0700, if your account has never had one. Removing those two
-removes every trace. It never wrote anything into a repository.
-
-The one thing camp makes outside both is `/run/camp`, where the system-wide
-teardown takes a mount before unmounting it, so that the path the kernel
-finally resolves is one nobody but root can rename. It exists for the
-length of one `camp down` and is on a filesystem that does not survive a
-restart.
+directory in an environment. Removing that removes every trace. It never
+wrote anything into a repository, and nothing of a session survives the
+session.

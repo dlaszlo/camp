@@ -42,36 +42,15 @@ import (
 	"github.com/dlaszlo/camp/internal/pathx"
 )
 
-// Mode is how the composition will be built. It changes exactly one thing
-// in the plan -- the overlay's xattr namespace -- and a great deal about
-// what is verified afterwards.
-type Mode string
-
-const (
-	// Namespace is the primary mode: mounts inside a user namespace,
-	// invisible to the rest of the machine, torn down by the kernel.
-	Namespace Mode = "namespace"
-	// Privileged is the fallback: one mount table, visible to every
-	// process, for sessions where a program started outside must see the
-	// tree.
-	Privileged Mode = "privileged"
-)
-
-// Xattr returns the extended-attribute namespace the overlay must be told
-// to use.
+// UserXattr is the extended-attribute namespace the overlay is told to
+// use.
 //
 // A mount made inside a user namespace cannot write trusted.* at all, so
-// it has to use user.*; a privileged mount uses trusted.*, which only
-// root can write. The kernel forces userxattr inside a user namespace
-// whether or not it was asked for -- camp passes it explicitly anyway and
-// verifies per option, because a plan that does not say what it means
-// cannot be checked against what happened.
-func (m Mode) Xattr() string {
-	if m == Namespace {
-		return "userxattr"
-	}
-	return "nouserxattr"
-}
+// it has to use user.*. The kernel forces userxattr inside a user
+// namespace whether or not it was asked for -- camp passes it explicitly
+// anyway and verifies per option, because a plan that does not say what it
+// means cannot be checked against what happened.
+const UserXattr = "userxattr"
 
 // Kind is what one mount does.
 type Kind string
@@ -156,25 +135,6 @@ type Mount struct {
 	Xattr string
 }
 
-// InStaging is where this mount stands while the privileged mode builds
-// the tree: the same place inside the staging directory that it will have
-// inside the live one, because the whole tree is moved in one step.
-//
-// Empty for the one mount that is not in the tree -- the workspace's own
-// self-bind -- which stands at its final path from the moment it is made
-// and is never moved.
-//
-// One derivation, in one place. The job the helper executes and the
-// record written before it starts both need this path, and a record
-// naming a staging location the helper did not mount at would name
-// nothing at all.
-func (m Mount) InStaging(staging string) string {
-	if !m.InLive {
-		return ""
-	}
-	return m.Rel.Join(staging)
-}
-
 // Describe renders one mount for a person reading the plan.
 //
 // Labels, never lowerdir's positional syntax: left-to-right precedence is
@@ -219,10 +179,9 @@ type Islands struct {
 	Relative   string
 }
 
-// Plan is everything an up would do.
+// Plan is everything a start would do.
 type Plan struct {
 	Config config.Config
-	Mode   Mode
 
 	// Live is the merged root, absolute.
 	Live string
@@ -232,7 +191,7 @@ type Plan struct {
 	// because the work and storage directories are named from it.
 	Hash string
 	// Work is disposable: the overlay workdir, the generated exclude, the
-	// staging tree. Garbage-collectable whenever nothing is mounted.
+	// islands expansion. Garbage-collectable whenever nothing is mounted.
 	Work string
 	// Storage is persistent: island stores, writable holes, worktrees.
 	// Never removed by camp -- it holds unfinished work.
@@ -297,8 +256,8 @@ func StorageDir(env, hash string) string {
 	return filepath.Join(env, config.Dir, "storage", hash)
 }
 
-// ReportsDir is where a namespace session leaves its end-of-session
-// report: output to be read once, never authority.
+// ReportsDir is where a session leaves its end-of-session report: output
+// to be read once, never authority.
 func ReportsDir(env string) string {
 	return filepath.Join(env, config.Dir, "reports")
 }
@@ -308,9 +267,7 @@ func ReportsDir(env string) string {
 //
 // Measured: a bind there is visible only through the composed tree, so
 // the code repository and any checkout registered outside keep reading
-// their own file. Under the privileged mode that scoping is the whole
-// difference between a composition detail and a machine-wide change to
-// what git reports in the code repository.
+// their own file.
 var ExcludeTarget = []string{".git", "info", "exclude"}
 
 // ExcludeFile is the generated payload's path inside the work directory.
@@ -320,10 +277,6 @@ func (p Plan) ExcludeFile() string { return filepath.Join(p.Work, "exclude") }
 // its working directory, so a naive generator's relative writes land in
 // camp's scratch and never in a repository.
 func (p Plan) GenDir() string { return filepath.Join(p.Work, "gen") }
-
-// StagingRoot is where the privileged mode builds the whole composition
-// before moving it onto the live directory.
-func (p Plan) StagingRoot() string { return filepath.Join(p.Work, "staging") }
 
 // Targets returns every mount point in the order they are created.
 func (p Plan) Targets() []string {
