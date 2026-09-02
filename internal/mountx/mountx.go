@@ -176,19 +176,19 @@ func DescribeOverlay(m plan.Mount) OverlayConfig {
 //
 // The composed tree is mounted through the kernel's mount API -- fsopen,
 // fsconfig, fsmount, move_mount -- rather than by handing mount(2) an
-// option string, and this is why. An option string names the operands by
-// path, and the kernel resolves those paths at mount time, following
-// whatever symlinks are there then: the directory somebody checked and
-// the directory that gets mounted need not be the same one. A descriptor
-// names the object it was opened on and nothing else.
+// option string, and this is why. The mount API records the real paths
+// of the layers in the kernel's table (measured: lowerdir+=<the real
+// directory>), which is what lets the verification, and a person reading
+// /proc/mounts, see what was mounted. mount(2) accepts /proc/self/fd/N as
+// an operand and mounts the right object -- and then records those
+// strings for the life of the mount, so mountinfo says
+// lowerdir=/proc/self/fd/6 and nothing afterwards can tell.
 //
-// The obvious alternative was measured and rejected. mount(2) accepts
-// /proc/self/fd/N as an operand and mounts the right object -- and then
-// records those strings in the kernel's table for the life of the mount,
-// so /proc/self/mountinfo says lowerdir=/proc/self/fd/6 and nothing
-// afterwards, camp's own verification included, can see what was mounted.
-// The mount API records the real paths (measured: lowerdir+=<the real
-// directory>), which is what a person reading /proc/mounts needs too.
+// The descriptors are not a defence against a name being swapped between
+// the plan's checks and this mount: they are opened by name here, at
+// mount time, and OpenOperands says why that is honest -- there is no
+// privilege boundary between the check and the mount, and the outcome is
+// measured by path afterwards.
 type Operands struct {
 	// Lower are the read-only layers, in the order they are given to the
 	// kernel: leftmost wins.

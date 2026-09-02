@@ -267,8 +267,9 @@ func howToEnd(holders []Holder) string {
 		"it); the shell or command it started exits, and the session ends, " +
 		"releasing this lock. Whatever ignores the request is named on that " +
 		"session's terminal and ended by the kernel when the init exits. Never " +
-		"kill -9 the init: that loses the end-of-session report and nothing else, " +
-		"but it is also never needed.")
+		"kill -9 the init: the kernel then ends every process inside the " +
+		"session at once, with no request and no grace to act on it, and the " +
+		"end-of-session report goes with them.")
 	return b.String()
 }
 
