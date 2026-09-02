@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dlaszlo/camp/internal/drift"
 	"github.com/dlaszlo/camp/internal/inventory"
@@ -57,7 +58,7 @@ func TestTheIndexScanCatchesAForcedAdd(t *testing.T) {
 			"case this scan exists for")
 	}
 
-	found := drift.Scan(p)
+	found := drift.Scan(p, time.Time{})
 	var seen bool
 	for _, path := range found.Indexed {
 		if path == "CLAUDE.md" {
@@ -98,7 +99,7 @@ func TestTheUntrackedScanReportsSuspectedResidue(t *testing.T) {
 
 	testenv.Write(t, filepath.Join(env.Code, ".workspace", "docs", "leaked.md"), "oops\n")
 
-	found := drift.Scan(p)
+	found := drift.Scan(p, time.Time{})
 	var seen bool
 	for _, path := range found.Untracked {
 		if strings.HasPrefix(path, ".workspace/") {
@@ -121,7 +122,7 @@ func TestACodePathIsNotReportedAsALeak(t *testing.T) {
 
 	testenv.Write(t, filepath.Join(env.Code, "src", "new.go"), "package main\n")
 
-	found := drift.Scan(p)
+	found := drift.Scan(p, time.Time{})
 	for _, path := range found.Untracked {
 		if strings.HasPrefix(path, "src/") {
 			t.Errorf("an ordinary new file in the code repository was reported "+
@@ -143,7 +144,7 @@ func TestAWorktreeInsideTheTreeGetsARepairCommand(t *testing.T) {
 	git(t, env.Code, "worktree", "add", "--detach", "--quiet", inside)
 	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(env.Live, ".claude")) })
 
-	found := drift.Scan(p)
+	found := drift.Scan(p, time.Time{})
 	if len(found.Worktrees) == 0 {
 		t.Fatal("the worktree registered inside the composed tree was not found")
 	}
@@ -204,7 +205,7 @@ func TestTheGateComparisonRerunsAndReports(t *testing.T) {
 		t.Skip("the composition was refused before a plan existed")
 	}
 
-	found := drift.Refresh(p)
+	found := drift.Refresh(p, time.Time{})
 	if len(found.Overlaps) == 0 {
 		t.Fatal("an overlap that appeared was not reported")
 	}
@@ -215,7 +216,7 @@ func TestTheGateComparisonRerunsAndReports(t *testing.T) {
 
 func TestNothingToSayMeansNothingIsSaid(t *testing.T) {
 	env := testenv.NewEnv(t)
-	found := drift.Scan(built(t, env))
+	found := drift.Scan(built(t, env), time.Time{})
 	if !found.Empty() {
 		t.Errorf("a clean composition produced a report:\n%s", found.String())
 	}
@@ -240,7 +241,7 @@ func TestAScanThatCouldNotRunIsSaidRatherThanOmitted(t *testing.T) {
 	if err := os.WriteFile(inventory.Path(cfg.Env), []byte("not a record\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	report := drift.Refresh(built)
+	report := drift.Refresh(built, time.Time{})
 	if len(report.Failures) == 0 {
 		t.Fatalf("a damaged snapshot was reported as nothing to say:\n%s", report.String())
 	}
@@ -255,7 +256,7 @@ func TestAScanThatCouldNotRunIsSaidRatherThanOmitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(cfg.LowerPath(), 0o755) })
-	report = drift.Refresh(built)
+	report = drift.Refresh(built, time.Time{})
 	if len(report.Failures) == 0 {
 		t.Fatalf("an unreadable workspace root was reported as nothing to "+
 			"say:\n%s", report.String())

@@ -11,13 +11,14 @@ import (
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/report"
+	"github.com/dlaszlo/camp/internal/session"
 )
 
 // The commands that only look, and the one that records what they see.
 //
 // explain is generated from the live configuration, so that it cannot go
 // stale (§16). A session leaves no record of its own -- the namespace is
-// the state, and it goes with its last process -- so the configuration is
+// the state, and it goes when the session ends -- so the configuration is
 // the only source there is, and it is the one the session standing here
 // was built from.
 func cmdExplain(ctx *context, args []string) error {
@@ -40,7 +41,7 @@ func cmdExplain(ctx *context, args []string) error {
 		return refusedComposition(refused)
 	}
 	generated, _ := gen.Preview(built)
-	ctx.printf("%s", report.Explain(gen.Expand(built, generated)))
+	ctx.printf("%s", report.Explain(gen.Expand(built, generated), session.Grace))
 	return nil
 }
 
@@ -161,7 +162,7 @@ func cmdStatus(ctx *context, args []string) error {
 	ctx.printf("\n%d thing(s) do not match the plan this configuration derives "+
 		"today:\n\n%s", problems.Count(), report.Refusals(problems))
 	return failure(ExitPrecondition,
-		"a session's mounts go when its last process exits: leave the "+
-			"session, and start it again from the configuration as it now is",
+		"a session's mounts go when it ends: exit its shell or command, and "+
+			"start it again from the configuration as it now is",
 		"what is mounted here is not what %s plans", cfg.Source)
 }

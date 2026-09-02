@@ -62,6 +62,14 @@ type outcome struct {
 	RegistryWrite string `json:"registry_write"`
 	LandedInRepo  bool   `json:"landed_in_repo"`
 	WorkspaceOwn  string `json:"workspace_own"`
+	// The code repository's own path, frozen last: a write there, a write
+	// through the .git bind cut from it before the freeze, and what
+	// statvfs says at the three places the polarity has to differ.
+	UpperRawWrite string `json:"upper_raw_write"`
+	GitBindWrite  string `json:"git_bind_write"`
+	UpperReadOnly bool   `json:"upper_read_only"`
+	LiveReadOnly  bool   `json:"live_read_only"`
+	GitReadOnly   bool   `json:"git_read_only"`
 	ExcludeMatch  bool   `json:"exclude_match"`
 	CodeSeesOwn   bool   `json:"code_sees_own"`
 	IslandWrite   string `json:"island_write"`
@@ -140,6 +148,10 @@ func inside() int {
 		return repeat(out, setup, built, cfg)
 	case "sweep":
 		return sweep(out, setup, built, cfg)
+	case "freeze-before-git":
+		return misordered(out, setup, plan.Declared)
+	case "freeze-before-overlay":
+		return misordered(out, setup, plan.Composed)
 	}
 
 	result := compose.Build(setup)
@@ -179,6 +191,18 @@ func probe(out *outcome, built plan.Plan) {
 	out.WorkspaceOwn = writeResult(
 		filepath.Join(built.Config.LowerPath(), "sneak.txt"), "z\n")
 
+	// Nor the code repository through its own path: a write behind the
+	// overlay's back would freeze what the tree shows at that path for the
+	// rest of the session. The .git bind was cut from the writable mount
+	// before the freeze, so writes through it still land.
+	upper := built.Config.UpperPath()
+	out.UpperRawWrite = writeResult(filepath.Join(upper, "behind-the-back.txt"), "w\n")
+	out.GitBindWrite = writeResult(filepath.Join(live, ".git", "through-the-bind"), "g\n")
+	os.Remove(filepath.Join(live, ".git", "through-the-bind"))
+	out.UpperReadOnly = readOnly(upper)
+	out.LiveReadOnly = readOnly(live)
+	out.GitReadOnly = readOnly(filepath.Join(live, ".git"))
+
 	// An island is read-only; the water around it takes writes and keeps
 	// them, machine-local, past the end of the session.
 	out.IslandWrite = writeResult(filepath.Join(live, ".claude", "settings.json"), "edited\n")
@@ -208,6 +232,63 @@ func writeResult(path, content string) string {
 	default:
 		return err.Error()
 	}
+}
+
+// readOnly asks the question the way a process writing there would
+// experience the answer.
+func readOnly(path string) bool {
+	var fs unix.Statfs_t
+	if err := unix.Statfs(path, &fs); err != nil {
+		return false
+	}
+	return fs.Flags&unix.ST_RDONLY != 0
+}
+
+// misordered moves the code repository's freeze to just before the first
+// mount of the given role and builds that, so the test can assert what
+// catches the wrong order.
+//
+// Both wrong orders are real: before the .git bind, the bind is cut from
+// a read-only mount and inherits the flag; before the overlay, the kernel
+// refuses to mount an overlay over a read-only upper at all. The frame
+// puts the freeze last so that neither can happen; this measures that the
+// verification (or the mount itself) would say so if it did.
+func misordered(out outcome, setup compose.Setup, before plan.Role) int {
+	var freeze plan.Mount
+	var rest []plan.Mount
+	for _, mount := range setup.Plan.Mounts {
+		if mount.Role == plan.FreezeUpper {
+			freeze = mount
+			continue
+		}
+		rest = append(rest, mount)
+	}
+	var reordered []plan.Mount
+	placed := false
+	for _, mount := range rest {
+		if !placed && mount.Role == before {
+			reordered = append(reordered, freeze)
+			placed = true
+		}
+		reordered = append(reordered, mount)
+	}
+	setup.Plan.Mounts = reordered
+
+	result := compose.Build(setup)
+	out.Mounted = len(result.Mounted)
+	out.Refused = result.Refused.Rules()
+	out.Stranded = result.Stranded
+	if !result.Refused.Empty() {
+		// Carried as a problem so the parent can read the text; the parent
+		// decides whether refusing was right.
+		out.Problems = append(out.Problems, result.Refused.Error())
+	}
+	if entries, err := os.ReadDir(setup.Plan.Live); err == nil {
+		for _, entry := range entries {
+			out.Residue = append(out.Residue, entry.Name())
+		}
+	}
+	return report(out)
 }
 
 // teardown unmounts what the build made, in reverse, and looks at what is
@@ -500,6 +581,29 @@ func TestTheCompositionPassesEveryCheckAndBehavesAsDesigned(t *testing.T) {
 			"generated block")
 	}
 
+	// The code repository's own path is frozen, and the freeze reaches
+	// neither the overlay nor the .git bind cut before it. Measured at the
+	// three paths whose polarity has to differ, because that is the order
+	// argument the frame makes and a check has to prove it rather than
+	// assume it.
+	if got.UpperRawWrite != "EROFS" || !got.UpperReadOnly {
+		t.Errorf("writing the code repository through its own path returned %q "+
+			"(statvfs read-only: %v), wanted EROFS. A write behind the overlay's "+
+			"back freezes what the tree shows at that path for the rest of the "+
+			"session, and inside a session the raw path has to refuse",
+			got.UpperRawWrite, got.UpperReadOnly)
+	}
+	if got.LiveReadOnly {
+		t.Error("the composed tree is read-only: the freeze of the code " +
+			"repository reached the overlay, which means it was made before it")
+	}
+	if got.GitBindWrite != "succeeded" || got.GitReadOnly {
+		t.Errorf("a write through the .git bind returned %q (statvfs read-only: "+
+			"%v). A bind cut from a read-only mount inherits the flag, so the "+
+			".git bind has to be made before the code repository is frozen",
+			got.GitBindWrite, got.GitReadOnly)
+	}
+
 	if len(got.Stuck) > 0 {
 		t.Errorf("teardown left %v mounted", got.Stuck)
 	}
@@ -759,4 +863,53 @@ func TestTheSweepReadsTheKernelsSpellingOfAWorkDirectory(t *testing.T) {
 	if swept, kept := sweepWith("unreadable", filepath.Join(private, "snapshots", "7475", "work")); len(swept) != 1 || len(kept) > 0 {
 		t.Errorf("a container runtime's overlay stopped the sweep: swept %v, kept %v", swept, kept)
 	}
+}
+
+// The two wrong orders for the code repository's freeze, each caught.
+//
+// Before the .git bind: the bind is cut from a read-only mount and
+// inherits the flag, and the polarity check names it under
+// verify-read-only. Before the overlay: the kernel refuses to mount an
+// overlay over a read-only upper at all, so it is the mount that fails,
+// not a later check. Either way nothing is left mounted and the composed
+// tree's directory is bare.
+func TestTheFreezeOfTheCodeRepositoryHasToComeLast(t *testing.T) {
+	t.Run("before the .git bind", func(t *testing.T) {
+		got := run(t, testenv.NewEnv(t), "freeze-before-git")
+		if !contains(got.Refused, "verify-read-only") {
+			t.Errorf("the freeze made before the .git bind was refused as %v, "+
+				"wanted verify-read-only: the bind cut from the frozen mount is "+
+				"read-only, and the polarity check is what has to say so.\n%s",
+				got.Refused, strings.Join(got.Problems, "\n"))
+		}
+		if !strings.Contains(strings.Join(got.Problems, "\n"), "/.git") {
+			t.Errorf("the refusal does not name the .git bind:\n%s",
+				strings.Join(got.Problems, "\n"))
+		}
+		if len(got.Stranded) > 0 || len(got.Residue) > 0 {
+			t.Errorf("the refused composition left something behind: stranded %v, "+
+				"residue %v", got.Stranded, got.Residue)
+		}
+	})
+	t.Run("before the overlay", func(t *testing.T) {
+		got := run(t, testenv.NewEnv(t), "freeze-before-overlay")
+		if !contains(got.Refused, "mount-failed") {
+			t.Errorf("the freeze made before the overlay was refused as %v, wanted "+
+				"mount-failed: the kernel does not mount an overlay over a "+
+				"read-only upper.\n%s", got.Refused, strings.Join(got.Problems, "\n"))
+		}
+		if len(got.Stranded) > 0 || len(got.Residue) > 0 {
+			t.Errorf("the refused composition left something behind: stranded %v, "+
+				"residue %v", got.Stranded, got.Residue)
+		}
+	})
+}
+
+func contains(rules []string, rule string) bool {
+	for _, have := range rules {
+		if have == rule {
+			return true
+		}
+	}
+	return false
 }

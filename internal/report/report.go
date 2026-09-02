@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dlaszlo/camp/internal/config"
 	"github.com/dlaszlo/camp/internal/gen"
@@ -60,8 +61,9 @@ func indent(text string, numbered bool) string {
 }
 
 // Plan renders the whole derived sequence: every mount, in the order it
-// happens, with the reason it exists.
-func Plan(p plan.Plan) string {
+// happens, with the reason it exists -- and how the session it starts
+// ends, with the grace the caller's session package holds.
+func Plan(p plan.Plan, grace time.Duration) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "composition %s\n", p.Hash)
@@ -92,6 +94,7 @@ func Plan(p plan.Plan) string {
 		b.WriteString(session)
 		b.WriteString("\n")
 	}
+	b.WriteString("how the session ends:\n\n  " + wrap(Ending(grace), "  ") + "\n\n")
 
 	if _, has := p.Config.GenerationStep(); !has {
 		b.WriteString("no generation step: this composition has no exclude at all.\n" +

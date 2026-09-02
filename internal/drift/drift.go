@@ -31,6 +31,7 @@ package drift
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/dlaszlo/camp/internal/enc"
 	"github.com/dlaszlo/camp/internal/gitwire"
@@ -68,8 +69,13 @@ func (r Report) Empty() bool {
 		len(r.Untracked) == 0 && len(r.Indexed) == 0 && len(r.Failures) == 0
 }
 
-// Scan runs all four, changing nothing.
-func Scan(built plan.Plan) Report {
+// Scan runs all four, changing nothing, with every git command bounded by
+// the deadline (zero: unbounded).
+//
+// The bound exists for the end of a session, whose length is promised: a
+// git that hangs in this pass would otherwise hold the init, its locks
+// and the mounts open with nothing to end it.
+func Scan(built plan.Plan, deadline time.Time) Report {
 	report := Report{}
 	if built.Live == "" {
 		return report
@@ -78,7 +84,7 @@ func Scan(built plan.Plan) Report {
 	// A scan that could not run is said, never left out: an omitted scan
 	// reads exactly like a scan that found nothing, and these run at the
 	// moment the cause is still fresh.
-	code, state, err := gitwire.Open(built.Config.UpperPath())
+	code, state, err := gitwire.OpenUntil(built.Config.UpperPath(), deadline)
 	switch state {
 	case gitwire.InWorkTree:
 		report.worktrees(built, code)
@@ -242,7 +248,7 @@ func (r *Report) inventory(built plan.Plan, code *gitwire.Repo) {
 // Refresh re-reads both roots and runs the whole pass. Used at the end of
 // a session, when the listings camp started with may be stale -- a name
 // born during the session is exactly what this is looking for.
-func Refresh(built plan.Plan) Report {
+func Refresh(built plan.Plan, deadline time.Time) Report {
 	var failures []string
 	// A root that cannot be re-read is said, and the stale listing is not
 	// used in its place. The whole point of this pass is what changed
@@ -267,7 +273,7 @@ func Refresh(built plan.Plan) Report {
 		// that does not still does: a worktree registered inside the
 		// composed tree dies with the session whatever the roots say.
 		report := Report{Failures: failures}
-		code, state, gitErr := gitwire.Open(built.Config.UpperPath())
+		code, state, gitErr := gitwire.OpenUntil(built.Config.UpperPath(), deadline)
 		switch state {
 		case gitwire.InWorkTree:
 			report.worktrees(built, code)
@@ -280,7 +286,7 @@ func Refresh(built plan.Plan) Report {
 	}
 
 	built.LowerRoot, built.UpperRoot = lower, upper
-	return Scan(built)
+	return Scan(built, deadline)
 }
 
 // String renders the whole report for a person.

@@ -48,6 +48,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/dlaszlo/camp/internal/nsx"
 	"github.com/dlaszlo/camp/internal/pathx"
 	"github.com/dlaszlo/camp/internal/refusal"
 )
@@ -187,14 +188,11 @@ func busy(role Role, path string) refusal.R {
 		"enforce that -- a second overlay on the same upper mounts without " +
 		"complaint -- and two compositions writing one upper corrupt each " +
 		"other's data, so camp enforces it."
-	advice := "The way in is to enter the composition that is running, not to " +
-		"build a second one. If it was started with 'camp run -- tmux " +
-		"new-session -d', attach to that tmux session from any terminal: " +
-		"the client is only a pipe, and the windows it opens are children " +
-		"of the server, which is inside. If the session is finished, it " +
-		"releases this lock by itself when its last process exits -- the " +
-		"kernel does that, so there is never a stale lock to clear and no " +
-		"--force to reach for."
+	advice := "The way in is the session that is running, not a second one: " +
+		"work in the terminal it was started from. A session ends when the " +
+		"shell or command camp started for it exits, and then it releases " +
+		"this lock by itself -- the kernel does that when camp's init exits, " +
+		"so there is never a stale lock to clear and no --force to reach for."
 	switch role {
 	case Live:
 		rule = "live-locked"
@@ -235,14 +233,52 @@ func busy(role Role, path string) refusal.R {
 		who = "It is held by: " + strings.Join(lines, "; ") + "."
 	}
 
-	return refusal.New(rule, "a composition is already using %s.\n%s\n%s\n%s",
-		path, explanation, who, advice)
+	return refusal.New(rule, "a composition is already using %s.\n%s\n%s\n%s%s",
+		path, explanation, who, advice, howToEnd(holders))
+}
+
+// howToEnd gives the command that ends the session holding a lock, when
+// the holder is camp's own init and so can be named.
+//
+// This is the message that has sent people to kill -9. It names the pid
+// and the signal, says what camp does with it, and says whose move it is;
+// a message that told somebody to "end the session" without saying how was
+// the same refusal with the useful part left out.
+func howToEnd(holders []Holder) string {
+	var inits []int
+	for _, holder := range holders {
+		if holder.Init {
+			inits = append(inits, holder.PID)
+		}
+	}
+	if len(inits) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nThat holder is camp's init for a running session. To end it, your move: ")
+	for i, pid := range inits {
+		if i > 0 {
+			b.WriteString(", then ")
+		}
+		fmt.Fprintf(&b, "kill -TERM %d", pid)
+	}
+	b.WriteString(". camp passes the request to every process " +
+		"inside the session (SIGTERM, then SIGCONT so a stopped one can act on " +
+		"it); the shell or command it started exits, and the session ends, " +
+		"releasing this lock. Whatever ignores the request is named on that " +
+		"session's terminal and ended by the kernel when the init exits. Never " +
+		"kill -9 the init: that loses the end-of-session report and nothing else, " +
+		"but it is also never needed.")
+	return b.String()
 }
 
 // Holder is a process holding a flock.
 type Holder struct {
 	PID     int
 	Command string
+	// Init is true when the holder is camp's own session init, which is
+	// the one holder the refusal can say how to end.
+	Init bool
 }
 
 // Holders names the processes holding an flock on a directory.
@@ -315,7 +351,7 @@ func descriptorHolders(path string, st unix.Stat_t) []Holder {
 		if !holdsDescriptorFor(pid, st) {
 			continue
 		}
-		holders = append(holders, Holder{PID: pid, Command: command(pid)})
+		holders = append(holders, Holder{PID: pid, Command: nsx.Command(pid), Init: nsx.IsInit(pid)})
 	}
 	sort.Slice(holders, func(i, j int) bool { return holders[i].PID < holders[j].PID })
 	return holders
@@ -341,23 +377,6 @@ func holdsDescriptorFor(pid int, st unix.Stat_t) bool {
 		}
 	}
 	return false
-}
-
-func command(pid int) string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err == nil {
-		text := strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
-		if text != "" {
-			if len(text) > 80 {
-				text = text[:80]
-			}
-			return text
-		}
-	}
-	if comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
-		return strings.TrimSpace(string(comm))
-	}
-	return "unknown"
 }
 
 // Adopt rebuilds a Held from a descriptor inherited through exec.

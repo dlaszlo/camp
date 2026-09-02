@@ -20,6 +20,7 @@ import (
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/report"
 	"github.com/dlaszlo/camp/internal/reports"
+	"github.com/dlaszlo/camp/internal/session"
 )
 
 // Version is stamped at build time; the zero value is honest about that.
@@ -291,7 +292,7 @@ func cmdPlan(ctx *context, args []string) error {
 	if len(built.Mounts) > 0 {
 		expanded := gen.Expand(built, generated)
 		expanded.Warnings = built.Warnings
-		ctx.printf("%s", report.Plan(expanded))
+		ctx.printf("%s", report.Plan(expanded, session.Grace))
 		ctx.printf("%s", report.Expansion(built, generated))
 		ctx.printf("the mount calls, in order:\n%s\n", report.Syscalls(expanded))
 	}

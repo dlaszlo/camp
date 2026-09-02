@@ -51,6 +51,16 @@ func TestTargetCompositionIsAccepted(t *testing.T) {
 	if built.Mounts[1].Role != plan.Composed {
 		t.Errorf("the second mount is %s, wanted the overlay", built.Mounts[1].Role)
 	}
+	last := built.Mounts[len(built.Mounts)-1]
+	if last.Role != plan.FreezeUpper || last.Kind != plan.BindRO || last.InLive ||
+		last.Source != env.Code || last.Target != env.Code {
+		t.Errorf("the last mount is %s %s %s -> %s (in the tree: %v); the code "+
+			"repository's read-only self-bind has to come last: an overlay does "+
+			"not mount over a read-only upper, and a bind cut from a read-only "+
+			"mount inherits the flag, so every step sourcing from the repository "+
+			"has to exist before its path is frozen",
+			last.Role, last.Kind, last.Source, last.Target, last.InLive)
+	}
 
 	guards := map[string]bool{}
 	for _, mount := range built.Mounts {

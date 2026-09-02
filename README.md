@@ -92,40 +92,43 @@ evidence of a problem and it is reported, never cleaned away.
 
 The composition is built inside a user and mount namespace, for the
 processes camp starts there and for nothing else. No privilege is needed;
-nothing outside the session can see it; and when the last process exits
-the kernel discards the namespace and every mount in it. Teardown cannot
-fail, and there is no command to take a composition down.
+nothing outside the session can see it; and when the session ends — when
+the shell or command it started exits — the kernel discards the namespace
+and every mount in it. Teardown cannot fail, and there is no command to
+take a composition down.
 
 ```
 camp run -- claude              # or your editor, your shell, your test suite
 camp shell                      # a shell in the composed tree
 ```
 
-**Several terminals in the same tree** — start something that stays
-inside, and attach to it from anywhere:
+**A session ends when what it started exits** — the shell `camp shell`
+opened, or the command `camp run` was given. Anything still running inside
+at that moment — a browser your tooling started, a server — is sent
+`SIGTERM`, with `SIGCONT` behind it so a stopped process can act on it,
+and given ten seconds to end. camp sends nothing stronger: when the time
+is up camp's init exits, and the kernel ends every process left in the
+session's pid namespace with `SIGKILL`. Both moments are reported on
+stderr, by pid and command; a shell that exits with nothing behind it
+prints nothing new. A `SIGTERM` to camp's init — the process resident as
+the session's first — is the same ending: it reaches the shell or
+command, whose exit ends the session.
+
+**Surviving a disconnected terminal** — run camp inside tmux, not tmux
+inside camp:
 
 ```
-camp run -- tmux new-session -d -s work    # returns at once
-tmux attach -t work                        # from any other terminal
+tmux new-session -s work          # or: tmux new-session -d -s work 'camp shell'
+camp shell                        # in the pane
 ```
 
-The tmux *client* is only a pipe; every window it opens is a child of the
-server, and therefore inside. `tmux kill-server` ends the session and
-everything comes down with it.
-
-**A session lives as long as any process is inside it**, so something
-started detached keeps it open after you have left the terminal. Send
-`SIGTERM` to camp's own process, the one resident as the session's first
-process: it means "end this session", it reaches every process in the
-namespace and nothing outside it, and a `SIGCONT` follows so a stopped
-one can act on it. Nothing is escalated to `SIGKILL`. If you do not know
-its pid, ask for a second session in the same tree: camp refuses and
-names what is holding it, by pid and command.
-
-camp does not depend on tmux, and it does not depend on tmux keeping any
-descriptor open either: the locks that guarantee one composition per
-repository are held by camp itself, resident as the session's first
-process.
+The session lives as long as the pane's shell does, and `tmux attach -t
+work` reaches it from any terminal. `camp run -- tmux new-session -d` no
+longer leaves a server behind: the tmux client exits at once, the server
+is asked to end, and the composition goes with it. A second pane of that
+tmux does not see the composed tree — it is a process outside the
+session, like every other — and today nothing reaches a running session's
+tree from a second terminal.
 
 **A program has to be started inside the session to see the tree.** That
 includes your editor: start it with `camp run -- <editor>`, or from a
@@ -385,7 +388,7 @@ language server or a daemon that was already running sees the composed
 tree's directory empty, and nothing camp offers shows it the tree. Start
 such programs inside — `camp run -- <program>`, or from a `camp shell` —
 and they see it. The tree is never visible machine-wide, and no record of
-a session survives it: when the last process exits, the kernel takes
+a session survives it: when the session ends, the kernel takes
 everything, and there is nothing left to describe. camp once had a second
 way of running that mounted the tree for the whole machine; it was
 removed, because nothing used it and every change to the session would
@@ -401,6 +404,21 @@ ends, and after that the worktree is composition-independent.
 **A single-instance GUI editor started from inside** may hand the path to
 its instance outside, which then opens the raw directory. "Start it from
 inside" does not work for those.
+
+**Do not write the code repository from outside while a session is up.**
+The overlay holds the paths the tree has resolved; a save by rename at
+the raw path — how git and every editor write — replaces the inode behind
+the overlay's back, and the tree then shows the old file at that path for
+the rest of the session and fails the next delete there with `Stale file
+handle`. Inside a session the repository's own path is bound read-only,
+so a process inside that names it meets `EROFS` instead. Outside, camp
+can guard nothing: an editor started from the desktop, a cron job, a
+second terminal all write the raw path freely, with exactly that effect.
+End the session first. Relatedly, a *directory* bound into the tree
+(`.workspace/`, an islands directory) is a live view, but a *single file*
+bound into it (a root file such as `CLAUDE.md`, an island file) is pinned
+to the inode that existed when the session started, and a replacement
+saved outside appears at the next start.
 
 ## Documentation
 

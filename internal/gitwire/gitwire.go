@@ -30,6 +30,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/dlaszlo/camp/internal/pathx"
 )
@@ -55,6 +58,9 @@ type Repo struct {
 	// working tree's root and without a trailing slash. Empty when Path is
 	// the root itself.
 	prefix string
+	// Deadline bounds every command this repository runs; zero is no
+	// bound. Set by OpenUntil for the one pass whose time is promised.
+	Deadline time.Time
 }
 
 // Available reports whether git can be run at all.
@@ -108,8 +114,13 @@ const (
 // not answering. And git's no is looked at once more before it is
 // believed, because a repository camp cannot read produces the same
 // sentence -- see gitSaidNo.
-func Open(path string) (*Repo, State, error) {
-	repo := &Repo{Path: path}
+func Open(path string) (*Repo, State, error) { return OpenUntil(path, time.Time{}) }
+
+// OpenUntil is Open with every command the repository will run bounded by
+// a deadline -- the end-of-session pass, whose time is advertised and has
+// to be true. A zero deadline is no bound.
+func OpenUntil(path string, deadline time.Time) (*Repo, State, error) {
+	repo := &Repo{Path: path, Deadline: deadline}
 	out, err := repo.run("rev-parse", "--is-inside-work-tree", "--show-prefix")
 	if err != nil {
 		if notARepository(err) {
@@ -297,16 +308,11 @@ func environment() []string {
 
 // run executes one read-only git command and returns its raw output.
 func (r *Repo) run(args ...string) ([]byte, error) {
-	full := append([]string{"--no-optional-locks", "-C", r.Path}, args...)
-	cmd := exec.Command("git", full...)
-	cmd.Env = environment()
-	var out, errOut bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errOut
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("git %s in %s: %w: %s",
-			strings.Join(args, " "), r.Path, err, strings.TrimSpace(errOut.String()))
+	out, err := r.execute(nil, args)
+	if err != nil {
+		return nil, err
 	}
-	return out.Bytes(), nil
+	return out, nil
 }
 
 // fed executes one read-only git command with names on its standard
@@ -321,17 +327,65 @@ func (r *Repo) run(args ...string) ([]byte, error) {
 // Null-separated is the same rule this package reads git's other output
 // by.
 func (r *Repo) fed(stdin []byte, args ...string) ([]byte, error) {
+	return r.execute(stdin, args)
+}
+
+// execute runs one git command, bounded by the repository's Deadline when
+// it has one.
+//
+// Without a deadline the command simply runs. With one, it is started on
+// the calling thread and waited for on another, so that a git which hangs
+// -- a trap in a hook, a filesystem that stopped answering -- is sent
+// SIGTERM at the deadline and left behind rather than holding its caller.
+// The start stays on the caller's thread on purpose: in a session's init
+// the capability drop is per thread, and a child forked from any other
+// thread could inherit what was dropped. Nothing stronger than SIGTERM is
+// sent. An abandoned git is a process in the session like any other; the
+// session's end names it, gives it the grace, and leaves the rest to the
+// kernel. Its output, if any arrives later, is not used.
+func (r *Repo) execute(stdin []byte, args []string) ([]byte, error) {
 	full := append([]string{"--no-optional-locks", "-C", r.Path}, args...)
 	cmd := exec.Command("git", full...)
 	cmd.Env = environment()
-	cmd.Stdin = bytes.NewReader(stdin)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
-	if err := cmd.Run(); err != nil {
-		return out.Bytes(), fmt.Errorf("git %s in %s: %w: %s",
+	describe := func(err error) error {
+		return fmt.Errorf("git %s in %s: %w: %s",
 			strings.Join(args, " "), r.Path, err, strings.TrimSpace(errOut.String()))
 	}
-	return out.Bytes(), nil
+
+	if r.Deadline.IsZero() {
+		if err := cmd.Run(); err != nil {
+			return out.Bytes(), describe(err)
+		}
+		return out.Bytes(), nil
+	}
+
+	remaining := time.Until(r.Deadline)
+	if remaining <= 0 {
+		return nil, fmt.Errorf("git %s in %s was not started: the time this "+
+			"pass had was already spent", strings.Join(args, " "), r.Path)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, describe(err)
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- cmd.Wait() }()
+	select {
+	case err := <-finished:
+		if err != nil {
+			return out.Bytes(), describe(err)
+		}
+		return out.Bytes(), nil
+	case <-time.After(remaining):
+		_ = cmd.Process.Signal(unix.SIGTERM)
+		return nil, fmt.Errorf("git %s in %s did not finish in the time this "+
+			"pass had, and was sent SIGTERM (pid %d); whatever it answers is not "+
+			"used", strings.Join(args, " "), r.Path, cmd.Process.Pid)
+	}
 }
 
 // literal builds a pathspec that means exactly this path: no wildcard

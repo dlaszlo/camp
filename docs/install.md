@@ -309,7 +309,8 @@ else of camp's is on the machine: no configuration outside an
 environment's own `.camp`, and no state anywhere else.
 
 A running session is unaffected — its mounts are the kernel's and outlive
-the binary — and ends the way every session ends, with its last process.
+the binary — and ends the way every session ends, when its shell or
+command exits.
 
 ## Uninstall
 

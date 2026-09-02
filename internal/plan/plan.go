@@ -19,8 +19,19 @@
 //     up into the code repository, and it is why nothing lower-provided
 //     is writable in the steady state.
 //
-// Then the steps, in their declared order. Then verification, and only
-// then is the composition declared up.
+// Then the steps, in their declared order. Then one more frame mount:
+//
+//  4. the code repository bound onto itself read-only. Overlayfs holds the
+//     paths it has resolved, so a write behind its back through the raw
+//     upper path -- a rename over a file, which is how git and every
+//     editor save -- leaves the tree showing the old inode for the rest
+//     of the session and failing the next unlink there with ESTALE. It
+//     has to come last: an overlay refuses to mount over a read-only
+//     upper at all, and a bind cut from a read-only mount inherits the
+//     flag, so the .git bind and every other step sourcing from the code
+//     repository has to exist before the freeze does.
+//
+// Then verification, and only then is the composition declared up.
 //
 // Per-file mounting was considered for the third item and rejected: a
 // bind is a live view, so protecting the directory already covers files
@@ -74,6 +85,9 @@ type Role string
 const (
 	// FreezeLower is the workspace's self-bind.
 	FreezeLower Role = "freeze-lower"
+	// FreezeUpper is the code repository's self-bind, made after every
+	// other mount.
+	FreezeUpper Role = "freeze-upper"
 	// Composed is the overlay.
 	Composed Role = "composed"
 	// RootGuard is a derived read-only bind over a workspace root entry.
@@ -107,10 +121,10 @@ type Mount struct {
 	// honest, and spec §6 says what would make it stop being so.
 	SourceParts []string
 	// Rel is the target relative to the merged root. It is the zero value
-	// for the one mount that lives outside the tree -- the workspace's
-	// self-bind.
+	// for the two mounts that live outside the tree -- the workspace's
+	// self-bind and the code repository's.
 	Rel pathx.Rel
-	// InLive is false only for that same mount.
+	// InLive is false only for those two mounts.
 	InLive bool
 
 	// Step is the index of the configuration step this came from, or -1

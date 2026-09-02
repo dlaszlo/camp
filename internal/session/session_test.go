@@ -533,134 +533,291 @@ func TestNothingDeclaredLeaksOutOfTheSession(t *testing.T) {
 	}
 }
 
-// The property the whole supervisor exists for: a daemonising workload
-// returns at once, the init stays resident, and it is the init that holds
-// the locks -- not the workload, whose habits with inherited descriptors
-// are nobody's to rely on.
-func TestADaemonisedWorkloadReturnsWhileTheInitHoldsTheLocks(t *testing.T) {
-	session := prepare(t)
+// -- the end of a session ------------------------------------------------------
+//
+// A session ends when its workload ends: the shell or the command camp
+// started for it. What is still inside at that moment is named, asked to
+// leave once, given Grace, and then left to the kernel. Every test here
+// measures one clause of that in a real namespace.
+
+// captured is a file a session's stderr is written to, so a test can read
+// what the init said.
+func captured(t *testing.T, env *testenv.Env) *os.File {
+	t.Helper()
+	file, err := os.CreateTemp(env.Path, "stderr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { file.Close() })
+	return file
+}
+
+func contents(t *testing.T, file *os.File) string {
+	t.Helper()
+	data, err := os.ReadFile(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// lockable reports whether the session's locks can be taken again, which
+// is the kernel having released them: the init has exited.
+func lockable(cfg config.Config) bool {
+	pair, err := takeLocks(cfg)
+	if err != nil {
+		return false
+	}
+	pair.Release()
+	return true
+}
+
+// The rule itself. A workload that daemonises a child and exits used to
+// leave the session standing for as long as the child lived; now the
+// session ends with the workload, and the child is asked -- SIGTERM, which
+// it can act on -- rather than killed.
+func TestASessionEndsWhenItsWorkloadDoesAndAsksTheRestToLeave(t *testing.T) {
+	composition := prepare(t)
+	stderr := captured(t, composition.Env)
 	quiet := devnull(t)
 
-	marker := filepath.Join(session.Env.Path, "still-running")
-	// setsid detaches it from this process group and it closes its
-	// descriptors, exactly as a tmux server does.
+	// setsid detaches it from the workload's process group, exactly as a
+	// tmux server does, and the workload exits leaving it behind -- once the
+	// child says it is ready, or the request would meet a shell that has not
+	// installed its trap yet and dies of the signal instead of recording it.
+	// The child traps SIGTERM and records that it was asked.
+	marker := filepath.Join(composition.Env.Path, "asked")
+	ready := filepath.Join(composition.Env.Path, "ready")
 	daemon := []string{"/bin/sh", "-c",
-		"setsid /bin/sh -c 'sleep 20 >/dev/null 2>&1 </dev/null' & echo started > " + marker}
+		"setsid /bin/sh -c 'trap \"echo term > " + marker + "; exit 0\" TERM; " +
+			"echo > " + ready + "; sleep 300 & wait' >/dev/null 2>&1 </dev/null & " +
+			"until [ -e " + ready + " ]; do sleep 0.05; done"}
 
 	started := time.Now()
-	status, err := session.start(daemon, quiet, quiet, os.Stderr)
+	status, err := composition.start(daemon, quiet, quiet, stderr)
 	skipUnlessNamespaced(t, err)
 	if err != nil {
 		t.Fatalf("the session failed: %v", err)
 	}
 	if status != 0 {
-		t.Fatalf("the launching command exited %d", status)
+		t.Fatalf("the launching command exited %d; the status is the workload's "+
+			"own, whatever the session did afterwards", status)
 	}
-	if elapsed := time.Since(started); elapsed > 30*time.Second {
-		t.Fatalf("the launcher waited %s for a daemonised workload", elapsed)
+	if elapsed := time.Since(started); elapsed >= session.Grace {
+		t.Errorf("the session took %s to end after a workload that exited at "+
+			"once; a child that acts on SIGTERM has to end it well inside the "+
+			"grace of %s", elapsed, session.Grace)
 	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("the workload never ran: %v", err)
+	if data, err := os.ReadFile(marker); err != nil || !strings.Contains(string(data), "term") {
+		t.Errorf("the daemonised child was not asked with SIGTERM (marker: %v, "+
+			"%q). The end of a session is a request first", err, data)
 	}
-
-	// The launcher has returned. The init is still in there, and a second
-	// composition on the same upper must still be refused.
-	session.Locks.Release()
-	if _, err := takeLocks(session.Config); err == nil {
-		t.Error("a second composition was accepted while the session was still " +
-			"running.\nThe init is camp resident as pid 1 of the namespace and it " +
-			"holds the locks: a daemonising workload routinely closes the " +
-			"descriptors it inherited, so the design must not depend on the " +
-			"workload keeping them")
+	if !lockable(composition.Config) {
+		t.Error("the launcher has returned and the locks are still held: the init " +
+			"outlived its workload, which is the state this rule exists to remove")
 	}
 
+	said := contents(t, stderr)
+	for _, want := range []string{
+		"the command has exited, and", "still running",
+		"SIGTERM, with SIGCONT", "pid ", "waits up to 10 seconds", "nothing stronger",
+	} {
+		if !strings.Contains(said, want) {
+			t.Errorf("the init did not say %q before asking what was inside to "+
+				"leave:\n%s", want, said)
+		}
+	}
+	if strings.Contains(said, "after 10 seconds") {
+		t.Errorf("the deadline message was printed although the namespace "+
+			"emptied in time:\n%s", said)
+	}
 }
 
-// A session outlives its workload by design -- that is what makes
-// 'camp run -- tmux new-session -d' work -- so the only way to end one
-// from outside is a signal to the init. It means "end this session", and
-// it reaches every process in the namespace; the composition comes down
-// with the last of them.
+// A process that ignores the request is not killed by camp. At the
+// deadline the init names it, says the kernel will end it, and exits; the
+// launcher returns the workload's status, not a verdict on the session.
+func TestAProcessThatIgnoresTheRequestIsNamedAndLeftToTheKernel(t *testing.T) {
+	composition := prepare(t)
+	stderr := captured(t, composition.Env)
+	quiet := devnull(t)
+
+	// An ignored disposition survives execve, so the sleep ignores SIGTERM
+	// too. The workload waits until it is in place before exiting.
+	ready := filepath.Join(composition.Env.Path, "ready")
+	daemon := []string{"/bin/sh", "-c",
+		"setsid /bin/sh -c 'trap \"\" TERM; echo > " + ready + "; exec sleep 300' " +
+			">/dev/null 2>&1 </dev/null & until [ -e " + ready + " ]; do sleep 0.05; done"}
+
+	started := time.Now()
+	status, err := composition.start(daemon, quiet, quiet, stderr)
+	skipUnlessNamespaced(t, err)
+	if err != nil {
+		t.Fatalf("the session failed: %v", err)
+	}
+	elapsed := time.Since(started)
+	if status != 0 {
+		t.Errorf("the launching command exited %d; a session that did not empty "+
+			"in time is reported on stderr, never folded into the workload's "+
+			"status", status)
+	}
+	if elapsed < session.Grace {
+		t.Errorf("the session ended after %s with a process inside that ignores "+
+			"SIGTERM; it has to wait the whole grace of %s before giving up on it",
+			elapsed, session.Grace)
+	}
+	if elapsed > session.Grace+10*time.Second {
+		t.Errorf("the session took %s to end; the deadline is %s and nothing "+
+			"waits past it", elapsed, session.Grace)
+	}
+	if !lockable(composition.Config) {
+		t.Error("the launcher has returned and the locks are still held")
+	}
+
+	said := contents(t, stderr)
+	for _, want := range []string{
+		"after 10 seconds, 1 process(es) are still in the session",
+		"sleep 300", "camp does not kill them", "SIGKILL",
+	} {
+		if !strings.Contains(said, want) {
+			t.Errorf("the deadline message does not say %q:\n%s", want, said)
+		}
+	}
+}
+
+// A shell that exits with nothing behind it produces nothing new: no
+// paragraph about processes, no deadline, and a farewell whose git reads
+// ran -- against a code repository whose own path is frozen read-only for
+// the whole session, which the end-of-session pass has to read through.
+func TestAnOrdinaryExitSaysNothingNew(t *testing.T) {
+	composition := prepare(t)
+	stderr := captured(t, composition.Env)
+	quiet := devnull(t)
+
+	started := time.Now()
+	status, err := composition.start([]string{"/bin/sh", "-c", "true"}, quiet, quiet, stderr)
+	skipUnlessNamespaced(t, err)
+	if err != nil || status != 0 {
+		t.Fatalf("the session failed: status=%d err=%v", status, err)
+	}
+	if elapsed := time.Since(started); elapsed >= session.Grace {
+		t.Errorf("an empty namespace took %s to be found empty", elapsed)
+	}
+
+	said := contents(t, stderr)
+	for _, unwanted := range []string{"still running", "after 10 seconds", "could not run"} {
+		if strings.Contains(said, unwanted) {
+			t.Errorf("the init said %q after a clean exit with nothing left "+
+				"inside:\n%s", unwanted, said)
+		}
+	}
+}
+
+// A signal to the init converges on the same ending. It fans out, the
+// workload dies of it, and the workload's exit is what ends the session --
+// with what was daemonised beside it asked, once, in the same fan-out.
 //
-// This is the case the old narrow forward was silent about. The workload
-// has already exited, so the process group a forward would have named is
-// gone, and the request arrived nowhere while the daemon held the
-// composition open for its whole life.
-func TestASignalToTheInitEndsASessionItsWorkloadHasLeft(t *testing.T) {
+// This is the 2026-08-28 test rewritten for the new rule: the same
+// daemonised process, the same signal, and one fewer wait, because the
+// workload no longer has to have left for the daemon to matter.
+func TestASignalToTheInitEndsTheSessionThroughItsWorkload(t *testing.T) {
 	composition := prepare(t)
 	quiet := devnull(t)
 	live := composition.Config.Live()
 
-	// setsid detaches it from the workload's process group, exactly as a
-	// tmux server does, and the workload exits at once leaving it behind.
-	daemon := []string{"/bin/sh", "-c",
-		"setsid /bin/sh -c 'sleep 300 >/dev/null 2>&1 </dev/null' &"}
+	// A workload that stays, with a daemon detached beside it. It says when
+	// it is running, and that is what the test synchronises on: the init
+	// starts the workload only after it has subscribed to SIGTERM, so a
+	// workload that has run proves the handler is in place -- the lock
+	// descriptors alone do not, since the init holds them from before the
+	// first mount, and a signal during mounting meets the runtime's own
+	// disposition instead of the supervisor's.
+	ready := filepath.Join(composition.Env.Path, "running")
+	workload := []string{"/bin/sh", "-c",
+		"setsid /bin/sh -c 'sleep 300' >/dev/null 2>&1 </dev/null & echo > " + ready +
+			"; exec sleep 300"}
 
-	status, err := composition.start(daemon, quiet, quiet, os.Stderr)
-	skipUnlessNamespaced(t, err)
-	if err != nil {
-		t.Fatalf("the session failed: %v", err)
+	type result struct {
+		status int
+		err    error
 	}
-	if status != 0 {
-		t.Fatalf("the launching command exited %d", status)
+	done := make(chan result, 1)
+	go func() {
+		status, err := composition.start(workload, quiet, quiet, os.Stderr)
+		done <- result{status, err}
+	}()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case outcome := <-done:
+			skipUnlessNamespaced(t, outcome.err)
+			t.Fatalf("the session ended before its workload ran: status=%d err=%v",
+				outcome.status, outcome.err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the workload had not run after 20s")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	// The init is found the way camp's own refusal finds it -- as the
-	// process holding the live lock -- and told apart from anything that
-	// inherited a descriptor by the argument only the init is invoked
-	// with. This process lets go of its copies first, or it would be in
-	// the answer itself.
-	composition.Locks.Release()
-	found := locks.Holders(live)
+	// process holding the live lock -- and told apart from this process's
+	// own copies by the argument only the init is invoked with.
 	pid := 0
-	for _, holder := range found {
+	for _, holder := range locks.Holders(live) {
 		if strings.Contains(holder.Command, session.InitArg) {
 			pid = holder.PID
 		}
 	}
 	if pid == 0 {
-		t.Fatalf("no init holds the live lock after the launcher returned, so "+
-			"there is no session left to signal. Holding %s: %v", live, found)
+		t.Fatalf("no init holds the live lock %s while the workload is running", live)
 	}
 
+	signalled := time.Now()
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		t.Fatalf("signalling the init (pid %d): %v", pid, err)
 	}
-
-	// The session is over when its locks can be taken again: the last
-	// process left the namespace and the kernel discarded it with every
-	// mount in it.
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		pair, err := takeLocks(composition.Config)
-		if err == nil {
-			pair.Release()
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("20s after the init was sent SIGTERM the session still "+
-				"holds %s.\nA signal to the init means end this session, and it "+
-				"has to reach what is still inside: by this point the workload "+
-				"has exited, so a forward aimed at its process group reaches "+
-				"nothing at all", live)
-		}
-		time.Sleep(100 * time.Millisecond)
+	outcome := <-done
+	if outcome.err != nil {
+		t.Fatalf("the session failed: %v", outcome.err)
+	}
+	if outcome.status != 128+int(syscall.SIGTERM) {
+		t.Errorf("the launcher returned %d, wanted %d: the workload died of the "+
+			"SIGTERM the init fanned out, and its status is the shell's convention",
+			outcome.status, 128+int(syscall.SIGTERM))
+	}
+	if elapsed := time.Since(signalled); elapsed >= session.Grace {
+		t.Errorf("the session took %s to end after SIGTERM; the daemon beside the "+
+			"workload was asked in the same fan-out and dies of it at once", elapsed)
+	}
+	if !lockable(composition.Config) {
+		t.Error("the session's locks are still held after the launcher returned")
 	}
 }
 
 // A stopped process keeps a SIGTERM pending and stays stopped: it never
-// gets to decide anything, and the session it holds open would never end.
-// So the fan-out is followed by SIGCONT -- which is what makes the
-// request a request, rather than something that happens to reach only the
-// processes that were running when it arrived.
-func TestASignalToTheInitReachesAStoppedProcessToo(t *testing.T) {
+// gets to decide anything. The ending's fan-out is followed by SIGCONT,
+// which is what lets it act; without that the session would stand until
+// the deadline and the kernel would end it.
+func TestTheEndingReachesAStoppedProcessToo(t *testing.T) {
 	composition := prepare(t)
 	quiet := devnull(t)
-	live := composition.Config.Live()
 
+	// The workload exits only once the child is really stopped -- read from
+	// the namespace's own /proc, whose pids are what $$ gave -- or the
+	// request would meet a running process and prove nothing about SIGCONT.
+	pidfile := filepath.Join(composition.Env.Path, "stopped")
 	daemon := []string{"/bin/sh", "-c",
-		"setsid /bin/sh -c 'kill -STOP $$; sleep 300' >/dev/null 2>&1 </dev/null &"}
+		"setsid /bin/sh -c 'echo $$ > " + pidfile + "; kill -STOP $$; sleep 300' " +
+			">/dev/null 2>&1 </dev/null & " +
+			"until [ -e " + pidfile + " ] && grep -q '^State:.T' /proc/$(cat " + pidfile +
+			")/status 2>/dev/null; do sleep 0.05; done"}
 
+	started := time.Now()
 	status, err := composition.start(daemon, quiet, quiet, os.Stderr)
 	skipUnlessNamespaced(t, err)
 	if err != nil {
@@ -669,37 +826,89 @@ func TestASignalToTheInitReachesAStoppedProcessToo(t *testing.T) {
 	if status != 0 {
 		t.Fatalf("the launching command exited %d", status)
 	}
+	if elapsed := time.Since(started); elapsed >= session.Grace {
+		t.Errorf("the session took %s to end with a stopped process inside.\nA "+
+			"stopped process cannot act on a signal it is holding pending: "+
+			"without a SIGCONT after the fan-out it stays stopped until the "+
+			"deadline, and the kernel ends it instead of it ending itself", elapsed)
+	}
+	if !lockable(composition.Config) {
+		t.Error("the session's locks are still held after the launcher returned")
+	}
+}
 
-	composition.Locks.Release()
-	found := locks.Holders(live)
-	pid := 0
-	for _, holder := range found {
-		if strings.Contains(holder.Command, session.InitArg) {
-			pid = holder.PID
-		}
-	}
-	if pid == 0 {
-		t.Fatalf("no init holds the live lock after the launcher returned. "+
-			"Holding %s: %v", live, found)
-	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		t.Fatalf("signalling the init (pid %d): %v", pid, err)
-	}
+// -- the code repository's own path, inside a real session --------------------
 
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		pair, err := takeLocks(composition.Config)
-		if err == nil {
-			pair.Release()
-			return
+// No descriptor of the code repository, the composed tree's directory or
+// the handshake pipe reaches the workload. The lock descriptors were
+// opened through the raw path before the freeze existed, and a path
+// resolved through a descriptor uses the mount the descriptor was opened
+// on -- so a workload holding one wrote the code repository at
+// /proc/self/fd/4/... behind the frozen path, measured, while the
+// polarity check passed. The lock lives on the open file description the
+// init keeps; the child gets no copy.
+func TestTheWorkloadInheritsNoLockOrPipeDescriptor(t *testing.T) {
+	composition := prepare(t)
+	upper := composition.Config.UpperPath()
+	live := composition.Config.Live()
+
+	// Every descriptor above the three standard ones, with its target, then
+	// the write the leak allowed. The write goes through the descriptor
+	// number the init holds the upper lock on; with no descriptor there it
+	// cannot resolve at all. The standard three are the test's own -- under
+	// go test, stderr is a pipe -- and say nothing about the init.
+	script := `for fd in /proc/self/fd/*; do
+  n=${fd##*/}; [ "$n" -gt 2 ] && echo "fd $n -> $(readlink "$fd")"
+done
+echo x > /proc/self/fd/4/via-descriptor 2>/dev/null; echo via=$?`
+	text, status, err := composition.output(t, []string{"/bin/sh", "-c", script})
+	skipUnlessNamespaced(t, err)
+	if err != nil || status != 0 {
+		t.Fatalf("the session failed: status=%d err=%v\n%s", status, err, text)
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasSuffix(line, "-> "+upper) || strings.HasSuffix(line, "-> "+live) {
+			t.Errorf("the workload holds a descriptor for the locked directory (%s). "+
+				"The lock descriptors stay with the init: through one of them the "+
+				"code repository is reachable writable behind the frozen path", line)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("20s after the init was sent SIGTERM the session still "+
-				"holds %s, and what is inside it is stopped.\nA stopped process "+
-				"cannot act on a signal it is holding pending: without a SIGCONT "+
-				"after the fan-out it stays stopped, and the session stays up", live)
+		if strings.Contains(line, "-> pipe:") {
+			t.Errorf("the workload holds a pipe descriptor (%s); the handshake pipe "+
+				"is the init's", line)
 		}
-		time.Sleep(100 * time.Millisecond)
+	}
+	if !strings.Contains(text, "via=") || strings.Contains(text, "via=0") {
+		t.Errorf("a write through /proc/self/fd/4 succeeded inside the session:\n%s", text)
+	}
+	if _, err := os.Stat(filepath.Join(upper, "via-descriptor")); err == nil {
+		t.Error("the write through the inherited descriptor landed in the code repository")
+	}
+}
+
+// Inside a session the code repository's raw path refuses writes, and the
+// same write through the composed tree lands. The guard exists so that a
+// write behind the overlay's back -- which freezes what the tree shows at
+// that path for the rest of the session -- meets EROFS instead.
+func TestTheCodeRepositorysOwnPathRefusesWritesInsideASession(t *testing.T) {
+	composition := prepare(t)
+	upper := composition.Config.UpperPath()
+
+	script := `echo x > "$1"/behind-the-back 2>/dev/null; echo raw=$?
+echo y > ./through-the-tree && echo tree=ok && rm -f ./through-the-tree`
+	text, status, err := composition.output(t, []string{"/bin/sh", "-c", script, "sh", upper})
+	skipUnlessNamespaced(t, err)
+	if err != nil || status != 0 {
+		t.Fatalf("the session failed: status=%d err=%v\n%s", status, err, text)
+	}
+	if !strings.Contains(text, "raw=") || strings.Contains(text, "raw=0") {
+		t.Errorf("a write to the code repository through its own path succeeded "+
+			"inside the session:\n%s", text)
+	}
+	if _, err := os.Stat(filepath.Join(upper, "behind-the-back")); err == nil {
+		t.Error("the write behind the overlay's back landed in the code repository")
+	}
+	if !strings.Contains(text, "tree=ok") {
+		t.Errorf("a write through the composed tree failed:\n%s", text)
 	}
 }
 

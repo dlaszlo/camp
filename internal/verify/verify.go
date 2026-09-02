@@ -120,10 +120,14 @@ var (
 			"for in one call, which the kernel accepts and silently ignores.",
 	}
 	readOnlyByMistake = refusal.Group{
-		Rule:   "verify-read-only",
-		One:    "a mount was made writable and is read-only:",
-		Many:   "%d mounts were made writable and are read-only:",
-		Detail: "Writes meant to land there will fail.",
+		Rule: "verify-read-only",
+		One:  "a mount was made writable and is read-only:",
+		Many: "%d mounts were made writable and are read-only:",
+		Detail: "Writes meant to land there will fail. A bind is exactly as " +
+			"writable as the mount it was cut from, so one of two things is true " +
+			"of the source: its filesystem is mounted read-only, or something " +
+			"read-only already stood on its path when this bind was made. Look at " +
+			"what the source is mounted on, from outside a session.",
 	}
 	propagating = refusal.Group{
 		Rule: "verify-propagation",
@@ -322,6 +326,11 @@ func artefact(in Input) refusal.List {
 // Fewer means a mount failed; more means residue, or another composition,
 // or something else interfering. Either way the plan and the machine
 // disagree, and the teardown list would be wrong.
+//
+// Three places are enumerated, because the plan has mounts in three
+// places: under the composed tree, on the workspace's own path and on the
+// code repository's own path -- the two self-binds that live outside the
+// tree.
 func completeness(in Input) refusal.List {
 	var refused refusal.List
 
@@ -330,6 +339,9 @@ func completeness(in Input) refusal.List {
 		present[entry.Point] = true
 	}
 	for _, entry := range mountinfo.At(in.Table, in.Plan.Config.LowerPath()) {
+		present[entry.Point] = true
+	}
+	for _, entry := range mountinfo.At(in.Table, in.Plan.Config.UpperPath()) {
 		present[entry.Point] = true
 	}
 

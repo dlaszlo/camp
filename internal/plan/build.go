@@ -16,13 +16,15 @@ import (
 //
 // The order is the frame's, and the frame is not negotiable: the
 // workspace is frozen first, then the composed tree, then the derived
-// protections, and only then whatever the configuration asked for.
+// protections, then whatever the configuration asked for, and the code
+// repository is frozen last.
 func Build(cfg config.Config, live, hash string, lowerRoot, upperRoot []pathx.Info) Plan {
 	b := newBuilder(cfg, live, hash, lowerRoot, upperRoot)
 	b.freezeLower()
 	b.composedTree()
 	b.rootGuards()
 	b.steps()
+	b.freezeUpper()
 	return b.plan
 }
 
@@ -42,6 +44,7 @@ type builder struct {
 	// The same three paths as components beneath the environment root,
 	// which is how every mount is really resolved.
 	lowerParts []string
+	upperParts []string
 	liveParts  []string
 	storeParts []string
 }
@@ -65,6 +68,7 @@ func newBuilder(cfg config.Config, live, hash string, lowerRoot, upperRoot []pat
 		lowerPath:  cfg.LowerPath(),
 		upperPath:  cfg.UpperPath(),
 		lowerParts: repositoryParts(cfg, cfg.Lower[0]),
+		upperParts: repositoryParts(cfg, cfg.Upper),
 		liveParts:  cfg.Merged.Components(),
 		storeParts: []string{config.Dir, "storage", hash},
 	}
@@ -140,6 +144,45 @@ func (b *builder) rootGuards() {
 				"copying it up into the code repository", entry.Name),
 		})
 	}
+}
+
+// freezeUpper holds the code repository read-only on its own path, last.
+//
+// Overlayfs treats its layers as its own while mounted: a path the tree
+// has resolved is a dentry the overlay holds, and a rename over that path
+// in the raw upper -- how git writes every file it writes, and how every
+// editor saves -- replaces the inode underneath the overlay's back. The
+// tree then shows the old content at that path and fails the next unlink
+// there with ESTALE, for the rest of the session (measured, 2026-09-02).
+// A process inside that names the raw path -- an agent handed the
+// repository's absolute path, a tool that resolves the tree to its real
+// directory -- now meets EROFS instead.
+//
+// Last, and the position is forced from both sides (measured). The
+// overlay refuses to mount over a read-only upper at all, so the freeze
+// cannot precede it. And a bind copies the per-mount flags of the mount
+// it is cut from, so a bind of <upper>/.git made after the freeze would be
+// read-only too: every step sourcing from the code repository has to
+// exist before the freeze does, and after all of steps: is the one place
+// that holds without a rule about which steps source from where.
+//
+// The guard exists only inside the session's namespace. An outside
+// terminal can still write the repository while a session is up, and
+// nothing camp can mount changes that; report says so wherever the tree
+// is described.
+func (b *builder) freezeUpper() {
+	b.add(Mount{
+		Kind:        BindRO,
+		Role:        FreezeUpper,
+		Source:      b.upperPath,
+		Target:      b.upperPath,
+		SourceParts: b.upperParts,
+		Step:        -1,
+		Why: fmt.Sprintf("hold %s -- the code repository's own path -- read-only "+
+			"while the composition is up, because a write behind the overlay's "+
+			"back freezes what the tree shows at that path for the rest of the "+
+			"session; writes go through the composed tree", b.upperPath),
+	})
 }
 
 // steps adds what the configuration asked for, in its own order.

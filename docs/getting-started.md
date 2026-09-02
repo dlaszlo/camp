@@ -177,8 +177,19 @@ repository, and camp holds it read-only so that editing it *here* fails
 loudly instead of quietly copying it into the product's repository, where
 it would look applied and belong to the wrong history. To change it, edit
 it where it lives — `~/work/shop-env/INSTRUCTIONS.md`, from another
-terminal — and the change appears in the composed tree immediately, because
-what you are looking at is a live view and not a copy.
+terminal. What the composed tree then shows depends on what was bound: a
+*directory* bound into the tree (`notes/` here) is a live view, and a
+change inside it appears immediately; a *single file* bound into it, like
+`INSTRUCTIONS.md`, is a bind of one inode, so the tree keeps showing the
+file that existed when the session started — editors save by rename, and
+the replacement appears at the next start.
+
+One thing not to do from that other terminal: edit the *shop* repository
+at `~/work/shop`. Inside the session its path is read-only, and outside
+camp cannot make it so; a save by rename there replaces a file behind the
+overlay's back, and the composed tree shows the old content at that path
+for the rest of the session. Write through the tree — that is what it is
+for — or end the session first.
 
 Notice also what `git status` did **not** say: `INSTRUCTIONS.md` and
 `notes/` are not listed as untracked, because camp generated an exclude
@@ -189,38 +200,39 @@ Type `exit`. The session ends, the kernel discards every mount with it,
 and `~/work/shop-live` is empty again. There is nothing to clean up and
 no command to run.
 
-## 5. Working from several terminals
+## 5. Ending a session, and surviving a disconnected terminal
 
-A session lives as long as a process is inside it. If you want more than
-one terminal in the same composed tree, start something that stays:
+A session ends when what you started exits: the shell, or the command you
+gave `camp run`. If something you started inside is still running at that
+moment — a browser your tooling opened, a server — camp names it, sends
+it `SIGTERM` (and `SIGCONT`, so a stopped process can act on it), and
+waits up to ten seconds. It sends nothing stronger. If something is still
+there when the time is up, camp says so, by pid and command, and exits;
+the kernel then ends every process left in the session with `SIGKILL`.
+A shell that exits with nothing behind it prints nothing new.
+
+If you want a session to outlive the terminal you started it in, put
+tmux *outside* and camp in a pane:
 
 ```
-camp run -- tmux new-session -d -s shop
+tmux new-session -s shop        # or: tmux new-session -d -s shop 'camp shell'
+camp shell                      # inside the pane
 ```
 
-That returns immediately — the tmux *client* exited — while the server
-stays inside and holds the composition open. From any other terminal:
+The pane's shell is the session's workload, so the session lives as long
+as the pane does, and `tmux attach -t shop` reaches it from any terminal.
 
-```
-tmux attach -t shop
-```
+If you used to start tmux *inside* — `camp run -- tmux new-session -d -s
+shop` — that now ends the session the moment the tmux client exits: the
+server is asked to leave and the composition goes. Move tmux outside as
+above. A second pane of that tmux is a process outside the session and
+sees the plain directory, like every other process started outside.
 
-Every window it opens is inside. `tmux kill-server` ends the session and
-everything comes down with it.
-
-This works because the composition is held open by camp itself, running
-as the first process of the session, and not by tmux — a program that
-daemonises typically closes what it inherited, and nothing here depends
-on it not doing so.
-
-The same fact has a second side: something you started detached keeps the
-session open after you have left the terminal. To end one, send `SIGTERM`
-to that camp process — it passes the request to everything inside, and
-continues anything that was stopped so it can act on it; the composition
-comes down when the last of them goes. If you do not know
-its pid, ask for a second session in the same tree: camp refuses and
-names what is holding it, pid and command. Nothing is killed outright, so
-a program that ignores the request keeps the session alive.
+To end a session you cannot reach, send `SIGTERM` to camp's own process,
+the one resident as the session's first: it reaches the shell or command
+inside, whose exit ends the session the same way. If you do not know its
+pid, ask for a second session in the same tree: camp refuses and names
+what is holding it.
 
 ## Where to go next
 

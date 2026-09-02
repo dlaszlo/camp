@@ -16,24 +16,28 @@
 // then starts the workload. It stays alive for the whole session: it
 // reaps everything that reparents to it, and it holds the locks.
 //
-// That last part is why the init exists at all. A daemonising program --
-// tmux among them -- routinely closes the descriptors it inherited, so a
-// design that let the workload carry the locks would be trusting the
-// workload's habits. Instead the tmux server reparents to camp-as-init
-// inside the namespace, the init lives exactly as long as the composition
-// does, and the locks are released by the kernel whatever happens to it.
-// No staleness is possible.
+// That last part is why the init exists at all. A daemonising program
+// routinely closes the descriptors it inherited, so a design that let the
+// workload carry the locks would be trusting the workload's habits.
+// Instead the locks live on the init, the init lives exactly as long as
+// the composition does, and the locks are released by the kernel whatever
+// happens to it. No staleness is possible.
 //
-// It also makes 'camp run -- tmux new-session -d' behave: the tmux client
-// exits at once, the launcher exits with its status, and the init stays
-// resident holding the composition open for every terminal that attaches
-// later.
+// **A session ends when its workload ends** -- the shell 'camp shell'
+// opened, or the command 'camp run' was given. Not when its last process
+// is gone: what is still inside at that moment is asked to leave (SIGTERM
+// to every process in the namespace, SIGCONT behind it), given Grace to
+// do so, and then the init exits and the kernel ends the remainder. The
+// init acts on its own observation of the exit, never on a message from
+// the launcher: a launcher can be killed, nohup'ed or lose its terminal,
+// and the session it started is still the session.
 //
-// There is no teardown command, and no state record. When the last process
-// in the namespace exits the kernel discards the namespace and every mount
-// in it: teardown cannot fail, there is nothing to hold it open, and no
-// half-removed state to reason about. What a session does leave is its
-// end-of-session report, which is output rather than authority.
+// There is no teardown command, and no state record. When the init exits
+// the kernel ends every other process in the pid namespace and discards
+// the namespace with every mount in it: teardown cannot fail, there is
+// nothing to hold it open, and no half-removed state to reason about.
+// What a session does leave is its end-of-session report, which is output
+// rather than authority.
 package session
 
 import (
@@ -47,7 +51,10 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -68,8 +75,31 @@ import (
 )
 
 // InitArg is the hidden argument that marks the re-executed child. It is
-// not a command anyone should type and it is not advertised.
-const InitArg = "__init"
+// not a command anyone should type and it is not advertised. Defined
+// beside the namespace (nsx) so that a lock refusal can name the init
+// among a directory's holders without importing this package.
+const InitArg = nsx.InitArg
+
+// Grace is how long the init waits, after its workload has exited, for
+// the rest of the namespace to act on the SIGTERM it was sent.
+//
+// It exists for a program that answers SIGTERM by saving and exiting: a
+// shell writing its history, an editor its swap file, a browser its
+// profile. The first two take a fraction of a second, the third a few
+// seconds. Ten is a generous multiple of an honest shutdown and a short
+// enough time for a person to sit through once; it is also the stop grace
+// programs meant to be stopped are written against (Docker's). In the
+// ordinary case -- a shell that exits with nothing behind it -- the wait
+// is zero, because the first look finds the namespace empty.
+//
+// A constant, not a configuration key, because no environment needs
+// another value yet and a knob before its caller is speculation. The
+// place it would go is settled so the question does not reopen: a
+// session.grace key in the configuration, in seconds, and never a
+// command-line flag -- how long an environment's programs take to stop is
+// a property of the environment. Every message that depends on it prints
+// it, so nobody has to find this constant to know what happened.
+const Grace = 10 * time.Second
 
 // Descriptor numbers the init inherits. They are fixed rather than
 // discovered because both halves are this same binary and the contract
@@ -114,16 +144,28 @@ type Options struct {
 	Stdin, Stdout, Stderr *os.File
 }
 
-// Launch starts the session and returns the workload's exit status.
+// Launch starts the session, waits for it to end, and returns the
+// workload's exit status.
 //
-// It waits not for the init but for the workload, whose status the init
-// sends back over the pipe. That is what makes a foreground command
-// behave like a foreground command and a daemonising one return at once.
+// The status arrives over the pipe the moment the workload exits; the
+// return waits for the init to exit, however that came. The init's exit
+// is bounded by Grace, and a kill -9 of the init ends it as surely as an
+// exit does, so this process needs no timeout of its own and is never
+// left waiting on something unbounded.
+//
+// It waits for the init itself -- its own child, through wait4 -- and not
+// only for the pipe to close, and the difference is measured: a launcher
+// that returned on the pipe's close found the locks still held, because
+// the init was between closing the pipe and being gone. When wait4 on a
+// pid namespace's init returns, the kernel has finished its exit path:
+// its descriptors are closed, so the locks are released; every other
+// process in the namespace has been ended and reaped; and the mounts went
+// with the namespace. So when this returns the session is over in every
+// sense the next command in this environment could ask about.
 func Launch(options Options) (int, error) {
 	// The terminal says a session is running for as long as one is, and
-	// says nothing afterwards. Restored when this returns, which is the
-	// right moment in both shapes: a foreground workload has exited, and a
-	// daemonising one has given the terminal back.
+	// says nothing afterwards. Restored when this returns, which is when
+	// the session is over.
 	defer nameTerminal(options.Stderr, options.Config.Env)()
 
 	read, write, err := os.Pipe()
@@ -164,6 +206,7 @@ func Launch(options Options) (int, error) {
 	if identity.Route == config.UIDMap {
 		if err := identity.WriteMaps(cmd.Process.Pid); err != nil {
 			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
 			return 1, err
 		}
 	}
@@ -171,8 +214,9 @@ func Launch(options Options) (int, error) {
 	status := 1
 	scanner := bufio.NewScanner(read)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	sawUp := false
-	for scanner.Scan() {
+	sawUp, sawExit := false, false
+	var refused error
+	for scanner.Scan() && refused == nil {
 		var note message
 		if err := json.Unmarshal(scanner.Bytes(), &note); err != nil {
 			continue
@@ -184,21 +228,34 @@ func Launch(options Options) (int, error) {
 			// process can let go of its own copies now.
 			options.Locks.Release()
 		case kindRefused:
-			return 1, refusal.New("session-refused", "%s", note.Text)
+			refused = refusal.New("session-refused", "%s", note.Text)
 		case kindExit:
-			// The workload is finished, and that is what this process was
-			// waiting for. The init may well still be resident -- holding the
-			// composition open for a server that reparented to it -- and
-			// waiting for the pipe to close would mean waiting for the whole
-			// session, which is exactly what 'camp run -- tmux new-session -d'
-			// must not do.
-			return note.Code, nil
+			// The workload is finished. The session is not, quite: the init
+			// is running its end-of-session pass and asking whatever is left
+			// inside to leave, each bounded by Grace. Read on until the pipe
+			// closes, then wait for the init itself.
+			status, sawExit = note.Code, true
 		}
+	}
+	// The init's own status is not the answer -- a refusal already came
+	// over the pipe, and the workload's status is what is returned -- so
+	// only the fact of its exit is waited for. On a refusal too: the init
+	// holds the locks until it is gone, and a retry typed the moment the
+	// refusal is printed must meet a free composition, not the old init.
+	_ = cmd.Wait()
+	if refused != nil {
+		return 1, refused
 	}
 
 	if !sawUp {
 		return 1, fmt.Errorf("the session ended before the composition was up, " +
 			"and said nothing about why")
+	}
+	if !sawExit {
+		return 1, fmt.Errorf("the session ended before its workload did, and " +
+			"said nothing about why: the init was gone before it could report " +
+			"the workload's exit status. If it was killed, that was the end of " +
+			"the session; the kernel has ended everything that was inside it")
 	}
 	return status, nil
 }
@@ -315,6 +372,19 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	defer upper.Release()
 	defer live.Release()
 
+	// The three inherited descriptors are this process's and stay here.
+	// They arrived without close-on-exec, and a workload that inherited
+	// them reached the code repository writable at /proc/self/fd/4/... --
+	// the lock descriptor was opened through the raw path before the
+	// freeze existed, and a path resolved through a descriptor uses the
+	// mount the descriptor was opened on -- so the freeze of step 9a was
+	// bypassable from inside by anything that looked (measured). The lock
+	// lives on the open file description this process keeps; the child
+	// needs no copy of it, or of the handshake pipe.
+	for _, fd := range []int{pipeFD, upperFD, liveFD} {
+		unix.CloseOnExec(fd)
+	}
+
 	built, exclude, problems := rebuild(configPath)
 	if !problems.Empty() {
 		refuse("%s", problems.Error())
@@ -411,11 +481,9 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 	// so the one moment the session was most alive was the one moment its
 	// termination contract did not hold.
 	//
-	// The workload's status goes back the moment the workload exits, not
-	// when the session ends. Those are different moments whenever
-	// something daemonised: the launching command is finished and its
-	// caller should get its shell back, while the server that reparented
-	// to this process keeps the composition open.
+	// The workload's status goes back the moment the workload exits; the
+	// session then ends, and the launcher returns when this process has.
+	asked := &request{}
 	err = supervise(
 		func() (*exec.Cmd, error) {
 			started, err := startWorkload(workload)
@@ -425,20 +493,31 @@ func Inside(configPath string, insideUID, insideGID int, argv []string) {
 			send(message{Kind: kindUp})
 			return started, nil
 		},
-		func(status int) { send(message{Kind: kindExit, Code: status}) })
+		func(status int) { send(message{Kind: kindExit, Code: status}) },
+		asked)
 	if err != nil {
 		refuse("%v", err)
 	}
 
-	// The last thing this process does before the kernel takes the
-	// namespace apart: look, while the composition still exists, and leave
-	// what it found where somebody will meet it. This is the only moment
-	// anything can look -- nothing runs after the kernel takes the
-	// namespace, and by the time a detached session empties, its terminal
-	// is long gone.
-	farewell(built, stderr)
+	// The end of a session, in this order: look and report while the tree
+	// is still whole and everything inside is still alive, then ask what
+	// is left to leave. The report comes first because it reads the tree
+	// -- a scan run after the namespace was emptied would be reading a
+	// tree whose processes were already gone -- and because deciding that
+	// the namespace is empty and then running a scan would leave a process
+	// that entered during the scan with no request and no grace, only the
+	// kernel's SIGKILL. The launcher that would print the report may be
+	// gone by now, which is why it is also written to a file. Both halves
+	// are bounded by Grace, so a git that hangs in the scan cannot hold
+	// the session open: it is sent SIGTERM, left behind, and then met by
+	// the ending as one more process inside.
+	farewell(built, stderr, time.Now().Add(Grace))
+	what := "the command"
+	if len(argv) == 0 {
+		what = "the shell"
+	}
+	ending{what: what, out: stderr, asked: asked}.run()
 
-	pipe.Close()
 	os.Exit(0)
 }
 
@@ -479,11 +558,11 @@ func locksMatch(built plan.Plan, upper, live *locks.Held) error {
 	return nil
 }
 
-// farewell runs the read-only end-of-session pass, writes what it found
-// where the next camp command will find it, and prints it when there is
-// still a terminal attached.
-func farewell(built plan.Plan, stderr io.Writer) {
-	found := drift.Refresh(built)
+// farewell runs the read-only end-of-session pass, bounded by the
+// deadline, writes what it found where the next camp command will find
+// it, and prints it when there is still a terminal attached.
+func farewell(built plan.Plan, stderr io.Writer, deadline time.Time) {
+	found := drift.Refresh(built, deadline)
 	if found.Empty() {
 		return
 	}
@@ -682,11 +761,15 @@ func shell(configured string) string {
 // makes the request a request rather than something that happens to reach
 // only the processes that were running.
 //
-// Nothing is escalated to SIGKILL. camp asks once for each signal it is
-// sent, and a process that ignores the request is holding the session
-// open on purpose or on a bug; both are the person's to look at, and the
-// next start in this environment names the holder by pid and command
-// rather than camp taking the decision away.
+// The session ends when the workload exits, whichever way that came: a
+// SIGTERM to this process fans out, the workload dies of it, and its exit
+// is the same exit as a shell's 'exit'. What happens then is Inside's:
+// the end-of-session pass, then the ending (below), in which what is
+// still inside is named, asked -- once per session end, the request
+// shared with the handler here -- and given Grace. Nothing is escalated
+// to SIGKILL by camp; a process that ignores the request is ended by the
+// kernel when this process exits, and the ending says so by pid and
+// command.
 //
 // This is the contract of a session that is running, and it holds from
 // the moment there is anything to run: the subscription is taken before
@@ -699,9 +782,10 @@ func shell(configured string) string {
 // which is why it is written down rather than folded into the sentence
 // above.
 //
-// It calls back the moment the workload itself exits, and returns when
-// the last other process in the namespace is gone.
-func supervise(start func() (*exec.Cmd, error), workloadExited func(int)) error {
+// It calls back the moment the workload itself exits and returns; what
+// follows -- the end-of-session pass and the ending -- is Inside's, in
+// that order.
+func supervise(start func() (*exec.Cmd, error), workloadExited func(int), asked *request) error {
 	ignored := make(chan os.Signal, 1)
 	signal.Notify(ignored, unix.SIGINT, unix.SIGQUIT, unix.SIGTTIN, unix.SIGTTOU)
 	go func() {
@@ -725,28 +809,216 @@ func supervise(start func() (*exec.Cmd, error), workloadExited func(int)) error 
 	go func() {
 		for received := range forwarded {
 			if signal, ok := received.(syscall.Signal); ok {
-				_ = unix.Kill(-1, signal)
-				_ = unix.Kill(-1, unix.SIGCONT)
+				asked.forward(signal)
 			}
 		}
 	}()
 
+	workloadExited(reapUntil(workload.Process.Pid))
+	return nil
+}
+
+// request is the fan-out that asks the namespace to end, and the record
+// that it was made -- shared between the signal handler and the ending so
+// that a session's end asks once.
+//
+// Without the record a SIGTERM to the init asked twice: the handler fanned
+// out, the workload died of it, and the ending fanned out again. A process
+// that saves on the first SIGTERM and aborts on the second lost the grace
+// it was promised.
+type request struct {
+	mu   sync.Mutex
+	sent bool
+}
+
+// forward fans a signal camp was sent out to the namespace: once per
+// signal received, which is the contract -- a second SIGTERM from the
+// user is the user's decision, not camp's.
+func (r *request) forward(signal syscall.Signal) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sent = true
+	askEveryone(signal)
+}
+
+// once sends SIGTERM to the namespace unless a forwarded signal already
+// did, and reports whether it sent.
+func (r *request) once() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sent {
+		return false
+	}
+	r.sent = true
+	askEveryone(unix.SIGTERM)
+	return true
+}
+
+// alreadySent reports whether the namespace has been asked, for the
+// message that says so.
+func (r *request) alreadySent() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sent
+}
+
+// askEveryone is the fan-out: one signal to every process in the pid
+// namespace, and SIGCONT behind it so a stopped one can act. Every path
+// that ends a session goes through here, and this is the only place
+// kill(-1) is called -- guarded by Inside's check that this process is
+// pid 1, without which it would reach everything the user owns.
+func askEveryone(signal syscall.Signal) {
+	_ = unix.Kill(-1, signal)
+	_ = unix.Kill(-1, unix.SIGCONT)
+}
+
+// reapUntil reaps children until the workload is among them, and returns
+// its status.
+//
+// ECHILD before that cannot happen -- the workload is this process's
+// child and nothing else reaps it -- and is read as the workload gone
+// with a status nobody saw, which is 1, the same answer the launcher gives
+// a pipe that closes without one.
+func reapUntil(workload int) int {
 	for {
 		var wait unix.WaitStatus
 		pid, err := unix.Wait4(-1, &wait, 0, nil)
 		switch {
 		case errors.Is(err, unix.EINTR):
 			continue
-		case errors.Is(err, unix.ECHILD):
-			// Nothing is left in the namespace. The session is over.
-			return nil
 		case err != nil:
-			return nil
+			return 1
 		}
-		if workload.Process != nil && pid == workload.Process.Pid {
-			workloadExited(exitStatus(wait))
+		if pid == workload {
+			return exitStatus(wait)
 		}
 	}
+}
+
+// ending is what the init does once its workload has exited and the
+// end-of-session pass has run: the rest of the namespace is looked at,
+// named, asked to leave, and given Grace.
+type ending struct {
+	// what is "the shell" or "the command" -- the workload as the person
+	// who started it would call it.
+	what string
+	// out is the init's stderr: the terminal while a launcher is attached,
+	// and the session's log either way, so the deadline message survives a
+	// launcher that was gone by then.
+	out io.Writer
+	// asked is the session's one request, shared with the signal handler.
+	asked *request
+}
+
+// poll is how often the ending looks again while it waits. Polling was
+// chosen over pidfd readiness on purpose: a 50 ms loop bounded at Grace
+// is a page less code in the most sensitive function camp has, and
+// nothing about it is observable from outside.
+const poll = 50 * time.Millisecond
+
+// run is the sequence, in the order that makes it honest: look before
+// asking, say what is being ended before ending it, ask once, wait, and
+// at the deadline say what is left and hand it to the kernel.
+func (e ending) run() {
+	// Look first: a shell that exits cleanly must not produce a paragraph.
+	// Children that have already exited are reaped before the look, so a
+	// zombie is not mistaken for something still running.
+	reapExited()
+	left, err := nsx.Processes()
+	if err == nil && len(left) == 0 {
+		return
+	}
+
+	// Not knowing is not an empty namespace. A /proc camp cannot read
+	// means camp does not know what is inside, and what it does not know
+	// about is still asked and still given the grace -- the alternative is
+	// the kernel's SIGKILL with no request before it.
+	seconds := int(Grace / time.Second)
+	switch {
+	case err != nil:
+		fmt.Fprintf(e.out, "%s has exited, and camp cannot list what else is in "+
+			"this session: %v.\nNot knowing is not an empty session: whatever is "+
+			"inside is asked to end (SIGTERM, with SIGCONT so a stopped one can act "+
+			"on it), and camp waits up to %d seconds for it, and sends nothing "+
+			"stronger.\n", e.what, err, seconds)
+	case e.asked.alreadySent():
+		fmt.Fprintf(e.out, "%s has exited, and %d process(es) started in this "+
+			"session are still running. They were already sent SIGTERM (with SIGCONT "+
+			"so a stopped one can act on it) when this session was signalled, and "+
+			"are not sent it again:\n%scamp waits up to %d seconds for them, and "+
+			"sends nothing stronger.\n", e.what, len(left), listed(left), seconds)
+	default:
+		fmt.Fprintf(e.out, "%s has exited, and %d process(es) started in this "+
+			"session are still running. They are being asked to end (SIGTERM, with "+
+			"SIGCONT so a stopped one can act on it):\n%scamp waits up to %d seconds "+
+			"for them, and sends nothing stronger.\n", e.what, len(left), listed(left), seconds)
+	}
+	e.asked.once()
+
+	// Empty is two facts, not one: no child is left to reap, and the
+	// namespace's /proc lists nobody but this process. The second is what
+	// sees a process that is in the pid namespace without being this
+	// process's child -- one that joined the session from outside -- which
+	// wait4 never reports, so an init that ended on ECHILD alone would exit
+	// under it without ever having asked. A /proc that cannot be read
+	// leaves the second fact unknown, and the wait runs to the deadline.
+	deadline := time.Now().Add(Grace)
+	for {
+		noChildren := reapExited()
+		left, err = nsx.Processes()
+		if err == nil && noChildren && len(left) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(poll)
+	}
+
+	// camp does not kill them. The kernel ends every process left in a pid
+	// namespace whose first process has exited, with SIGKILL and without
+	// appeal (pid_namespaces(7)); that is what exiting now means, and it is
+	// said rather than done quietly.
+	if err != nil {
+		fmt.Fprintf(e.out, "after %d seconds, camp still cannot list what is in "+
+			"this session: %v.\ncamp kills nothing. The session's init exits now, "+
+			"and the kernel ends every process left in a pid namespace whose first "+
+			"process has exited, with SIGKILL.\n", seconds, err)
+		return
+	}
+	fmt.Fprintf(e.out, "after %d seconds, %d process(es) are still in the "+
+		"session:\n%scamp does not kill them. The session's init exits now, and "+
+		"the kernel ends every process left in a pid namespace whose first "+
+		"process has exited, with SIGKILL. Whatever these had not saved is lost. "+
+		"If one needed longer to stop, that is the program to look at.\n",
+		seconds, len(left), listed(left))
+}
+
+// reapExited reaps every child that has already exited, without waiting
+// for any that has not, and reports whether no child is left at all.
+func reapExited() bool {
+	for {
+		var wait unix.WaitStatus
+		pid, err := unix.Wait4(-1, &wait, unix.WNOHANG, nil)
+		switch {
+		case errors.Is(err, unix.EINTR):
+			continue
+		case errors.Is(err, unix.ECHILD):
+			return true
+		case err != nil, pid == 0:
+			return false
+		}
+	}
+}
+
+// listed renders the processes one per line, by the namespace's own pids
+// -- which is what ps inside shows, and nobody is asked to act on them.
+func listed(processes []nsx.Process) string {
+	var b strings.Builder
+	for _, process := range processes {
+		fmt.Fprintf(&b, "  pid %d: %s\n", process.PID, process.Command)
+	}
+	return b.String()
 }
 
 func exitStatus(wait unix.WaitStatus) int {

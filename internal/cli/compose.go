@@ -303,7 +303,8 @@ func runtimeChecks(built plan.Plan) refusal.List {
 		refused.Add("mount-table-unreadable", "%v", err)
 		return refused
 	}
-	refused.Extend(locks.Residue(table, built.Live, built.Config.LowerPath()))
+	refused.Extend(locks.Residue(table, built.Live, built.Config.LowerPath(),
+		built.Config.UpperPath()))
 	return refused
 }
 

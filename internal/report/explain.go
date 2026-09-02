@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/dlaszlo/camp/internal/plan"
 )
@@ -24,6 +25,9 @@ type Tree struct {
 	// rather than about the tree.
 	Ownership string
 	Session   string
+	// Grace is how long the session's init waits for what is still inside
+	// once its workload has exited.
+	Grace time.Duration
 }
 
 // TreeMount is one mount as a description shows it: where it appears, and
@@ -43,13 +47,14 @@ type TreeMount struct {
 // eventually asks -- what is read-only and why, where the real file is,
 // what can never end up in a commit, and what happens to a worktree made
 // in here.
-func Explain(p plan.Plan) string {
+func Explain(p plan.Plan, grace time.Duration) string {
 	tree := Tree{
 		Live:      p.Live,
 		Upper:     p.Config.UpperPath(),
 		Lower:     p.Config.LowerPath(),
 		Ownership: Ownership(p),
 		Session:   Session(p, "Session environment"),
+		Grace:     grace,
 	}
 	_, tree.Generated = p.Config.GenerationStep()
 	for _, mount := range p.Mounts {
@@ -102,10 +107,31 @@ func Describe(p Tree) string {
 			"fails with EROFS,\n  on purpose: without that, the write would copy "+
 			"the file up into the code\n  repository, and the change would look "+
 			"applied while living in the wrong\n  place. Edit the real file "+
-			"instead -- the path above -- and the change\n  appears here "+
-			"immediately, because these are live views and not copies.\n\n",
-			p.Lower)
+			"instead -- the path above.\n\n", p.Lower)
+		paragraph(&b, "What you then see here depends on what was bound. A "+
+			"directory bound into this tree is a live view: a change inside it "+
+			"appears here immediately. A single file bound into it -- a root "+
+			"file such as CLAUDE.md, an island file -- is a bind of one inode, "+
+			"pinned to the file that existed when the session started; a "+
+			"replacement saved outside, which is how editors save (by rename), "+
+			"appears at the next start and not before.")
 	}
+
+	fmt.Fprintf(&b, "The code repository's own path\n\n")
+	paragraph(&b, fmt.Sprintf("Inside this session, %s -- the code "+
+		"repository's own directory -- refuses writes with EROFS. Write "+
+		"through this tree instead; that is what it is for. The reason: the "+
+		"overlay holds the paths this tree has resolved, and a write behind "+
+		"its back at the raw path -- a save by rename, which is how git and "+
+		"every editor write -- would leave this tree showing the old file at "+
+		"that path for the rest of the session, and failing the next delete "+
+		"there with 'Stale file handle'.", p.Upper))
+	paragraph(&b, fmt.Sprintf("That guard exists only inside the session. A "+
+		"terminal outside it, an editor started from the desktop, a cron job "+
+		"-- anything not in the session -- can still write %s while the "+
+		"session is up, with exactly that effect on this tree. Do not write "+
+		"the code repository from outside while a session is up; end the "+
+		"session first.", p.Upper))
 
 	if len(writable) > 0 {
 		b.WriteString("What is writable but goes somewhere else\n\n")
@@ -154,11 +180,12 @@ func Describe(p Tree) string {
 		"camp command in this environment prints it --\n  and after that repair " +
 		"the worktree is independent of the composition.\n\n")
 
-	b.WriteString("This session\n\n  This composition exists only for the " +
-		"processes inside it. Nothing outside\n  can see it -- a program started " +
-		"outside the session, an editor already\n  running, sees the composed " +
-		"tree's directory empty. Nothing has to be\n  cleaned up: when the last " +
-		"process here exits the kernel removes every\n  mount with it.\n\n")
+	b.WriteString("This session\n\n")
+	paragraph(&b, "This composition exists only for the processes inside it. "+
+		"Nothing outside can see it -- a program started outside the session, "+
+		"an editor already running, sees the composed tree's directory empty.")
+	paragraph(&b, Ending(p.Grace)+" Nothing has to be cleaned up: the kernel "+
+		"removes every mount with the namespace.")
 
 	b.WriteString(p.Ownership)
 

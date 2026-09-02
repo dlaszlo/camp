@@ -39,6 +39,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -298,4 +301,82 @@ func Look() Report {
 func (r Report) String() string {
 	return fmt.Sprintf("uid=%d gid=%d groups=%v; %s",
 		r.UID, r.GID, r.Groups, capsx.Describe(r.Caps))
+}
+
+// InitArg is the hidden argument that marks camp re-executed as a
+// session's init. It is not a command anyone should type and it is not
+// advertised. It lives here, beside the namespace it is pid 1 of, so that
+// a process list can tell the init from what it holds open without
+// importing the package that acts on it.
+const InitArg = "__init"
+
+// Process is one entry of the namespace's /proc: a pid and what it says
+// it is running.
+type Process struct {
+	PID     int
+	Command string
+}
+
+// Processes lists every process the caller's /proc shows, by pid, except
+// the caller's own.
+//
+// Inside a session that /proc is the one MountProc made, so the pids are
+// the namespace's own and the list is exactly what the session contains
+// -- a joined process included, which no wait4 would ever report.
+// Nothing here parses a program's output; every fact is the kernel's.
+//
+// A /proc that cannot be read is an error and never an empty list: the
+// caller that asks is deciding whether anything is left to ask, and not
+// knowing is not "nobody".
+func Processes() ([]Process, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, fmt.Errorf("listing /proc: %w", err)
+	}
+	self := os.Getpid()
+	var found []Process
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == self {
+			continue
+		}
+		found = append(found, Process{PID: pid, Command: Command(pid)})
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].PID < found[j].PID })
+	return found, nil
+}
+
+// IsInit reports whether a process is camp's session init, by the same
+// rule FromInside applies to pid 1: its second argument is InitArg. Read
+// from the whole command line, not from the display form Command makes,
+// which is cut at eighty bytes and loses the argument behind a long
+// binary path -- measured, in a refusal that then named no init.
+func IsInit(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return false
+	}
+	args := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
+	return len(args) >= 2 && args[1] == InitArg
+}
+
+// Command names a process the way a person would recognise it: its
+// command line with the NULs turned into spaces, cut at eighty bytes so
+// a browser's or a node server's argv does not take a paragraph, or its
+// comm when the command line is empty, which is what a zombie has.
+func Command(pid int) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err == nil {
+		text := strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
+		if text != "" {
+			if len(text) > 80 {
+				text = text[:80]
+			}
+			return text
+		}
+	}
+	if comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
+		return strings.TrimSpace(string(comm))
+	}
+	return "unknown"
 }

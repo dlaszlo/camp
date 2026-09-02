@@ -13,6 +13,7 @@ import (
 	"github.com/dlaszlo/camp/internal/plan"
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/report"
+	"github.com/dlaszlo/camp/internal/session"
 	"github.com/dlaszlo/camp/internal/testenv"
 )
 
@@ -53,8 +54,8 @@ func TestNoInheritedValueReachesPlanOrExplain(t *testing.T) {
 	built := prepared(t, env, declaring(env))
 
 	for name, text := range map[string]string{
-		"plan":    report.Plan(built),
-		"explain": report.Explain(built),
+		"plan":    report.Plan(built, session.Grace),
+		"explain": report.Explain(built, session.Grace),
 	} {
 		if strings.Contains(text, sentinel) {
 			t.Errorf("%s printed an inherited value:\n%s", name, text)
@@ -75,7 +76,7 @@ func TestNoInheritedValueReachesPlanOrExplain(t *testing.T) {
 func TestThePlansSessionBlockSaysWhatWillBeApplied(t *testing.T) {
 	t.Setenv("TEST_SENTINEL_SOURCE", sentinel)
 	env := testenv.NewEnv(t)
-	text := report.Plan(prepared(t, env, declaring(env)))
+	text := report.Plan(prepared(t, env, declaring(env)), session.Grace)
 
 	for _, want := range []string{
 		"CAMP_LIVE", "PWD", "SESSION_TOKEN",
@@ -101,14 +102,14 @@ session:
     ALPHA: "one"
     ZULU: "two"
     MIDDLE: "$HOME"
-`))
+`), session.Grace)
 	other := report.Plan(prepared(t, env, env.YAML()+`
 session:
   environment:
     MIDDLE: "$HOME"
     ZULU: "two"
     ALPHA: "one"
-`))
+`), session.Grace)
 
 	if one != other {
 		t.Errorf("two orderings of one map produced different plans:\n%s\n---\n%s",

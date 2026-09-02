@@ -145,13 +145,29 @@ exists to prevent.
 
 **8. The configuration's steps**, in their declared order.
 
+**8a. The code repository, bound read-only onto its own path.** Last, and
+the position is forced from both sides. The overlay treats its layers as
+its own: a path the tree has resolved is a dentry the overlay holds, and a
+rename over that path in the raw upper — how git and every editor write —
+replaces the inode behind the overlay's back, so the tree shows the old
+content there for the rest of the session and fails the next delete with
+`Stale file handle`. Inside the session the raw path now answers `EROFS`.
+It cannot come earlier: the kernel refuses to mount an overlay over a
+read-only upper at all, and a bind cut from a read-only mount inherits
+the flag, so the `.git` bind — and every other step sourcing from the
+code repository — has to exist before the freeze does. The verification
+proves the order rather than assuming it: the upper's path read-only, the
+overlay and every writable bind still writable. And the guard exists only
+inside the session; a process outside can still write the raw path, with
+exactly the effect above.
+
 **9. Verify everything.** Any failure unmounts in reverse, names the
 check that failed, and exits non-zero.
 
 There is no teardown step: the mounts exist only inside the session's
-namespace, and the kernel discards them with it when the last process
-exits. The one unmount camp ever performs is that rollback of a start
-that failed, and it is never lazy.
+namespace, and the kernel discards them with it when the session ends.
+The one unmount camp ever performs is that rollback of a start that
+failed, and it is never lazy.
 
 ## Why `steps:` is an ordered list
 
@@ -415,8 +431,8 @@ is "nothing is mounted" -- true, and the reason it is worth saying.
 
 The composition is built inside a user and mount namespace, and in no
 other way. No privilege is needed; nothing outside can see it; and when
-the last process exits the kernel discards the namespace and every mount
-in it. Teardown cannot fail and there is nothing to take down.
+the session ends the kernel discards the namespace and every mount in
+it. Teardown cannot fail and there is nothing to take down.
 
 A session is two processes. The **launcher** locks, validates, gates and
 generates — all as you, with nothing privileged existing yet. The
@@ -428,21 +444,38 @@ everything that reparents to it and holding the locks.
 
 That last part is why it exists. A daemonising program routinely closes
 the descriptors it inherited, so a design that let the workload carry the
-locks would be trusting the workload's habits. And it is what makes
-`camp run -- tmux new-session -d` return at once while the composition
-stays open.
+locks would be trusting the workload's habits. The locks live on the init
+and go when it does, and it goes when the session does.
 
-Which means a session can outlive the terminal it was started from, and
-you may want one gone. **Send `SIGTERM` to that init.** It means "end
-this session", and it reaches every process inside the namespace and
-nothing outside it; a `SIGCONT` follows, because a stopped process holds
-the request pending and would otherwise never act on it. The composition
-comes down when the last of them goes, and the kernel takes the mounts
-with it. Nothing is escalated to `SIGKILL` — camp asks, once, and a
-program that ignores the request keeps the session alive on purpose or on
-a bug, which is yours to look at rather than camp's to overrule. If you
-do not know the pid, ask for a second session in the same tree: camp
-refuses and names what is holding it, by pid and command.
+**A session ends when its workload ends** — the shell or the command camp
+started for it — and the init acts on its own observation of that exit,
+never on a message from the launcher, which may be dead, `nohup`ed or
+without a terminal by then. At that moment it reads the namespace's own
+`/proc`, lists every other process by pid and command, sends `SIGTERM` to
+all of them with `SIGCONT` behind it (a stopped process holds the request
+pending and would otherwise never act on it), and waits until the
+namespace is empty or ten seconds have passed. "Empty" is two facts: no
+child left to reap, *and* nobody but the init in `/proc` — a process can
+be in the pid namespace without being the init's child, and `wait4` never
+sees one. Nothing is escalated to `SIGKILL` by camp. At the deadline the
+init names what is left, says that the kernel ends every process in a pid
+namespace whose first process exits, and exits; the kernel does the rest.
+A shell that exits with nothing behind it prints nothing new, and the
+wait is zero. The launcher waits for the init itself, its own child, so
+when `camp run` returns the locks are free and the mounts are gone.
+
+**Send `SIGTERM` to that init** to end a session from outside. It fans
+out to every process inside the namespace and nothing outside it; the
+workload dies of it, and the workload's exit is the same ending as an
+`exit` typed at the shell. If you do not know the pid, ask for a second
+session in the same tree: camp refuses and names what is holding it, by
+pid and command.
+
+To keep a session across a disconnected terminal, start tmux outside and
+run camp in a pane; the pane's shell is the workload. `camp run -- tmux
+new-session -d` used to leave the server inside holding the composition
+open; under this rule it ends the session as soon as the tmux client
+exits, and that is intended.
 
 That is the contract of a session that is *running*. A signal arriving
 while camp is still mounting meets no supervisor: it ends the init, and
@@ -494,7 +527,7 @@ cannot see the composed tree: the mounts exist only in the session's
 namespace, so an editor already running, a language server, a daemon, sees
 the composed tree's directory empty. Start it inside -- `camp run --
 <program>` -- and it sees the tree. The tree is never visible machine-wide,
-and no record of a session survives it: when the last process exits the
+and no record of a session survives it: when the session ends the
 kernel takes the mounts, and there is nothing left to describe or to take
 apart. camp once had a second way of running that mounted the tree for
 the whole machine, with root, for exactly the already-running editor. It
@@ -538,9 +571,12 @@ cannot see them. Left unrepaired, git prunes the registration at an
 ordinary auto-gc after three months — the failure that happens while
 nobody is looking.
 
-A namespace session has nowhere to print this by the time its last window
-closes, so it writes it to a file, and the next camp command in that
-environment prints it once and marks it read.
+The launcher that would print this may be gone by the time the session
+ends — killed, `nohup`ed, its terminal closed — so the init writes it to
+a file as well, and the next camp command in that environment prints it
+once and marks it read. The scans read the code repository through its
+own path, which the session holds read-only; they are reads with
+`--no-optional-locks` and need nothing more.
 
 ## What camp is not
 

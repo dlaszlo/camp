@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/dlaszlo/camp/internal/nsx"
 	"github.com/dlaszlo/camp/internal/plan"
@@ -116,4 +117,18 @@ func Ownership(p plan.Plan) string {
 // paragraph writes one indented, folded paragraph of an explain section.
 func paragraph(b *strings.Builder, text string) {
 	b.WriteString("  " + wrap(text, "  ") + "\n\n")
+}
+
+// Ending says when a session ends and what happens to whatever is still
+// inside, with the grace written out, so that the number is met where
+// the rule is read and not only in the message that fires when it bites.
+func Ending(grace time.Duration) string {
+	return fmt.Sprintf("The session ends when the shell or the command camp "+
+		"started for it exits. Anything else still running inside is then sent "+
+		"SIGTERM (and SIGCONT, so a stopped process can act on it) and given "+
+		"%d seconds to end; camp sends nothing stronger. When that time is up "+
+		"camp's init exits and the kernel ends every process left in the "+
+		"session's pid namespace with SIGKILL. A SIGTERM to the init is the same "+
+		"ending: it reaches the shell or command, whose exit ends the session.",
+		int(grace/time.Second))
 }

@@ -2,6 +2,7 @@ package locks_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dlaszlo/camp/internal/locks"
+	"github.com/dlaszlo/camp/internal/nsx"
 	"github.com/dlaszlo/camp/internal/refusal"
 	"github.com/dlaszlo/camp/internal/testenv"
 )
@@ -200,9 +202,9 @@ func TestTheSecondLockFailingReleasesTheFirst(t *testing.T) {
 
 // hold starts a child that takes one lock and waits, and waits until it
 // reports that it has it.
-func hold(t *testing.T, base, target string) *exec.Cmd {
+func hold(t *testing.T, base, target string, args ...string) *exec.Cmd {
 	t.Helper()
-	cmd := exec.Command(os.Args[0])
+	cmd := exec.Command(os.Args[0], args...)
 	cmd.Env = append(os.Environ(), childEnv+"=hold", baseEnv+"="+base, targetEnv+"="+target)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -343,10 +345,46 @@ func TestTheBusyMessageSaysHowToGetIn(t *testing.T) {
 	output, _ := cmd.CombinedOutput()
 	message := string(output)
 
-	for _, want := range []string{code, "tmux", "second one", "--force"} {
+	for _, want := range []string{code, "session that is running", "--force"} {
 		if !strings.Contains(message, want) {
 			t.Errorf("the refusal does not mention %q:\n\n%s", want, message)
 		}
+	}
+	// The tmux pattern is retired: a session ends with its workload, so a
+	// server left inside no longer holds one open, and a refusal that sent
+	// somebody to attach to one would send them to nothing.
+	if strings.Contains(message, "tmux") {
+		t.Errorf("the refusal still recommends the tmux pattern:\n\n%s", message)
+	}
+}
+
+// When the holder is camp's own init, the refusal gives the command that
+// ends its session -- the pid and the signal -- and says what camp does
+// with it. A refusal that said "end the session" without saying how is
+// the message that sent people to kill -9.
+func TestTheBusyMessageGivesTheCommandWhenTheHolderIsAnInit(t *testing.T) {
+	root, code := env(t)
+	// A holder whose command line carries the init argument, the way the
+	// real init's does: the argument, then a configuration path.
+	holder := hold(t, root, "code", nsx.InitArg, filepath.Join(root, "config.yml"))
+
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), childEnv+"=try", baseEnv+"="+root, targetEnv+"=code")
+	output, _ := cmd.CombinedOutput()
+	message := string(output)
+
+	for _, want := range []string{
+		code,
+		fmt.Sprintf("kill -TERM %d", holder.Process.Pid),
+		"passes the request to every process inside",
+		"your move",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("the refusal does not say %q:\n\n%s", want, message)
+		}
+	}
+	if strings.Contains(message, "kill -9 the init") && !strings.Contains(message, "Never kill -9") {
+		t.Errorf("the refusal suggests kill -9:\n\n%s", message)
 	}
 }
 
