@@ -58,7 +58,7 @@ func (c Check) Symbol() string {
 // mount syscalls directly, because the messages the binaries print are
 // translated and their exit codes say less than the syscall's errno.
 func Run() []Check {
-	return []Check{platform(), procfs(), overlayfs(), mountAPI(), git(), userNamespaces()}
+	return []Check{platform(), procfs(), overlayfs(), mountAPI(), git(), nsenter(), userNamespaces()}
 }
 
 // Failures returns the checks that are fatal and unmet.
@@ -220,6 +220,31 @@ func git() Check {
 			"that could not run is not a check that passed -- so every " +
 			"composition is refused with git-unreadable, including one whose " +
 			"participants are not repositories at all.",
+	}
+}
+
+// nsenter is a warning rather than a requirement: it is needed only to
+// join a running session, never to compose one.
+//
+// A join enters an existing session's namespaces with setns(2), which the
+// kernel refuses to a multithreaded process -- and camp is one before its
+// own code runs -- so camp hands the namespace descriptors to util-linux's
+// nsenter, which is single-threaded. Composing needs none of this, so a
+// machine without nsenter runs every camp command except 'camp shell
+// --join' and 'camp run --join'.
+func nsenter() Check {
+	path, err := exec.LookPath("nsenter")
+	if err == nil {
+		return Check{Name: "tool: nsenter", OK: true, Detail: path}
+	}
+	return Check{
+		Name:   "tool: nsenter",
+		Detail: "not on PATH",
+		Hint: "camp needs nsenter for 'camp shell --join' and 'camp run --join', " +
+			"which enter a running session's namespaces. It is in the util-linux " +
+			"package, essential on every Debian-derived system:\n" +
+			"  sudo apt install util-linux\n" +
+			"Composing a session needs none of it; only joining one does.",
 	}
 }
 

@@ -310,6 +310,15 @@ func (r Report) String() string {
 // importing the package that acts on it.
 const InitArg = "__init"
 
+// JoinedArg is the hidden argument that marks camp execed by nsenter
+// inside a session it has already joined. It is the init's last step
+// without the init -- resolve the environment, select the shell or
+// command, and become it -- and takes no lock, because the pid namespace
+// already binds its lifetime to the init's. It lives here beside InitArg
+// so that both the discoverer (join) and the acting side (session) can
+// name it without a package importing the other.
+const JoinedArg = "__joined"
+
 // Process is one entry of the namespace's /proc: a pid and what it says
 // it is running.
 type Process struct {

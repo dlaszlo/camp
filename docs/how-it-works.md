@@ -477,6 +477,17 @@ new-session -d` used to leave the server inside holding the composition
 open; under this rule it ends the session as soon as the tmux client
 exits, and that is intended.
 
+A second terminal reaches a running session's tree with `camp shell
+--join` (or `camp run --join -- <command>`): camp finds the session's
+init from `/proc`, confirms from its mount table that it composes this
+configuration, and enters its user, mount and pid namespaces through
+`nsenter` — camp cannot `setns` in its own process, being multithreaded
+before its code runs, so it hands the namespace descriptors to `nsenter`
+and re-execs itself inside. It builds, mounts and locks nothing: the pid
+namespace binds the joined shell's life to the init's, so the locks stay
+the composition's. A joined shell's exit does not end the session; the
+session's own end reaches the joined shell like anything else inside.
+
 That is the contract of a session that is *running*. A signal arriving
 while camp is still mounting meets no supervisor: it ends the init, and
 the kernel discards the namespace with every mount in it — which is the

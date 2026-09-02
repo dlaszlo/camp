@@ -103,6 +103,18 @@ var (
 			"-- a covered mount stays listed in the kernel's table and is " +
 			"reachable by nothing, so the table would not have shown this.",
 	}
+	replacedSource = refusal.Group{
+		Rule: "bind-source-replaced",
+		One:  "a file bound into the tree has been replaced at its source:",
+		Many: "%d files bound into the tree have been replaced at their sources:",
+		Detail: "A bind of a file is a bind of one inode, so the tree keeps " +
+			"showing the file that existed when the session started while the " +
+			"source path now holds another one -- which is what saving by rename " +
+			"leaves, and how every editor saves. Outside, the source has the new " +
+			"file; inside, the session shows the old; the source is what is true. " +
+			"Nothing refreshes a file bind: end the session and start it again to " +
+			"see it -- the next start binds the file that is there then.",
+	}
 	unreachablePolarity = refusal.Group{
 		Rule: "verify-polarity-unreachable",
 		One:  "a mount cannot be asked whether it is writable:",
@@ -187,26 +199,54 @@ func identity(mount plan.Mount, target string, table []mountinfo.Entry) refusal.
 		refused.Group(unreachableTargets, "%s: %v", target, err)
 		return refused
 	}
-	if source != destination {
+	if !source.same(destination) {
+		// A file bind pins one inode (C46), so a source file replaced by
+		// rename since the session started leaves the tree showing the old
+		// inode and the source path holding a new one -- both still regular
+		// files, differing only in identity. That is a different fact from a
+		// mount that did not take or is covered, and it has its own repair.
+		// It is told apart by three things together: a mount really stands
+		// at the target (the table says so -- a file born at the workspace
+		// root after the start has a guard in the plan derived now and no
+		// mount, and is not a replacement), and both ends are regular files.
+		if source.regular && destination.regular && len(mountinfo.At(table, target)) > 0 {
+			refused.Group(replacedSource, "%s shows the file %s was when this "+
+				"session started; the source now holds another one (%s inside, %s "+
+				"at the source)", target, mount.Source, destination, source)
+			return refused
+		}
 		refused.Group(wrongIdentity, "%s should show %s: the path resolves to "+
 			"%s, and the source is %s", target, mount.Source, destination, source)
 	}
 	return refused
 }
 
+// ident is what a path resolves to: the object, and whether it is a
+// regular file, from the one stat that answers both.
 type ident struct {
-	device uint64
-	inode  uint64
+	device  uint64
+	inode   uint64
+	regular bool
 }
 
 func (i ident) String() string { return fmt.Sprintf("%d:%d", i.device, i.inode) }
+
+// Two idents are the same object when device and inode agree; the type is
+// carried, not compared.
+func (i ident) same(other ident) bool {
+	return i.device == other.device && i.inode == other.inode
+}
 
 func stat(path string) (ident, error) {
 	var st unix.Stat_t
 	if err := unix.Stat(path, &st); err != nil {
 		return ident{}, err
 	}
-	return ident{device: uint64(st.Dev), inode: st.Ino}, nil
+	return ident{
+		device:  uint64(st.Dev),
+		inode:   st.Ino,
+		regular: st.Mode&unix.S_IFMT == unix.S_IFREG,
+	}, nil
 }
 
 // overlayOptions compares the mounted overlay with the description the

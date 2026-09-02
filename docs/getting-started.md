@@ -228,6 +228,20 @@ server is asked to leave and the composition goes. Move tmux outside as
 above. A second pane of that tmux is a process outside the session and
 sees the plain directory, like every other process started outside.
 
+To give that second pane the composed tree, join the running session:
+
+```
+camp shell --join               # a shell inside the running session
+camp run --join -- <command>    # one command inside it
+```
+
+`--join` is camp's `docker exec`: it finds the session running for this
+configuration, enters its namespaces and hands you the tree, building and
+locking nothing. It needs `nsenter`, from the `util-linux` package. A
+joined shell is a visitor — its own exit does not end the session, and
+when the session ends it ends too. Run it from a terminal that is not
+already inside a session.
+
 To end a session you cannot reach, send `SIGTERM` to camp's own process,
 the one resident as the session's first: it reaches the shell or command
 inside, whose exit ends the session the same way. If you do not know its

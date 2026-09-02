@@ -18,16 +18,24 @@ import (
 // needs no privilege and leaves nothing behind.
 func cmdRun(ctx *context, args []string) error {
 	set, file := flagsFor("run")
+	join := set.Bool("join", false, "run the command inside a session already running for this configuration")
 	if err := set.Parse(args); err != nil {
 		return wrap(err, ExitUsage, "")
+	}
+	if *join {
+		return enterJoined(ctx, *file, set.Args())
 	}
 	return enter(ctx, *file, set.Args())
 }
 
 func cmdShell(ctx *context, args []string) error {
 	set, file := flagsFor("shell")
+	join := set.Bool("join", false, "open the shell inside a session already running for this configuration")
 	if err := set.Parse(args); err != nil {
 		return wrap(err, ExitUsage, "")
+	}
+	if *join {
+		return enterJoined(ctx, *file, nil)
 	}
 	return enter(ctx, *file, nil)
 }

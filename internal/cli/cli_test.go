@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dlaszlo/camp/internal/cli"
 	"github.com/dlaszlo/camp/internal/compose"
@@ -69,7 +70,59 @@ func TestMain(m *testing.M) {
 	if source := os.Getenv(insideEnv); source != "" {
 		os.Exit(shellFromInside(source))
 	}
+	// A read-only command asked to run from inside a session: it runs
+	// cli.Main with the arguments the env var carries and reports what each
+	// stream received, so a test can prove that explain and status answer
+	// from inside rather than refusing on the overlay's non-empty root.
+	if spec := os.Getenv(insideCmdEnv); spec != "" {
+		var args []string
+		json.Unmarshal([]byte(spec), &args)
+		var out, errOut bytes.Buffer
+		code := cli.Main(args, &out, &errOut)
+		encoded, _ := json.Marshal(cmdReport{Code: code, Stdout: out.String(), Stderr: errOut.String()})
+		os.Stdout.Write(encoded)
+		os.Exit(0)
+	}
+	if root := os.Getenv(insideDeferredEnv); root != "" {
+		os.Exit(deferredInside(root))
+	}
 	os.Exit(m.Run())
+}
+
+// insideCmdEnv carries a JSON argument vector into a read-only command run
+// inside a session, for the explain/status-from-inside tests.
+const insideCmdEnv = "CAMP_CLI_CMD_FROM_INSIDE"
+
+// insideDeferredEnv names an environment root whose session workload waits
+// for a trigger before running a command, so a test can change something
+// under a running session and then have the session report it. It writes
+// "ready" when it starts, waits for "trigger", runs the JSON args in "cmd",
+// writes the report to "report", and exits (ending the session).
+const insideDeferredEnv = "CAMP_CLI_DEFERRED_FROM_INSIDE"
+
+func deferredInside(root string) int {
+	os.WriteFile(filepath.Join(root, "ready"), nil, 0o644)
+	for {
+		if _, err := os.Stat(filepath.Join(root, "trigger")); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	spec, _ := os.ReadFile(filepath.Join(root, "cmd"))
+	var args []string
+	json.Unmarshal(spec, &args)
+	var out, errOut bytes.Buffer
+	code := cli.Main(args, &out, &errOut)
+	encoded, _ := json.Marshal(cmdReport{Code: code, Stdout: out.String(), Stderr: errOut.String()})
+	os.WriteFile(filepath.Join(root, "report"), encoded, 0o644)
+	return 0
+}
+
+// cmdReport is what such a command sends back.
+type cmdReport struct {
+	Code   int    `json:"code"`
+	Stdout string `json:"stdout"`
+	Stderr string `json:"stderr"`
 }
 
 // run invokes a command the way a terminal does, and returns what each
@@ -531,4 +584,306 @@ func TestEnteringFromInsideIsRefusedBeforeAnythingSweeps(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(built.Work, "work")); err != nil {
 		t.Errorf("the running session's own work directory is gone: %v", err)
 	}
+}
+
+// runInsideSession starts a real session whose workload runs one cli
+// command and returns what that command reported. It skips where the
+// machine refuses the namespace, the way the session tests do.
+func runInsideSession(t *testing.T, env *testenv.Env, cfg config.Config, args []string) cmdReport {
+	t.Helper()
+	built, refused := plan.Prepare(cfg)
+	if !refused.Empty() {
+		t.Fatalf("the fixture was refused:\n%v", refused)
+	}
+	if err := compose.Directories(built); err != nil {
+		t.Fatal(err)
+	}
+	if _, problems := gen.Prepare(built); !problems.Empty() {
+		t.Fatalf("generation was refused:\n%v", problems)
+	}
+	repo, ok := cfg.Repository(cfg.Upper)
+	if !ok {
+		t.Fatal("the fixture names no upper")
+	}
+	pair, err := locks.TakePair(cfg.Env, repo.Path.Components(), cfg.Merged.Components(),
+		cfg.UpperPath(), cfg.Live())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pair.Release)
+
+	stdin, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	stdout, err := os.Create(filepath.Join(testenv.Root(t), "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdout.Close()
+
+	spec, _ := json.Marshal(args)
+	t.Setenv(insideCmdEnv, string(spec))
+	status, err := session.Launch(session.Options{
+		Config: cfg, Argv: []string{os.Args[0]}, Locks: pair,
+		Stdin: stdin, Stdout: stdout, Stderr: os.Stderr,
+	})
+	if err != nil {
+		var single refusal.R
+		if errors.As(err, &single) && single.Rule == "namespace-denied" ||
+			strings.Contains(err.Error(), "unprivileged_userns") ||
+			strings.Contains(err.Error(), "operation not permitted") ||
+			strings.Contains(err.Error(), "permission denied") {
+			t.Skipf("this binary may not create a user namespace: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if status != 0 {
+		t.Fatalf("the workload exited %d", status)
+	}
+	data, err := os.ReadFile(stdout.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report cmdReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("the command's report did not parse: %v\n%s", err, data)
+	}
+	return report
+}
+
+// explain is meant to answer from inside a session -- ENVIRONMENT.md sends
+// a reader there for it, and the join makes being inside ordinary. It used
+// to refuse, because the live-must-be-empty check fires against the
+// overlay's own root, which is never empty. From inside, that one refusal
+// is expected and does not stop the description.
+func TestExplainAnswersFromInsideASession(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+	report := runInsideSession(t, env, cfg, []string{"explain", "-f", cfg.Source})
+	if report.Code != 0 {
+		t.Fatalf("explain refused from inside a session (exit %d):\n%s",
+			report.Code, report.Stderr)
+	}
+	if !strings.Contains(report.Stdout, "You are in "+cfg.Live()) {
+		t.Errorf("explain did not describe the tree from inside:\n%s", report.Stdout)
+	}
+}
+
+// status answers from inside a session too, and runs the drift pass so a
+// reader can ask what has gone stale under a running session. A clean
+// session reports up and finds no drift.
+func TestStatusAnswersFromInsideASession(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+	report := runInsideSession(t, env, cfg, []string{"status", "-f", cfg.Source})
+	if report.Code != 0 {
+		t.Fatalf("status did not answer cleanly from inside a session (exit %d):\n%s",
+			report.Code, report.Stderr)
+	}
+	if !strings.Contains(report.Stdout, "up: every mount the configuration plans is present") {
+		t.Errorf("status did not report the session up from inside:\n%s", report.Stdout)
+	}
+}
+
+// status runs the drift pass, so a change made under a running session is
+// reported mid-session and not only at its end. The session starts clean;
+// then a new workspace root entry is born outside it -- the residue §4
+// names -- and status from inside names it and says the next start absorbs
+// it. The change has to happen after the session is up, so the workload
+// waits for a trigger and runs status only then.
+func TestStatusReportsAChangeMadeUnderTheSession(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+	report := statusAfterMutation(t, env, cfg, func() {
+		// A new entry at the workspace root, born outside the running
+		// session -- the residue §4 names.
+		testenv.Write(t, filepath.Join(env.Workspace, "surprise.txt"), "born mid-session\n")
+	})
+	if report.Code == 0 {
+		t.Fatalf("status reported nothing wrong though a workspace entry was born "+
+			"under the session:\n%s", report.Stdout)
+	}
+	if !strings.Contains(report.Stdout, "surprise.txt") {
+		t.Errorf("the drift pass did not name the new workspace entry:\n%s", report.Stdout)
+	}
+	// The true repair: a new root entry is not absorbed by a restart, the
+	// next start refuses it until it is accepted.
+	if !strings.Contains(report.Stderr, "camp accept") {
+		t.Errorf("status did not name 'camp accept' as the repair:\n%s", report.Stderr)
+	}
+	// And a file born at the workspace root was never bound, so it is not a
+	// replaced bind source: the plan derived now has a guard for it and no
+	// mount stands there, which is a different fact.
+	if strings.Contains(report.Stdout, "replaced at its source") ||
+		strings.Contains(report.Stdout, "replaced at their source") {
+		t.Errorf("a new workspace file was reported as a replaced bind source:\n%s",
+			report.Stdout)
+	}
+}
+
+// A configuration edited under the session into one that would now be
+// refused -- here a declaration naming a variable this terminal does not
+// have -- is not "up": status reports the refusal and exits non-zero,
+// however sound the mounted tree is.
+func TestStatusReportsAConfigurationThatWouldNowBeRefused(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+	report := statusAfterMutation(t, env, cfg, func() {
+		testenv.Write(t, cfg.Source, env.YAML()+
+			"\nsession:\n  environment:\n    LATER: \"$CAMP_TEST_SURELY_UNDEFINED_NAME\"\n")
+	})
+	if report.Code == 0 {
+		t.Fatalf("status said up while the configuration would be refused:\n%s", report.Stdout)
+	}
+	if !strings.Contains(report.Stdout, "would be refused") ||
+		!strings.Contains(report.Stdout, "CAMP_TEST_SURELY_UNDEFINED_NAME") {
+		t.Errorf("status did not report the standing refusal:\n%s", report.Stdout)
+	}
+}
+
+// The generated exclude is checked byte for byte against the payload the
+// configuration derives now. An exclude edited in the raw code repository
+// changes that payload while the session keeps showing the one it mounted,
+// and status has to say so rather than report up.
+func TestStatusNoticesAnExcludeEditedInTheRawUpper(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+	report := statusAfterMutation(t, env, cfg, func() {
+		path := filepath.Join(env.Code, ".git", "info", "exclude")
+		existing, _ := os.ReadFile(path)
+		testenv.Write(t, path, string(existing)+"/edited-outside\n")
+	})
+	if report.Code == 0 {
+		t.Fatalf("status said up while the mounted exclude no longer matches the "+
+			"payload the configuration derives:\n%s", report.Stdout)
+	}
+	if !strings.Contains(report.Stdout, "does not contain the payload camp generated") {
+		t.Errorf("status did not report the exclude mismatch:\n%s", report.Stdout)
+	}
+}
+
+// A file bind pins one inode, so a root file replaced at its source while
+// the session runs -- how an editor saves, by rename -- leaves the tree
+// showing the old one. status's verification pass tells this apart from a
+// mount that did not take, with its own rule and repair (§4).
+func TestStatusReportsAReplacedRootFile(t *testing.T) {
+	env := testenv.NewEnv(t)
+	cfg := env.Config(t, "")
+	report := statusAfterMutation(t, env, cfg, func() {
+		// Replace CLAUDE.md by rename, the way an editor saves: a new inode
+		// at the same name. The bind still shows the old one.
+		next := filepath.Join(env.Workspace, "CLAUDE.md.new")
+		testenv.Write(t, next, "a replacement, saved outside\n")
+		if err := os.Rename(next, filepath.Join(env.Workspace, "CLAUDE.md")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if report.Code == 0 {
+		t.Fatalf("status reported nothing wrong though a bound root file was "+
+			"replaced under the session:\n%s", report.Stdout)
+	}
+	if !strings.Contains(report.Stdout, "bind-source-replaced") &&
+		!strings.Contains(report.Stdout, "replaced at their source") &&
+		!strings.Contains(report.Stdout, "replaced at its source") {
+		t.Errorf("status did not report the replaced file bind as its own case:\n%s",
+			report.Stdout)
+	}
+}
+
+// statusAfterMutation starts a clean session, runs mutate() once it is up,
+// then has the session's own workload run 'camp status' and return what it
+// reported. It skips where the machine refuses the namespace.
+func statusAfterMutation(t *testing.T, env *testenv.Env, cfg config.Config, mutate func()) cmdReport {
+	t.Helper()
+
+	built, refused := plan.Prepare(cfg)
+	if !refused.Empty() {
+		t.Fatalf("the fixture was refused:\n%v", refused)
+	}
+	if err := compose.Directories(built); err != nil {
+		t.Fatal(err)
+	}
+	if _, problems := gen.Prepare(built); !problems.Empty() {
+		t.Fatalf("generation was refused:\n%v", problems)
+	}
+	repo, _ := cfg.Repository(cfg.Upper)
+	pair, err := locks.TakePair(cfg.Env, repo.Path.Components(), cfg.Merged.Components(),
+		cfg.UpperPath(), cfg.Live())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	spec, _ := json.Marshal([]string{"status", "-f", cfg.Source})
+	if err := os.WriteFile(filepath.Join(env.Path, "cmd"), spec, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	quiet, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer quiet.Close()
+
+	t.Setenv(insideDeferredEnv, env.Path)
+	done := make(chan error, 1)
+	go func() {
+		_, err := session.Launch(session.Options{
+			Config: cfg, Argv: []string{os.Args[0]}, Locks: pair,
+			Stdin: quiet, Stdout: quiet, Stderr: os.Stderr,
+		})
+		done <- err
+	}()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(env.Path, "ready")); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			var single refusal.R
+			if errors.As(err, &single) && single.Rule == "namespace-denied" ||
+				strings.Contains(errString(err), "unprivileged_userns") ||
+				strings.Contains(errString(err), "operation not permitted") ||
+				strings.Contains(errString(err), "permission denied") {
+				pair.Release()
+				t.Skipf("this binary may not create a user namespace: %v", err)
+			}
+			pair.Release()
+			t.Fatalf("the session ended before its workload ran: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			pair.Release()
+			t.Fatal("the workload had not started after 20s")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	mutate()
+	if err := os.WriteFile(filepath.Join(env.Path, "trigger"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("the session failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(env.Path, "report"))
+	if err != nil {
+		t.Fatalf("the deferred status wrote no report: %v", err)
+	}
+	var report cmdReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("the report did not parse: %v\n%s", err, data)
+	}
+	return report
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

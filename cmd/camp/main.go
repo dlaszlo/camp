@@ -29,5 +29,15 @@ func main() {
 		return
 	}
 
+	// The joined process: this same binary, execed by nsenter inside a
+	// session it has already entered. Answered here, before any flag
+	// parsing or configuration discovery, for the same reason as the init:
+	// it has one job -- become the shell or command inside the session --
+	// and nothing may run before it.
+	if len(os.Args) > 1 && os.Args[1] == session.JoinedArg {
+		session.JoinedMain(os.Args[2:])
+		return
+	}
+
 	os.Exit(cli.Main(os.Args[1:], os.Stdout, os.Stderr))
 }

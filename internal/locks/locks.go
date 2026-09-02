@@ -348,7 +348,7 @@ func descriptorHolders(path string, st unix.Stat_t) []Holder {
 		if err != nil {
 			continue
 		}
-		if !holdsDescriptorFor(pid, st) {
+		if !HoldsOpen(pid, pathx.Identity{Device: uint64(st.Dev), Inode: st.Ino}) {
 			continue
 		}
 		holders = append(holders, Holder{PID: pid, Command: nsx.Command(pid), Init: nsx.IsInit(pid)})
@@ -357,11 +357,17 @@ func descriptorHolders(path string, st unix.Stat_t) []Holder {
 	return holders
 }
 
-// holdsDescriptorFor reports whether a process has this exact directory
-// open, compared by device and inode rather than by the descriptor's
-// symlink text -- the same directory is reachable by more than one name,
-// and a lock is on the inode.
-func holdsDescriptorFor(pid int, st unix.Stat_t) bool {
+// HoldsOpen reports whether a process has this exact object open, compared
+// by device and inode rather than by the descriptor's symlink text -- the
+// same directory is reachable by more than one name, and a lock is on the
+// inode.
+//
+// Two callers ask it: the refusal that names a lock's holder, and the join,
+// which asks whether a candidate init holds descriptors to the directories
+// now at the configuration's upper and live paths -- the init's lock
+// descriptors are the one fact about which upper it composes that a
+// rename-and-replace at the pathname cannot forge.
+func HoldsOpen(pid int, ident pathx.Identity) bool {
 	directory := fmt.Sprintf("/proc/%d/fd", pid)
 	entries, err := os.ReadDir(directory)
 	if err != nil {
@@ -372,7 +378,7 @@ func holdsDescriptorFor(pid int, st unix.Stat_t) bool {
 		if err := unix.Stat(filepath.Join(directory, entry.Name()), &open); err != nil {
 			continue
 		}
-		if open.Dev == st.Dev && open.Ino == st.Ino {
+		if uint64(open.Dev) == ident.Device && open.Ino == ident.Inode {
 			return true
 		}
 	}

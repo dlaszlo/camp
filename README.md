@@ -127,8 +127,23 @@ work` reaches it from any terminal. `camp run -- tmux new-session -d` no
 longer leaves a server behind: the tmux client exits at once, the server
 is asked to end, and the composition goes with it. A second pane of that
 tmux does not see the composed tree — it is a process outside the
-session, like every other — and today nothing reaches a running session's
-tree from a second terminal.
+session, like every other.
+
+**A second terminal in the same tree** — `camp shell --join`, camp's
+`docker exec`:
+
+```
+camp shell --join                 # a shell in the running session
+camp run --join -- <command>      # one command in it
+```
+
+It finds the running session for this configuration, enters its
+namespaces and gives you the composed tree — building, mounting and
+locking nothing. It is the only way a second terminal reaches the tree,
+and it needs `nsenter` (the `util-linux` package, present on every
+Debian-derived system). A joined shell is a visitor: its own exit does
+not end the session, and when the session ends it goes with it. Run it
+from a terminal that is *not* already inside a session.
 
 **A program has to be started inside the session to see the tree.** That
 includes your editor: start it with `camp run -- <editor>`, or from a
@@ -414,7 +429,8 @@ handle`. Inside a session the repository's own path is bound read-only,
 so a process inside that names it meets `EROFS` instead. Outside, camp
 can guard nothing: an editor started from the desktop, a cron job, a
 second terminal all write the raw path freely, with exactly that effect.
-End the session first. Relatedly, a *directory* bound into the tree
+End the session first, or reach the tree from that second terminal with
+`camp shell --join` instead of writing the raw path. Relatedly, a *directory* bound into the tree
 (`.workspace/`, an islands directory) is a live view, but a *single file*
 bound into it (a root file such as `CLAUDE.md`, an island file) is pinned
 to the inode that existed when the session started, and a replacement
